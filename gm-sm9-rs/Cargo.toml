@@ -1,0 +1,54 @@
+[package]
+rust-version = "1.85"
+name = "gm-sm9-rs"
+version = "0.1.0"
+edition = "2024"
+authors = ["Eric Zhang"]
+license = "MIT OR Apache-2.0"
+description = "国密SM9标识密码算法实现 - Identity-Based Cryptography (pure-Rust with optional GmSSL FFI backend)"
+repository = "https://github.com/GM-Engineers/gm"
+keywords = ["sm9", "identity-based", "ibc", "gm", "cryptography"]
+categories = ["cryptography"]
+readme = "README.md"
+
+[features]
+default = ["pure-rust"]
+# New pure Rust implementation (in development)
+pure-rust = []
+# Use GmSSL FFI backend (requires GmSSL 3.1.1 installed)
+gmssl = ["dep:libc"]
+
+[dependencies]
+gm-der = { path = "../gm-der", version = "0.1.0" }
+gm-crypto = { path = "../gm-crypto", default-features = false, version = "0.1.0" }
+
+# FFI support (gmssl feature only)
+libc = { version = "0.2", optional = true }
+
+# Hash functions
+sm3 = "0.4"
+once_cell = "1"
+digest = "0.10"
+
+# Error handling
+thiserror = "2"
+
+# Random number generation
+rand = "0.10"
+
+# For constant-time operations
+subtle = "2.6"
+
+# Secure memory clearing
+zeroize = { version = "1.7", features = ["derive"] }
+
+# For testing
+hex = "0.4"
+
+[build-dependencies]
+pkg-config = "0.3"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+

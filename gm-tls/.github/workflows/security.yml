@@ -1,0 +1,95 @@
+name: Security Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  cargo-deny:
+    name: License and Security Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install cargo-deny
+        uses: taiki-e/cargo-deny-action@v1
+        with:
+          command: check
+          arguments: --hide-inclusion-graph
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run tests
+        run: cargo test --all-features --workspace
+
+      - name: Run clippy
+        run: cargo clippy --all-features -- -D warnings
+
+      - name: Run rustfmt
+        run: cargo fmt --check
+
+  fuzz-build:
+    name: Fuzz Targets Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Build fuzz targets
+        run: cargo build --manifest-path fuzz/Cargo.toml
+
+      - name: Check fuzz targets compile
+        run: cargo check --manifest-path fuzz/Cargo.toml
+
+  bench:
+    name: Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run benchmarks
+        run: cargo bench --workspace -- --baseline-dir benches/baselines
+        env:
+          RUSTFLAGS: --cfg termwide
+
+  dependency-check:
+    name: Dependency Update Check
+    runs-on: ubuntu-latest
+    # Run weekly on Sunday
+    schedule:
+      - cron: '0 0 * * 0'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check outdated dependencies
+        run: cargo outdated --root-deps-only --color always || true
+        continue-on-error: true

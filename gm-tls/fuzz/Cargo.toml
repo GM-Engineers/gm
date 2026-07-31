@@ -1,0 +1,51 @@
+[package]
+authors = ["Eric Zhang"]
+name = "gm_tls_fuzz"
+version = "0.1.0"
+edition = "2024"
+# cargo-fuzz dev tooling — never published to crates.io; stays in repo as
+# source to demonstrate test-coverage completeness.
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+
+[dependencies]
+gm-tls = { path = ".." }
+gm-crypto = { path = "../../gm-crypto" }
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1.4", features = ["derive"] }
+tokio = { version = "1", features = ["rt"] }
+time = "0.3"
+sm2 = { version = "0.13", features = ["dsa", "arithmetic"] }
+elliptic-curve = "0.13"
+subtle = "2"
+generic-array = "0.14"
+
+[profile.release]
+opt-level = 3
+
+[[bin]]
+name = "session_ticket_fuzz"
+path = "fuzz_targets/session_ticket_fuzz.rs"
+
+[[bin]]
+name = "key_exchange"
+path = "fuzz_targets/key_exchange.rs"
+
+[[bin]]
+name = "cert_parse"
+path = "fuzz_targets/cert_parse.rs"
+
+[[bin]]
+name = "handshake_parse"
+path = "fuzz_targets/handshake_parse.rs"
+
+[[bin]]
+name = "kdf_fuzz"
+path = "fuzz_targets/kdf_fuzz.rs"
+
+[[bin]]
+name = "tls_record_parse"
+path = "fuzz_targets/tls_record_parse.rs"

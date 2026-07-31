@@ -1,0 +1,47 @@
+# Git
+.git
+.gitignore
+
+# Rust build artifacts
+target/
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets and config
+.env
+.env.*
+!.env.example
+ca_key.pem
+*.key
+*.pem
+!certs/*.pem
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# Tests and evaluation
+tests/
+evaluation/
+
+# Local development
+Dockerfile.local
+docker-compose.override.yml
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+
+# Temporary files
+*.tmp
+*.log

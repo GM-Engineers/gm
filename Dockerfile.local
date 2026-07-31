@@ -1,0 +1,9 @@
+# Minimal runtime using locally-built binary
+FROM alpine:3.19
+WORKDIR /app
+RUN apk add --no-cache ca-certificates openssl
+COPY target/release/gm-ca-server /app/gm-ca-server
+RUN mkdir -p /app/data && chown -R nobody:nobody /app
+USER nobody
+EXPOSE 50051
+CMD ["./gm-ca-server"]

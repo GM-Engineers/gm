@@ -1,0 +1,15 @@
+[package]
+authors = ["Eric Zhang"]
+name = "gm-der"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "ASN.1 DER encoding/decoding primitives for GM (国密) cryptography"
+rust-version = "1.85"
+repository = "https://github.com/GM-Engineers/gm"
+keywords = ["der", "asn1", "gm", "cryptography", "encoding"]
+categories = ["cryptography", "encoding"]
+readme = "README.md"
+
+[dependencies]
+thiserror = "2"

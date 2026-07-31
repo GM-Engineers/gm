@@ -1,0 +1,56 @@
+# Build artifacts
+/target/
+**/target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+.env.*.local
+.env.test
+docker/docker-compose.override.yml
+*.log
+
+# Certificates and keys (never commit these)
+*.pem
+!*.example.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+ca_key.pem
+ca_key_test.pem
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test coverage
+*.prof
+*.sym
+*.pdb
+
+# Fuzz testing outputs (cargo-fuzz creates corpus, artifacts in project root)
+**/fuzz/**/corpus/
+**/fuzz/**/artifacts/
+**/fuzz/**/crash-*
+**/fuzz/**/*.options
+**/fuzz/**/*.launcher
+**/fuzz/**/target/
+
+# docs output (generated)
+docs/book/
+
+/evaluation/
+
+# SBOM (regenerate with: cargo cyclonedx --format json)
+*.cdx.json
+
+# Cargo.lock — library workspace; consumers resolve their own versions, so not committed
+Cargo.lock

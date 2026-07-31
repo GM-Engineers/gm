@@ -1,0 +1,20 @@
+[package]
+authors = ["Eric Zhang"]
+rust-version = "1.85"
+name = "gm-http-client"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "GM/HTTP-Client - HTTP client with GM/TLS support"
+repository = "https://github.com/GM-Engineers/gm"
+keywords = ["http", "gm-tls", "tls", "gm", "client"]
+categories = ["network-programming", "cryptography"]
+readme = "README.md"
+
+[dependencies]
+gm-tls = { path = "../gm-tls", version = "0.1.0" }
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+tokio-test = "0.4"

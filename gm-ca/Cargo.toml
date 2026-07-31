@@ -1,0 +1,52 @@
+[package]
+authors = ["Eric Zhang"]
+rust-version = "1.85"
+name = "gm-ca"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "GM/CA - Generic CA service for SM2 certificates"
+repository = "https://github.com/GM-Engineers/gm"
+keywords = ["ca", "certificate", "sm2", "pki", "gm"]
+categories = ["cryptography"]
+readme = "README.md"
+
+[[bin]]
+name = "gm-ca-server"
+path = "src/main.rs"
+
+[dependencies]
+gm-der = { path = "../gm-der", version = "0.1.0" }
+gm-crypto = { path = "../gm-crypto", version = "0.1.0" }
+gm-tls = { path = "../gm-tls", features = ["grpc"], version = "0.1.0" }
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tonic = { version = "0.14" }
+tonic-health = "0.14"
+tonic-prost = "0.14"
+prost = "0.14"
+prost-types = "0.14"
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "sqlite", "any", "time", "chrono"] }
+chrono = "0.4"
+time = { version = "0.3", features = ["serde"] }
+x509-parser = { version = "0.16", features = ["verify"] }
+pem = "3"
+thiserror = "2"
+hex = "0.4"
+rand = "0.10"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+subtle = "2"
+zeroize = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3"
+elliptic-curve = "0.13"
+asn1 = "0.17"
+
+[build-dependencies]
+tonic-build = { version = "0.14", features = ["transport"] }
+tonic-prost-build = "0.14"

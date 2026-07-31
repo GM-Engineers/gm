@@ -1,0 +1,7 @@
+# Cargo audit configuration
+# Known issues that have no fix available
+
+[advisories]
+ignore = [
+    "RUSTSEC-2023-0071",  # RSA Marvin Attack - no fix available for sqlx-mysql indirect dep
+]

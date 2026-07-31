@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = [
+    "gm-der",
+    "gm-crypto",
+    "gm-sm9-rs",
+    "gm-tls",
+    "gm-tls/fuzz",
+    "gm-ca",
+    "gm-http-client",
+]
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

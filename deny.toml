@@ -1,0 +1,70 @@
+# cargo-deny configuration for GM project
+# Run: cargo deny check
+# SBOM generation: cargo deny list --format=cyclonedx > sbom.xml
+# Migrated to v2 format (cargo-deny 0.18+): https://github.com/EmbarkStudios/cargo-deny/pull/611
+
+[graph]
+targets = [
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-unknown-linux-gnu" },
+]
+
+[advisories]
+version = 2
+# Advisory database settings
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+
+# Ignore low-risk advisories
+ignore = [
+    # RUSTSEC-2026-0190: anyhow Error::downcast_mut unsound
+    #   only affects code calling downcast_mut(); gm does not use this API
+    "RUSTSEC-2026-0190",
+    # RUSTSEC-2023-0089: atomic-polyfill unmaintained
+    #   only used in test code; no production impact
+    "RUSTSEC-2023-0089",
+    # RUSTSEC-2026-0097: rand unsound with custom logger
+    #   transitive dep via sqlx/rsa; no direct use of rand::rng()
+    "RUSTSEC-2026-0097",
+]
+
+[licenses]
+version = 2
+# Allowlist: only these licenses are permitted
+# Dual-licensed crates (MIT OR Apache-2.0) are allowed since both are listed
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "NCSA",
+    "Unlicense",
+    "Zlib",
+    "Unicode-3.0",
+    "BSL-1.0",
+]
+
+# Per-crate license exceptions: handle non-standard compound expressions
+[[licenses.exceptions]]
+name = "ring"
+allow = ["MIT", "ISC", "OpenSSL"]
+
+[bans]
+# Allow multiple versions of transitive dependencies
+multiple-versions = "warn"
+# Crates to always deny (none specified)
+deny = []
+# Skip certain version checks
+skip = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = []
+
+[output]
+feature-depth = 1

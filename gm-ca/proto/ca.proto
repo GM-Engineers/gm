@@ -1,0 +1,73 @@
+syntax = "proto3";
+
+package gm.ca.v1;
+
+service CaService {
+    rpc SignCertificate(SignCertificateRequest) returns (SignCertificateResponse);
+    rpc RenewCertificate(RenewCertificateRequest) returns (RenewCertificateResponse);
+    rpc RevokeCertificate(RevokeCertificateRequest) returns (RevokeCertificateResponse);
+    rpc GetCertificate(GetCertificateRequest) returns (GetCertificateResponse);
+    rpc GetCrl(GetCrlRequest) returns (GetCrlResponse);
+}
+
+message SignCertificateRequest {
+    string csr_pem = 1;
+    int64 validity_days = 2;
+}
+
+message SignCertificateResponse {
+    string certificate_pem = 1;
+    string error_code = 2;
+    string error_message = 3;
+}
+
+message RenewCertificateRequest {
+    string serial_number = 1;
+    int64 validity_days = 2;
+}
+
+message RenewCertificateResponse {
+    string certificate_pem = 1;
+    string error_code = 2;
+    string error_message = 3;
+}
+
+message RevokeCertificateRequest {
+    string serial_number = 1;
+    int32 reason = 2;
+}
+
+message RevokeCertificateResponse {
+    bool success = 1;
+    string error_code = 2;
+    string error_message = 3;
+}
+
+message GetCertificateRequest {
+    string serial_number = 1;
+}
+
+message GetCertificateResponse {
+    string certificate_pem = 1;
+    string issuer = 2;
+    string not_before = 3;
+    string not_after = 4;
+    string status = 5;
+    string error_code = 6;
+    string error_message = 7;
+}
+
+message GetCrlRequest {
+    string issuer_cn = 1;
+}
+
+message GetCrlResponse {
+    bytes crl_der = 1;
+    string error_code = 2;
+    string error_message = 3;
+}
+
+message CaError {
+    string code = 1;
+    string message = 2;
+}

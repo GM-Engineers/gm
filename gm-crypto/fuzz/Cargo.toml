@@ -1,0 +1,23 @@
+[package]
+authors = ["Eric Zhang"]
+name = "gm_crypto_fuzz"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+gm-crypto = { path = ".." }
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1.4", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+
+[[bin]]
+name = "crypto_primitives"
+path = "fuzz_targets/crypto_primitives.rs"

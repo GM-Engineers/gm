@@ -1,0 +1,3 @@
+-- PostgreSQL initialization script
+-- The gm_ca database and tables are created automatically by the application
+-- via sqlx migrations on first startup.

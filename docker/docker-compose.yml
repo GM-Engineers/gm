@@ -1,0 +1,82 @@
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: gm-ca-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: gm_ca
+    # Do not expose PostgreSQL port to host in production
+    # Uncomment below for local development only
+    # ports:
+    #   - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d gm_ca"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - gm-internal
+
+  redis:
+    image: redis:7
+    container_name: gm-redis
+    command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
+    # Do not expose Redis port to host in production
+    # Uncomment below for local development only
+    # ports:
+    #   - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - gm-internal
+
+  gm-ca-server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: gm-ca-server
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/gm_ca
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      CA_KEY_PATH: /app/data/ca_key.pem
+      CA_SUBJECT_CN: ${CA_SUBJECT_CN:-GM CA}
+      CA_AUTH_TOKEN: ${CA_AUTH_TOKEN:?CA_AUTH_TOKEN must be set}
+      RUST_LOG: ${RUST_LOG:-info}
+    ports:
+      - "${CA_PORT:-50051}:50051"
+    volumes:
+      - ca_data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 50051"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - gm-internal
+
+networks:
+  gm-internal:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    name: docker_postgres_data
+  redis_data:
+    name: docker_redis_data
+  ca_data:

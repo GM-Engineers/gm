@@ -1,0 +1,19 @@
+[package]
+authors = ["Eric Zhang"]
+name = "gm_sm9_fuzz"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "sm9_primitives"
+path = "fuzz_targets/sm9_primitives.rs"
+
+[dependencies]
+gm-sm9-rs = { path = "..", features = ["pure-rust"] }
+gm-crypto = { path = "../../gm-crypto" }
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1.4", features = ["derive"] }
+rand = "0.10"

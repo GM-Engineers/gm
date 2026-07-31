@@ -1,0 +1,44 @@
+[package]
+rust-version = "1.85"
+name = "gm-crypto"
+version = "0.1.0"
+edition = "2024"
+authors = ["Eric Zhang"]
+license = "MIT OR Apache-2.0"
+description = "国密密码学算法库 - SM2/SM3/SM4"
+repository = "https://github.com/GM-Engineers/gm"
+keywords = ["sm2", "sm3", "sm4", "gm", "cryptography"]
+categories = ["cryptography"]
+readme = "README.md"
+
+[dependencies]
+gm-der = { path = "../gm-der", version = "0.1.0" }
+sm2 = { version = "0.13", features = ["dsa", "pkcs8", "arithmetic", "pem"] }
+sm3 = { version = "0.4" }
+sm4 = { version = "0.5" }
+time = "0.3"
+ghash = "0.5"
+ctr = "0.9"
+universal-hash = "0.5"
+hex = "0.4"
+base64 = { version = "0.22", features = ["alloc"] }
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2"
+typenum = "1"
+elliptic-curve = "0.13"
+rand = "0.10"
+rand_core = { version = "0.6", features = ["getrandom"] }
+subtle = "2.6"
+zeroize = { version = "1", features = ["derive"] }
+pem = "3.0"
+x509-parser = "0.16"
+signature = "2.2"
+pkcs8 = { version = "0.10", features = ["encryption", "pem"] }
+
+[dev-dependencies]
+tokio = { version = "1.0", features = ["full"] }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "sm_benchmarks"
+harness = false

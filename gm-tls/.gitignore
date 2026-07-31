@@ -1,0 +1,46 @@
+# Rust build artifacts
+/target
+**/target/
+Cargo.lock
+**/Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Coverage reports
+/coverage/
+*.profraw
+
+# Fuzzing
+fuzz/hangs/
+fuzz/corpus/
+
+# Temporary files
+*.tmp
+*.bak
+*.orig
+
+# Benchmarks results (keep baselines but ignore current)
+ benches/current/
+ benches/baselines/
+
+# Debug
+*.core
+*.dump
+
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*. leachate

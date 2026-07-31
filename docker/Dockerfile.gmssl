@@ -1,0 +1,47 @@
+# GmSSL 3.1.1 Docker image for TLS interoperability testing
+#
+# Build:
+#   docker build -f docker/Dockerfile.gmssl -t gmssl-test .
+#
+# Run GmSSL version:
+#   docker run --rm --env LD_LIBRARY_PATH=/usr/local/gmssl/lib gmssl-test gmssl version
+#
+# Generate test certificates (in /tmp/gmssl-test):
+#   docker run --rm --env LD_LIBRARY_PATH=/usr/local/gmssl/lib \
+#     -v /tmp/gmssl-test:/tmp/gmssl-test gmssl-test sh -c \
+#     "cd /tmp/gmssl-test && \
+#      gmssl sm2keygen -pass P@ssw0rd -out server.key && \
+#      gmssl certgen -days 365 -key server.key -pass P@ssw0rd -CN localhost \
+#        -serial_len 16 -out server.crt"
+#
+# Start GmSSL TLS 1.3 server:
+#   docker run --rm --env LD_LIBRARY_PATH=/usr/local/gmssl/lib \
+#     -v /tmp/gmssl-test:/tmp/gmssl-test -p 4433:4433 gmssl-test \
+#     gmssl tls13_server -port 4433 -cert /tmp/gmssl-test/server.crt \
+#     -key /tmp/gmssl-test/server.key -pass P@ssw0rd
+
+FROM debian:bookworm-slim
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    git \
+    wget \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Clone and build GmSSL v3.1.1 (master has bn.c compilation issue on GCC 12)
+RUN git clone https://github.com/guanzhi/GmSSL.git /tmp/GmSSL \
+    && cd /tmp/GmSSL \
+    && git checkout v3.1.1 \
+    && mkdir build && cd build \
+    && cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local/gmssl \
+    && make -j$(nproc) \
+    && make install \
+    && ldconfig \
+    && cd / && rm -rf /tmp/GmSSL
+
+ENV LD_LIBRARY_PATH=/usr/local/gmssl/lib
+RUN ln -s /usr/local/gmssl/bin/gmssl /usr/local/bin/gmssl
+CMD ["/usr/local/gmssl/bin/gmssl", "version"]
