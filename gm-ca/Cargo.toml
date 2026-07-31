@@ -29,7 +29,7 @@ prost-types = "0.14"
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "sqlite", "any", "time", "chrono"] }
 chrono = "0.4"
 time = { version = "0.3", features = ["serde"] }
-x509-parser = { version = "0.16", features = ["verify"] }
+x509-parser = { version = "0.18", features = ["verify"] }
 pem = "3"
 thiserror = "2"
 hex = "0.4"
