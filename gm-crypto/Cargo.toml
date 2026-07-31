@@ -37,7 +37,7 @@ pkcs8 = { version = "0.10", features = ["encryption", "pem"] }
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full"] }
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 [[bench]]
 name = "sm_benchmarks"
