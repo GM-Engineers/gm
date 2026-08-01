@@ -1,6 +1,6 @@
-# GM Cryptography & TLS
+# Chinese National Cryptography (GM) Algorithms & GM/TLS (TLCP)
 
-Pure Rust implementation of GM/T (National Cryptography Administration) cryptographic algorithms and TLS protocol stack, with full SM2/SM3/SM4 support.
+Pure Rust implementation of Chinese national cryptography (GM/T) algorithms and the GM/TLS (TLCP) protocol stack, with full SM2/SM3/SM4 support.
 
 **[中文版](./README.zh-CN.md)**
 
@@ -55,7 +55,7 @@ use gm_crypto::sm3::Sm3Hasher;
 use gm_crypto::sm4::Sm4Cipher;
 use gm_sm9_rs::{SignMasterKey, Signer, Verifier, EncMasterKey, Encryptor, Decryptor};
 
-// SM2/SM3/SM4
+// SM2/SM3/SM4 (SM2 includes key exchange)
 let key_pair = Sm2KeyPair::generate().unwrap();
 let signer = Sm2Signer::new(&key_pair).unwrap();
 let sig = signer.sign(b"Hello, GM!").unwrap();

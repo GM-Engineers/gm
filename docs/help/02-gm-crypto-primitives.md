@@ -1,4 +1,4 @@
-# GM 算法原语详解 / GM Algorithm Primitives Deep Dive
+# 国密算法原语详解 / National Cryptography Algorithm Primitives Deep Dive
 
 > 上次更新 / Last Updated: 2026-06-29
 > 文档版本 / Doc Version: 2026-05-21

@@ -1,6 +1,6 @@
-# GM 密码学与 TLS
+# 国密（GM）算法与 GM/TLS（TLCP）实现
 
-纯 Rust 实现的国密（GM/T）密码学算法和 TLS 协议栈，完整支持 SM2/SM3/SM4。
+纯 Rust 实现的国密（GM/T）密码算法与 GM/TLS（TLCP）协议栈，完整支持 SM2/SM3/SM4。
 
 **[English Version](./README.md)**
 
@@ -55,7 +55,7 @@ use gm_crypto::sm3::Sm3Hasher;
 use gm_crypto::sm4::Sm4Cipher;
 use gm_sm9_rs::{SignMasterKey, Signer, Verifier};
 
-// SM2/SM3/SM4
+// SM2/SM3/SM4（SM2 含密钥交换）
 let key_pair = Sm2KeyPair::generate().unwrap();
 let signer = Sm2Signer::new(&key_pair).unwrap();
 let sig = signer.sign(b"Hello, GM!").unwrap();

@@ -1,4 +1,4 @@
-# GM 项目架构总览 / GM Project Architecture Overview
+# gm 项目架构总览 / gm Project Architecture Overview
 
 > 上次更新 / Last Updated: 2026-06-29
 > 文档版本 / Doc Version: 2026-05-21
@@ -12,6 +12,7 @@
 ```
 gm/                          # Workspace root
 ├── gm-crypto/               # 密码原语库: SM2/SM3/SM4 / Cryptographic primitives: SM2/SM3/SM4
+├── gm-der/                  # DER/ASN.1 编解码（共享工具）/ DER/ASN.1 codec (shared utility)
 ├── gm-tls/                  # GM/TLS 协议栈 / GM/TLS protocol stack
 ├── gm-ca/                   # CA 服务 (gRPC) / CA service (gRPC)
 ├── gm-http-client/          # HTTPS 客户端 / HTTPS client
@@ -241,10 +242,13 @@ gm-sm9-rs/src/
 │  Random   Encrypted  Encrypted  (Dual  Secure           │
 │  source   storage    ops      keys)  erasure             │
 │                                                          │
-│  注意: SM2/Ed25519/RSA 密钥不直接用于加密，              │
-│        而用于密钥交换或签名                               │
-│  Note: SM2/Ed25519/RSA keys are not used directly for   │
-│        encryption, but for key exchange or signing       │
+│  注意: 本项目主要使用 SM2 密钥进行签名与密钥交换；       │
+│        SM2 公钥加密仅用于密钥封装（key encapsulation），  │
+│        不直接加密业务数据                                 │
+│  Note: In this project, SM2 keys are mainly used for     │
+│        signing and key exchange; SM2 public-key          │
+│        encryption is only used for key encapsulation,     │
+│        not for encrypting application data directly       │
 │                                                          │
 └──────────────────────────────────────────────────────────┘
 ```

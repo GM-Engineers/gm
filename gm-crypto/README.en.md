@@ -1,6 +1,6 @@
 # gm-crypto
 
-**GM Cryptography Library** — Pure Rust implementation of SM2/SM3/SM4 cryptographic primitives.
+**gm-crypto — SM2/SM3/SM4 (national cryptography) primitives** — Pure Rust implementation.
 
 **[中文版](./README.md)**
 

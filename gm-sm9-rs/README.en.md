@@ -1,4 +1,4 @@
-# GM-SM9: Chinese National Standard SM9 Identity-Based Cryptography
+# gm-sm9-rs: SM9 Identity-Based Cryptography (Chinese national standard GM/T 0044-2016)
 
 ## Features
 
@@ -10,11 +10,11 @@ This module implements the SM9 identity-based cryptographic algorithm defined in
 ## Architecture
 
 ```
-gm-sm9/
+gm-sm9-rs/
 ├── src/
 │   ├── lib.rs           # Library entry
 │   ├── params.rs        # SM9 standard curve parameters (GM/T 0044-2016)
-│   ├── z256.rs          # 256-bit integer arithmetic
+│   ├── z256/            # 256-bit integer arithmetic
 │   ├── field/           # Finite fields (Fp, Fp2, Fp4, Fp12)
 │   ├── curve/           # Elliptic curve points (G1, G2)
 │   ├── pairing/         # Bilinear pairing (R-ate)
@@ -41,7 +41,7 @@ gm-sm9/
 ## API Usage
 
 ```rust
-use gm_sm9::{Signer, Verifier, Encryptor, Decryptor, SignMasterKey, EncMasterKey};
+use gm_sm9_rs::{Signer, Verifier, Encryptor, Decryptor, SignMasterKey, EncMasterKey};
 use rand::thread_rng;
 
 // Generate the signing master key

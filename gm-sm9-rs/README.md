@@ -1,4 +1,4 @@
-# GM-SM9: 国密 SM9 标识密码算法
+# gm-sm9-rs: SM9 标识密码算法（国密 GM/T 0044-2016）
 
 **[English Version](./README.en.md)**
 
@@ -12,11 +12,11 @@
 ## 架构
 
 ```
-gm-sm9/
+gm-sm9-rs/
 ├── src/
 │   ├── lib.rs           # 库入口
 │   ├── params.rs        # SM9 标准曲线参数 (GM/T 0044-2016)
-│   ├── z256.rs          # 256位整数运算
+│   ├── z256/            # 256位整数运算
 │   ├── field/           # 有限域 (Fp, Fp2, Fp4, Fp12)
 │   ├── curve/           # 椭圆曲线点 (G1, G2)
 │   ├── pairing/         # 双线性配对 (R-ate)
@@ -43,7 +43,7 @@ gm-sm9/
 ## API 使用
 
 ```rust
-use gm_sm9::{Signer, Verifier, Encryptor, Decryptor, SignMasterKey, EncMasterKey};
+use gm_sm9_rs::{Signer, Verifier, Encryptor, Decryptor, SignMasterKey, EncMasterKey};
 use rand::thread_rng;
 
 // 生成签名主密钥

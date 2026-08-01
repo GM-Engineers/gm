@@ -1,4 +1,4 @@
-# GM Cryptography Project Deployment Guide
+# gm Project Deployment Guide
 
 > Last Updated: 2026-06-29
 > Version: 1.0 | Applicable to: gm-tls / gm-kms v0.1.0

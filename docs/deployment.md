@@ -1,4 +1,4 @@
-# GM 国密项目部署指南
+# gm 项目部署指南
 
 > 上次更新：2026-06-29
 > 英文版：[deployment.en.md](./deployment.en.md)
@@ -121,8 +121,8 @@ gm-ca sign --cn "client@example.com" \
 
 |协议|版本|说明|
 |--------------|-------------|----------|
-| TLCP | 0x0101 | 国密TLS，GM/T 38636-2020 |
-| GM/TLS 1.1 | 0x0101 | 国密TLS 1.1（与 TLCP 同版本号）|
+| TLCP | 0x0101 | 国密 TLCP 传输层密码协议（GB/T 38636-2020）|
+| GM/TLS 1.1 | 0x0101 | 本项目 GM/TLS 实现（与 TLCP 同版本号）|
 | TLS 1.3 | 0x0303 | 标准 TLS 1.3 |
 
 ---

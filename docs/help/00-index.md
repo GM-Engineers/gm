@@ -1,4 +1,4 @@
-# GM 国密项目技术文档索引 / GM Cryptography Project Technical Documentation Index
+# gm 项目（国密 GM/T 算法库）技术文档索引 / gm Project (Chinese National Cryptography GM/T) Technical Documentation Index
 
 > 上次更新 / Last Updated: 2026-06-29
 > 文档版本 / Doc Version: 2026-05-21
@@ -12,6 +12,7 @@
 ```
 gm/                          # Workspace root
 ├── gm-crypto/               # 密码原语库: SM2/SM3/SM4 / Cryptographic primitives: SM2/SM3/SM4
+├── gm-der/                  # DER/ASN.1 编解码（共享工具）/ DER/ASN.1 codec (shared utility)
 ├── gm-tls/                  # GM/TLS 协议栈 / GM/TLS protocol stack
 ├── gm-ca/                   # CA 服务 (gRPC) / CA service (gRPC)
 ├── gm-http-client/          # HTTPS 客户端 / HTTPS client
@@ -23,7 +24,7 @@ gm/                          # Workspace root
 | 编号 No. | 文档 Document | 内容 Content | 篇幅 Size |
 |---------|--------------|-------------|----------|
 | 01 | [项目架构总览 / Project Architecture Overview](01-architecture-overview.md) | 模块关系、依赖图、密钥生命周期、安全设计 / Module relationships, dependency graph, key lifecycle, security design | 中 / Medium |
-| 02 | [GM 算法原语详解 / GM Algorithm Primitives](02-gm-crypto-primitives.md) | SM2/SM3/SM4 算法原理、API、安全机制 / SM2/SM3/SM4 algorithm principles, API, security mechanisms | 大 / Large |
+| 02 | [国密算法原语详解 / National Cryptography Algorithm Primitives](02-gm-crypto-primitives.md) | SM2/SM3/SM4 算法原理、API、安全机制 / SM2/SM3/SM4 algorithm principles, API, security mechanisms | 大 / Large |
 | 03 | [gm-tls 协议实现 / gm-tls Protocol Implementation](03-gm-tls-protocol.md) | TLS 握手、记录层、密钥派生、证书验证 / TLS handshake, record layer, key derivation, certificate verification | 大 / Large |
 | 05 | [gm-ca 证书服务 / gm-ca Certificate Service](05-gm-ca-service.md) | CA 服务、证书签发/吊销、gRPC API / CA service, certificate issuance/revocation, gRPC API | 中 / Medium |
 | 06 | [gm-http-client](06-gm-http-client.md) | HTTPS 客户端、连接池、SSRF 防护 / HTTPS client, connection pool, SSRF protection | 小 / Small |
@@ -83,7 +84,7 @@ gm/
 
 | 术语 Chinese Term | 英文 English | 说明 Description |
 |-----------------|-------------|-----------------|
-| GM/T | GuoMi/Tongyong | 中国国家密码管理局标准 / China National Cryptography Administration Standard |
+| GM/T | GuoMi/Tuijianxing (recommended) | 国密推荐性标准（密码行业标准，由 OSCCA 发布）/ Chinese national recommended cryptographic standard (industry standard, issued by OSCCA) |
 | TLCP | Transport Layer Cryptography Protocol | 传输层密码协议 / Transport layer cryptography protocol |
 | IBC | Identity-Based Cryptography | 基于身份的密码学 / Identity-based cryptography |
 | KGC | Key Generation Center | 密钥生成中心 / Key generation center |

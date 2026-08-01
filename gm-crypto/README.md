@@ -1,6 +1,6 @@
 # gm-crypto
 
-**国密密码学算法库** — 纯 Rust 实现的 SM2/SM3/SM4 密码学原语。
+**国密算法库（gm-crypto）** — 纯 Rust 实现的 SM2/SM3/SM4 密码学原语。
 
 **[English Version](./README.en.md)**
 
