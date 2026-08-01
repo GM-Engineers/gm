@@ -447,8 +447,8 @@ mod sm2_e2e_cross {
         std::fs::write(&msg_path, message).expect("write message");
         std::fs::write(&sig_path, &sig_der).expect("write DER signature");
 
-        // 调用 GmSSL sm2verify
-        let output = Command::new("gmssl")
+        // 调用 GmSSL sm2verify（若 gmssl CLI 不存在则跳过本测试，与同模块其他 gmssl 测试一致）
+        let output = match Command::new("gmssl")
             .args([
                 "sm2verify",
                 "-pubkey",
@@ -460,7 +460,13 @@ mod sm2_e2e_cross {
             ])
             .stdin(std::fs::File::open(&msg_path).expect("open msg"))
             .output()
-            .expect("Failed to run gmssl sm2verify");
+        {
+            Ok(out) => out,
+            Err(_) => {
+                println!("SM2 Rust sign → GmSSL verify: ⚠️ GmSSL CLI not available (skipping)");
+                return;
+            }
+        };
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);

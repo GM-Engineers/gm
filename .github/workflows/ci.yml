@@ -67,23 +67,13 @@ jobs:
       # step names the culprit crate.
       - name: Run tests - gm-der
         run: timeout 180 cargo test -p gm-der --all-targets -- --test-threads=1 --nocapture
-      - name: Run tests - gm-crypto (per-test hang probe)
-        # gm-crypto hangs on CI in exactly one test. Run each test individually
-        # with a 25s timeout so the exact hanging test name is printed to the log.
-        run: |
-          cargo test -p gm-crypto --no-run
-          echo "Probing gm-crypto tests individually..."
-          command -v timeout >/dev/null 2>&1 && TIMEOUT="timeout 25" || TIMEOUT=""
-          : > /tmp/hung_tests.txt
-          cargo test -p gm-crypto -- --list 2>&1 | grep -E ': test$' | sed 's/: test$//' | while read -r t; do
-            if ! $TIMEOUT cargo test -p gm-crypto -- "$t" --exact --nocapture >/dev/null 2>&1; then
-              echo "HANG_OR_FAIL: $t"
-              echo "$t" >> /tmp/hung_tests.txt
-            fi
-          done
-          if [ -s /tmp/hung_tests.txt ]; then echo "Hanging/failing tests:"; cat /tmp/hung_tests.txt; exit 1; fi
-          echo "All gm-crypto tests completed"
-        timeout-minutes: 15
+      - name: Run tests - gm-crypto
+        # Encrypted-PEM tests use pkcs8 PBES2 KDF which is ~19s/test in debug on
+        # CI's slower runner and blows the step timeout. In release the KDF runs
+        # in <1s/test, so the suite finishes quickly. (The short_password variants
+        # skip the KDF and were never the bottleneck.)
+        # No --all-targets: the criterion bench target rejects libtest args.
+        run: timeout 300 cargo test -p gm-crypto --release -- --test-threads=1 --nocapture
       - name: Run tests - gm-sm9-rs
         run: timeout 180 cargo test -p gm-sm9-rs --all-targets -- --test-threads=1 --nocapture
       - name: Run tests - gm-tls (grpc)
