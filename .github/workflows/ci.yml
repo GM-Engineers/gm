@@ -33,6 +33,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: clippy
+      - name: Install protobuf compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
@@ -42,6 +44,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
+      - name: Install protobuf compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -96,6 +100,7 @@ jobs:
         run: cargo install cargo-audit cargo-deny
       - name: Update advisory database
         run: cargo audit --update-db
+        continue-on-error: true
         env:
           RUST_BACKTRACE: 0
       - name: Run security audit (cargo-audit)
@@ -163,6 +168,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
+      - name: Install protobuf compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Check documentation
         run: cargo doc --workspace --all-features --no-deps --document-private-items
         env:
