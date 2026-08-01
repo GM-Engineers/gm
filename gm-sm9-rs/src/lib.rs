@@ -28,7 +28,7 @@ pub mod arith;
 pub mod pairing;
 
 // Re-export arithmetic layer
-pub use crate::arith::{z256, ArithError, FieldElement, Fp, Fp12, Fp2, Fp4, Z256};
+pub use crate::arith::{ArithError, FieldElement, Fp, Fp2, Fp4, Fp12, Z256, z256};
 pub mod fp {
     pub use crate::arith::fp::*;
 }
@@ -43,7 +43,7 @@ pub mod fp12 {
 }
 /// Legacy field module (re-exports from `arith`)
 pub mod field {
-    pub use crate::{FieldElement, Fp, Fp12, Fp2, Fp4};
+    pub use crate::{FieldElement, Fp, Fp2, Fp4, Fp12};
     pub mod fp {
         pub use crate::fp::*;
     }
@@ -58,9 +58,9 @@ pub mod field {
     }
 }
 // Re-export pairing layer
-pub use crate::pairing::pairing as sm9_pairing;
+pub use crate::pairing::ate::pairing as sm9_pairing;
+pub use crate::pairing::{G1Point, G2Point, Identity, g1_generator, g2_generator};
 pub use crate::pairing::{curve, hash, params};
-pub use crate::pairing::{g1_generator, g2_generator, G1Point, G2Point, Identity};
 pub use crate::pairing::{hash1, hash2};
 
 // Pure Rust implementation modules (high-level API)

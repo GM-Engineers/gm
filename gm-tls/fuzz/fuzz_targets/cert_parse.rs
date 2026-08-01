@@ -8,11 +8,12 @@
 
 #![no_main]
 
-use libfuzzer_sys::{fuzz_target, arbitrary::Arbitrary};
-use gm_tls::gm::{validate_cert_pem, OwnedCert, CrlInfo};
+use gm_tls::gm::{CrlInfo, OwnedCert, validate_cert_pem};
+use libfuzzer_sys::{arbitrary::Arbitrary, fuzz_target};
 use time::OffsetDateTime;
 
 #[derive(Arbitrary, Debug)]
+#[allow(dead_code)] // fuzz-only fields kept for input diversity
 struct CertFuzzInput {
     pem_data: Vec<u8>,
     domain: Option<String>,
@@ -64,7 +65,12 @@ fuzz_target!(|input: CertFuzzInput| {
         }
 
         if !chain.is_empty() && !trust_anchors.is_empty() {
-            let _ = gm_tls::gm::verify_cert_chain_sm2_chain(&chain, &trust_anchors, now, input.domain.as_deref());
+            let _ = gm_tls::gm::verify_cert_chain_sm2_chain(
+                &chain,
+                &trust_anchors,
+                now,
+                input.domain.as_deref(),
+            );
         }
     }
 });

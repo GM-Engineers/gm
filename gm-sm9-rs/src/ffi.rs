@@ -9,7 +9,7 @@
 #![allow(non_snake_case)]
 
 use libc;
-pub use libc::{c_char, c_int, c_long, c_uchar, c_void, size_t, FILE};
+pub use libc::{FILE, c_char, c_int, c_long, c_uchar, c_void, size_t};
 
 /// Expected GmSSL version number (3.1.1 = 0x7595 = 30101)
 const EXPECTED_GMSSL_VERSION_NUM: c_long = 0x7595;

@@ -674,10 +674,9 @@ async fn test_tlcp_connector_acceptor_echo() {
 
     // Spawn server task
     let server_handle = tokio::spawn(async move {
-        let mut stream =
-            accept_tlcp_with_context(server_io, acceptor.session_cache(), &ctx_server)
-                .await
-                .unwrap();
+        let mut stream = accept_tlcp_with_context(server_io, acceptor.session_cache(), &ctx_server)
+            .await
+            .unwrap();
         let mut buf = vec![0u8; 256];
         let n = stream.read(&mut buf).await.unwrap();
         stream.write_all(&buf[..n]).await.unwrap();

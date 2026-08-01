@@ -35,8 +35,8 @@
 //! assert!(manager.get_sign_key(2).is_some());
 //! ```
 
-use crate::key::{EncMasterKey, SignMasterKey};
 use crate::Sm9Error;
+use crate::key::{EncMasterKey, SignMasterKey};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 

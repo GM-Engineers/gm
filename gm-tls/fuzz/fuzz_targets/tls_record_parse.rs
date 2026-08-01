@@ -4,9 +4,9 @@
 
 #![no_main]
 
-use libfuzzer_sys::{fuzz_target, arbitrary::Arbitrary};
-use gm_tls::gm::next_nonce;
 use gm_crypto::sm4::Sm4Cipher;
+use gm_tls::gm::next_nonce;
+use libfuzzer_sys::{arbitrary::Arbitrary, fuzz_target};
 use std::io::{Cursor, Read};
 
 // Unified input enum
@@ -39,6 +39,7 @@ struct NonceInput {
 }
 
 #[derive(Arbitrary, Debug)]
+#[allow(dead_code)] // fuzz-only fields kept for input diversity
 struct Sm2PointInput {
     x: [u8; 32],
     y: [u8; 32],
@@ -144,9 +145,9 @@ fn fuzz_nonce(input: NonceInput) {
 }
 
 fn fuzz_sm2_point(input: Sm2PointInput) {
-    use sm2::ProjectivePoint;
     use elliptic_curve::sec1::FromEncodedPoint;
     use sm2::EncodedPoint;
+    use sm2::ProjectivePoint;
 
     // Try to decode as an encoded point
     let mut encoded = vec![0x04u8]; // Uncompressed point

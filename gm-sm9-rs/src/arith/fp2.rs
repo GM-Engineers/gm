@@ -1,7 +1,7 @@
 //! Quadratic extension field Fp2 = Fp\[u\]/(u^2 + 2)
 
-use crate::arith::fp::Fp;
 use crate::arith::FieldElement;
+use crate::arith::fp::Fp;
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 use zeroize::Zeroize;
 

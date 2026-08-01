@@ -7,8 +7,8 @@
 
 #![no_main]
 
-use libfuzzer_sys::{fuzz_target, arbitrary::Arbitrary};
 use gm_tls::gm::hkdf_sm3;
+use libfuzzer_sys::{arbitrary::Arbitrary, fuzz_target};
 
 #[derive(Arbitrary, Debug)]
 struct HkdfInput {
@@ -24,7 +24,11 @@ fuzz_target!(|input: HkdfInput| {
     let result = hkdf_sm3(&input.ikm, &input.salt, &input.info, len);
 
     if let Ok(output) = &result {
-        assert_eq!(output.len(), len, "HKDF output length should match requested");
+        assert_eq!(
+            output.len(),
+            len,
+            "HKDF output length should match requested"
+        );
         let result2 = hkdf_sm3(&input.ikm, &input.salt, &input.info, len);
         assert_eq!(result.as_ref().ok(), result2.as_ref().ok());
     }
@@ -53,7 +57,10 @@ fuzz_target!(|input: HkdfInput| {
 
     // Test max+1 rejection
     let result_over = hkdf_sm3(&input.ikm, &input.salt, &input.info, 8161);
-    assert!(result_over.is_err(), "HKDF should reject exceeding max length");
+    assert!(
+        result_over.is_err(),
+        "HKDF should reject exceeding max length"
+    );
 
     // Test different inputs produce different outputs
     if !input.ikm.is_empty() && input.ikm.len() > 1 {
@@ -62,17 +69,14 @@ fuzz_target!(|input: HkdfInput| {
             v[0] ^= 0xFF;
             v
         };
-        let r1 = hkdf_sm3(&input.ikm, &input.salt, &input.info, 32.min(8160));
-        let r2 = hkdf_sm3(&alt_ikm, &input.salt, &input.info, 32.min(8160));
-        match (r1, r2) {
-            (Ok(o1), Ok(o2)) => {
-                if input.ikm != alt_ikm {
-                    // Different inputs *should* produce different outputs (but not guaranteed)
-                    // We just check both succeed
-                    let _ = (o1, o2);
-                }
+        let r1 = hkdf_sm3(&input.ikm, &input.salt, &input.info, 32);
+        let r2 = hkdf_sm3(&alt_ikm, &input.salt, &input.info, 32);
+        if let (Ok(o1), Ok(o2)) = (r1, r2) {
+            if input.ikm != alt_ikm {
+                // Different inputs *should* produce different outputs (but not guaranteed)
+                // We just check both succeed
+                let _ = (o1, o2);
             }
-            _ => {}
         }
     }
 });

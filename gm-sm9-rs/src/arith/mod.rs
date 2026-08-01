@@ -10,9 +10,9 @@ pub mod fp4;
 pub mod z256;
 
 pub use fp::Fp;
-pub use fp12::Fp12;
 pub use fp2::Fp2;
 pub use fp4::Fp4;
+pub use fp12::Fp12;
 pub use z256::Z256;
 
 /// Arithmetic error type

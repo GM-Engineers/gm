@@ -4,8 +4,8 @@
 //!
 //! Fp12 is the target group GT for the pairing.
 
-use crate::arith::z256::Z256;
 use crate::arith::FieldElement;
+use crate::arith::z256::Z256;
 use crate::arith::{fp::Fp, fp2::Fp2, fp4::Fp4};
 use subtle::{Choice, ConditionallySelectable};
 use zeroize::Zeroize;
@@ -360,12 +360,12 @@ impl Fp12 {
         bytes.extend_from_slice(&self.c2.c1.c0.to_bytes()); // c2.c1.c0
         bytes.extend_from_slice(&self.c2.c0.c1.to_bytes()); // c2.c0.c1
         bytes.extend_from_slice(&self.c2.c0.c0.to_bytes()); // c2.c0.c0
-                                                            // c1 (GmSSL outputs a[1] second)
+        // c1 (GmSSL outputs a[1] second)
         bytes.extend_from_slice(&self.c1.c1.c1.to_bytes()); // c1.c1.c1
         bytes.extend_from_slice(&self.c1.c1.c0.to_bytes()); // c1.c1.c0
         bytes.extend_from_slice(&self.c1.c0.c1.to_bytes()); // c1.c0.c1
         bytes.extend_from_slice(&self.c1.c0.c0.to_bytes()); // c1.c0.c0
-                                                            // c0 (GmSSL outputs a[0] last)
+        // c0 (GmSSL outputs a[0] last)
         bytes.extend_from_slice(&self.c0.c1.c1.to_bytes()); // c0.c1.c1
         bytes.extend_from_slice(&self.c0.c1.c0.to_bytes()); // c0.c1.c0
         bytes.extend_from_slice(&self.c0.c0.c1.to_bytes()); // c0.c0.c1
@@ -432,6 +432,5 @@ mod tests {
         let start = Instant::now();
         let _result = a.pow(&exp);
         let elapsed = start.elapsed();
-
     }
 }

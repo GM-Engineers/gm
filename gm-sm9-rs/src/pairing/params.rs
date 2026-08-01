@@ -3,9 +3,9 @@
 //! These are the official curve parameters and generator points
 //! for the SM9 identity-based cryptographic algorithm.
 
-use crate::pairing::curve::{g1::G1Point, g2::G2Point};
 use crate::arith::z256::Z256;
 use crate::arith::{Fp, Fp2};
+use crate::pairing::curve::{g1::G1Point, g2::G2Point};
 
 /// Prime p for SM9 BN curve
 /// p = 0xB640000002A3A6F1D603AB4FF58EC74521F2934B1A7AEEDBE56F9B27E351457D

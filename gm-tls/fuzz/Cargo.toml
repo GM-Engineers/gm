@@ -23,8 +23,8 @@ elliptic-curve = "0.13"
 subtle = "2"
 generic-array = "0.14"
 
-[profile.release]
-opt-level = 3
+# Build profile overrides live in the workspace root (`Cargo.toml`); per-package
+# `[profile.*]` sections are ignored by cargo and would emit a warning.
 
 [[bin]]
 name = "session_ticket_fuzz"

@@ -145,8 +145,8 @@ mod gmssl_tests {
 
 #[cfg(feature = "pure-rust")]
 mod pure_rust_tests {
-    use gm_sm9_rs::curve::{g1::G1Point, g2::G2Point, Identity, ScalarMul};
-    use gm_sm9_rs::field::{fp::Fp, FieldElement};
+    use gm_sm9_rs::curve::{Identity, ScalarMul, g1::G1Point, g2::G2Point};
+    use gm_sm9_rs::field::{FieldElement, fp::Fp};
     use gm_sm9_rs::pairing;
     use gm_sm9_rs::z256::Z256;
 
@@ -186,13 +186,13 @@ mod pure_rust_tests {
         // Using identity points (pairing returns 1)
         let p = G1Point::identity();
         let q = G2Point::identity();
-        let result = pairing::pairing(&p, &q);
+        let result = pairing::ate::pairing(&p, &q);
 
         // e(identity, identity) should be 1 (Fp12::ONE)
         // Fp12::one() doesn't exist, but pairing of identity points should be
         // the multiplicative identity. We verify by checking it's not zero
         // and pairing is consistent.
-        let result2 = pairing::pairing(&p, &q);
+        let result2 = pairing::ate::pairing(&p, &q);
         assert_eq!(result, result2, "Pairing should be deterministic");
     }
 
@@ -261,7 +261,7 @@ mod cross_validation {
         // GmSSL generates signature, pure Rust verifies it
         use gm_sm9_rs::curve::ScalarMul;
         use gm_sm9_rs::field::FieldElement;
-        use gm_sm9_rs::pairing::pairing;
+        use gm_sm9_rs::pairing::ate::pairing;
         use gm_sm9_rs::{GmSignMasterKey, GmSigner, GmVerifier};
         use gm_sm9_rs::{SignMasterKey, Signature, Verifier};
 
@@ -389,7 +389,7 @@ mod cross_validation {
     #[test]
     fn test_pairing_with_gmssl_pubkey() {
         // Test pairing using GmSSL-generated public key
-        use gm_sm9_rs::pairing::pairing;
+        use gm_sm9_rs::pairing::ate::pairing;
         use gm_sm9_rs::{GmSignMasterKey, GmSigner, GmVerifier};
         use gm_sm9_rs::{SignMasterKey, Signature, Verifier};
 
@@ -460,7 +460,7 @@ mod cross_validation {
         // Test that pairing produces consistent results
         // This is a low-level test to verify pairing computation compatibility
         use gm_sm9_rs::curve::ScalarMul;
-        use gm_sm9_rs::pairing::pairing;
+        use gm_sm9_rs::pairing::ate::pairing;
 
         // Use standard generators
         let g1 = gm_sm9_rs::params::g1_generator();

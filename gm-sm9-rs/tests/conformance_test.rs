@@ -294,13 +294,18 @@ mod sm9_cross_validation {
                         } else {
                             // Cross-validation verification failure — likely due to serialization format differences
                             // between GmSSL and pure Rust backends. This is a known limitation.
-                            eprintln!("SM9 cross-validation: GmSSL→Rust verification returned false (known serialization difference)");
+                            eprintln!(
+                                "SM9 cross-validation: GmSSL→Rust verification returned false (known serialization difference)"
+                            );
                         }
                     }
                     Err(e) => {
                         // Cross-validation verification failure — likely due to serialization format differences
                         // between GmSSL and pure Rust backends. This is a known limitation.
-                        eprintln!("SM9 cross-validation: GmSSL→Rust verification failed (known serialization difference): {}", e);
+                        eprintln!(
+                            "SM9 cross-validation: GmSSL→Rust verification failed (known serialization difference): {}",
+                            e
+                        );
                     }
                 }
             }

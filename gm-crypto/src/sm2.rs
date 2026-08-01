@@ -1342,7 +1342,9 @@ mod tests {
         let encryptor = Sm2Encryptor::new(&keypair.public_key_bytes_uncompressed()).unwrap();
         let plaintext = b"versioned raw SM2 ciphertext";
 
-        let versioned = encryptor.encrypt_versioned(plaintext).expect("encrypt_versioned failed");
+        let versioned = encryptor
+            .encrypt_versioned(plaintext)
+            .expect("encrypt_versioned failed");
 
         // Header check: 0x53 0x4D 0x01 0x00
         assert_eq!(&versioned[..2], &[0x53, 0x4D], "magic header");
@@ -1351,7 +1353,9 @@ mod tests {
 
         // Decrypt via auto-detection
         let decryptor = Sm2Decryptor::new(keypair);
-        let decrypted = decryptor.decrypt(&versioned).expect("versioned decrypt failed");
+        let decrypted = decryptor
+            .decrypt(&versioned)
+            .expect("versioned decrypt failed");
         assert_eq!(decrypted, plaintext.to_vec());
     }
 
@@ -1361,7 +1365,9 @@ mod tests {
         let encryptor = Sm2Encryptor::new(&keypair.public_key_bytes_uncompressed()).unwrap();
         let plaintext = b"versioned DER SM2 ciphertext";
 
-        let versioned = encryptor.encrypt_versioned_der(plaintext).expect("encrypt_versioned_der failed");
+        let versioned = encryptor
+            .encrypt_versioned_der(plaintext)
+            .expect("encrypt_versioned_der failed");
 
         // Header check: 0x53 0x4D 0x01 0x01
         assert_eq!(&versioned[..2], &[0x53, 0x4D], "magic header");
@@ -1370,7 +1376,9 @@ mod tests {
 
         // Decrypt via auto-detection
         let decryptor = Sm2Decryptor::new(keypair);
-        let decrypted = decryptor.decrypt(&versioned).expect("versioned DER decrypt failed");
+        let decrypted = decryptor
+            .decrypt(&versioned)
+            .expect("versioned DER decrypt failed");
         assert_eq!(decrypted, plaintext.to_vec());
     }
 

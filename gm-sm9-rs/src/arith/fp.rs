@@ -4,8 +4,8 @@
 //!
 //! Field: Fp where p = 0xB640000002A3A6F1D603AB4FF58EC74521F2934B1A7AEEDBE56F9B27E351457D
 
-use crate::arith::z256::{self, Z256};
 use crate::arith::FieldElement;
+use crate::arith::z256::{self, Z256};
 use subtle::{Choice, ConditionallySelectable};
 use zeroize::Zeroize;
 
@@ -87,8 +87,9 @@ impl Fp {
                 bytes.len()
             )));
         }
-        let raw = z256::from_bytes_be(bytes)
-            .ok_or_else(|| crate::arith::ArithError::InvalidParameter("Invalid Fp bytes".to_string()))?;
+        let raw = z256::from_bytes_be(bytes).ok_or_else(|| {
+            crate::arith::ArithError::InvalidParameter("Invalid Fp bytes".to_string())
+        })?;
         Ok(Self::from_raw(raw))
     }
 }
@@ -135,7 +136,7 @@ impl FieldElement for Fp {
         }
         // Convert from Montgomery to raw, compute inverse, convert back
         let raw = mont_mul(&self.0, &Z256::ONE); // self * 1 * R^-1 = self / R = original value
-                                                 // Fermat's little theorem: a^(p-2) mod p
+        // Fermat's little theorem: a^(p-2) mod p
         let p_minus_2 = Z256([Z256::P.0[0] - 2, Z256::P.0[1], Z256::P.0[2], Z256::P.0[3]]);
         let raw_inv = pow(&raw, &p_minus_2);
         // Convert back to Montgomery: raw_inv * R^2 * R^-1 = raw_inv * R
@@ -334,7 +335,6 @@ mod tests {
 
         // Convert back
         let prod = mont_mul(&prod_mont, &Z256::ONE);
-
 
         // Should be 6
         assert_eq!(prod.0[0], 6);

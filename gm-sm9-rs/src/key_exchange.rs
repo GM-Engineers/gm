@@ -41,15 +41,15 @@
 //! assert_eq!(output_a.shared_key, resp_output.shared_key);
 //! ```
 
-use crate::curve::g1::G1Point;
-use crate::curve::ScalarMul;
-use crate::hash::hash1;
-use crate::key::{random_scalar, EncUserKey};
-use crate::pairing::pairing;
-use crate::params::{g1_generator, g2_generator};
-use crate::z256::Z256;
 use crate::Sm9Error;
 use crate::arith::Fp12;
+use crate::curve::ScalarMul;
+use crate::curve::g1::G1Point;
+use crate::hash::hash1;
+use crate::key::{EncUserKey, random_scalar};
+use crate::pairing::ate::pairing;
+use crate::params::{g1_generator, g2_generator};
+use crate::z256::Z256;
 use rand::CryptoRng;
 use sm3::Sm3;
 use sm3::digest::Digest;
@@ -194,12 +194,7 @@ pub fn responder_process(
     let g3 = g1.pow(&r_b);
 
     // B5: SK_B = KDF(IDA || IDB || RA || RB || g1 || g2 || g3, klen)
-    let shared_key = kdf_key_exchange(
-        id_a, id_b,
-        r_a, &r_b_point,
-        &g1, &g2, &g3,
-        klen,
-    );
+    let shared_key = kdf_key_exchange(id_a, id_b, r_a, &r_b_point, &g1, &g2, &g3, klen);
 
     // B6: Optional key confirmation S_B
     let s_b = if need_confirm {
@@ -268,12 +263,7 @@ pub fn initiator_finish(
     }
 
     // A7: SK_A = KDF(IDA || IDB || RA || RB || g1' || g2' || g3', klen)
-    let shared_key = kdf_key_exchange(
-        id_a, id_b,
-        &state.r_a_point, r_b,
-        &g1, &g2, &g3,
-        klen,
-    );
+    let shared_key = kdf_key_exchange(id_a, id_b, &state.r_a_point, r_b, &g1, &g2, &g3, klen);
 
     // A8: Optional key confirmation S_A
     let s_a = compute_sa(&g1, &g2, &g3, id_a, id_b, &state.r_a_point, r_b);
@@ -292,9 +282,13 @@ pub fn initiator_finish(
 ///
 /// This is B's key confirmation value — B sends this to A for verification.
 fn compute_sb(
-    g1: &Fp12, g2: &Fp12, g3: &Fp12,
-    id_a: &[u8], id_b: &[u8],
-    r_a: &G1Point, r_b: &G1Point,
+    g1: &Fp12,
+    g2: &Fp12,
+    g3: &Fp12,
+    id_a: &[u8],
+    id_b: &[u8],
+    r_a: &G1Point,
+    r_b: &G1Point,
 ) -> Vec<u8> {
     let inner = sm3_multi(&[
         &gt_to_bytes(g2),
@@ -313,9 +307,13 @@ fn compute_sb(
 /// This is A's key confirmation value — A sends this to B for mutual confirmation.
 #[allow(clippy::too_many_arguments)]
 fn compute_sa(
-    g1: &Fp12, g2: &Fp12, g3: &Fp12,
-    id_a: &[u8], id_b: &[u8],
-    r_a: &G1Point, r_b: &G1Point,
+    g1: &Fp12,
+    g2: &Fp12,
+    g3: &Fp12,
+    id_a: &[u8],
+    id_b: &[u8],
+    r_a: &G1Point,
+    r_b: &G1Point,
 ) -> Vec<u8> {
     let inner = sm3_multi(&[
         &gt_to_bytes(g2),
@@ -332,9 +330,13 @@ fn compute_sa(
 /// Verify S_A received from A against B's computation (mutual confirmation).
 #[allow(clippy::too_many_arguments)]
 pub fn verify_sa(
-    g1: &Fp12, g2: &Fp12, g3: &Fp12,
-    id_a: &[u8], id_b: &[u8],
-    r_a: &G1Point, r_b: &G1Point,
+    g1: &Fp12,
+    g2: &Fp12,
+    g3: &Fp12,
+    id_a: &[u8],
+    id_b: &[u8],
+    r_a: &G1Point,
+    r_b: &G1Point,
     s_a: &[u8],
 ) -> bool {
     let expected = compute_sa(g1, g2, g3, id_a, id_b, r_a, r_b);
@@ -358,9 +360,13 @@ fn compute_q(h1: Z256, ppub_e: &G1Point) -> G1Point {
 /// KDF(Z, klen) where Z = IDA || IDB || RA || RB || g1 || g2 || g3
 #[allow(clippy::too_many_arguments)]
 fn kdf_key_exchange(
-    id_a: &[u8], id_b: &[u8],
-    r_a: &G1Point, r_b: &G1Point,
-    g1: &Fp12, g2: &Fp12, g3: &Fp12,
+    id_a: &[u8],
+    id_b: &[u8],
+    r_a: &G1Point,
+    r_b: &G1Point,
+    g1: &Fp12,
+    g2: &Fp12,
+    g3: &Fp12,
     klen: usize,
 ) -> Vec<u8> {
     let mut k = Vec::with_capacity(klen);
@@ -448,8 +454,10 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// `(sk_a, sk_b)` — the shared keys derived by each party.
 /// They MUST be equal.
 pub fn key_exchange(
-    id_a: &[u8], de_a: &EncUserKey,
-    id_b: &[u8], de_b: &EncUserKey,
+    id_a: &[u8],
+    de_a: &EncUserKey,
+    id_b: &[u8],
+    de_b: &EncUserKey,
     ppub_e: &G1Point,
     klen: usize,
     rng: &mut impl CryptoRng,
@@ -458,14 +466,10 @@ pub fn key_exchange(
     let (state_a, round1) = initiator_begin(id_a, id_b, ppub_e, rng)?;
 
     // Round 2: B → A
-    let resp_output = responder_process(
-        id_a, id_b, ppub_e, de_b, &round1.r_a, klen, false, rng,
-    )?;
+    let resp_output = responder_process(id_a, id_b, ppub_e, de_b, &round1.r_a, klen, false, rng)?;
 
     // Round 3: A finishes
-    let init_output = initiator_finish(
-        state_a, &resp_output.r_b, de_a, id_a, id_b, klen, None,
-    )?;
+    let init_output = initiator_finish(state_a, &resp_output.r_b, de_a, id_a, id_b, klen, None)?;
 
     Ok((init_output.shared_key, resp_output.shared_key))
 }
@@ -477,8 +481,8 @@ pub fn key_exchange(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::key::EncMasterKey;
     use crate::Identity;
+    use crate::key::EncMasterKey;
     use rand::rng;
 
     fn setup() -> (EncMasterKey, Vec<u8>, Vec<u8>, EncUserKey, EncUserKey) {
@@ -496,9 +500,8 @@ mod tests {
         let mut rng = rng();
         let (master, id_a, id_b, de_a, de_b) = setup();
 
-        let (sk_a, sk_b) = key_exchange(
-            &id_a, &de_a, &id_b, &de_b, &master.ppube, 32, &mut rng,
-        ).unwrap();
+        let (sk_a, sk_b) =
+            key_exchange(&id_a, &de_a, &id_b, &de_b, &master.ppube, 32, &mut rng).unwrap();
 
         assert_eq!(sk_a, sk_b);
         assert_eq!(sk_a.len(), 32);
@@ -510,9 +513,8 @@ mod tests {
         let (master, id_a, id_b, de_a, de_b) = setup();
 
         for klen in &[16, 32, 48, 64, 128] {
-            let (sk_a, sk_b) = key_exchange(
-                &id_a, &de_a, &id_b, &de_b, &master.ppube, *klen, &mut rng,
-            ).unwrap();
+            let (sk_a, sk_b) =
+                key_exchange(&id_a, &de_a, &id_b, &de_b, &master.ppube, *klen, &mut rng).unwrap();
             assert_eq!(sk_a, sk_b, "keys differ for klen={}", klen);
             assert_eq!(sk_a.len(), *klen);
         }
@@ -529,13 +531,28 @@ mod tests {
 
         // B processes with confirmation
         let resp = responder_process(
-            &id_a, &id_b, &master.ppube, &de_b, &round1.r_a, 32, true, &mut rng,
-        ).unwrap();
+            &id_a,
+            &id_b,
+            &master.ppube,
+            &de_b,
+            &round1.r_a,
+            32,
+            true,
+            &mut rng,
+        )
+        .unwrap();
 
         // A verifies S_B and finishes
         let output = initiator_finish(
-            state_a, &resp.r_b, &de_a, &id_a, &id_b, 32, resp.s_b.as_deref(),
-        ).unwrap();
+            state_a,
+            &resp.r_b,
+            &de_a,
+            &id_a,
+            &id_b,
+            32,
+            resp.s_b.as_deref(),
+        )
+        .unwrap();
 
         assert_eq!(output.shared_key, resp.shared_key);
         assert!(!output.s_a.as_ref().unwrap().is_empty());
@@ -548,14 +565,20 @@ mod tests {
 
         let (state_a, round1) = initiator_begin(&id_a, &id_b, &master.ppube, &mut rng).unwrap();
         let resp = responder_process(
-            &id_a, &id_b, &master.ppube, &de_b, &round1.r_a, 32, true, &mut rng,
-        ).unwrap();
+            &id_a,
+            &id_b,
+            &master.ppube,
+            &de_b,
+            &round1.r_a,
+            32,
+            true,
+            &mut rng,
+        )
+        .unwrap();
 
         // Feed a wrong S_B to A
         let bad_sb = vec![0u8; 32];
-        let result = initiator_finish(
-            state_a, &resp.r_b, &de_a, &id_a, &id_b, 32, Some(&bad_sb),
-        );
+        let result = initiator_finish(state_a, &resp.r_b, &de_a, &id_a, &id_b, 32, Some(&bad_sb));
         assert!(result.is_err());
     }
 
@@ -566,8 +589,16 @@ mod tests {
 
         let (_state, round1) = initiator_begin(&id_a, &id_b, &master.ppube, &mut rng).unwrap();
         let _resp = responder_process(
-            &id_a, &id_b, &master.ppube, &de_b, &round1.r_a, 32, false, &mut rng,
-        ).unwrap();
+            &id_a,
+            &id_b,
+            &master.ppube,
+            &de_b,
+            &round1.r_a,
+            32,
+            false,
+            &mut rng,
+        )
+        .unwrap();
 
         // Attempt to finish with identity point as R_B
         let state = InitiatorState {
@@ -583,8 +614,16 @@ mod tests {
         // Valid case succeeds
         let (state2, round1_2) = initiator_begin(&id_a, &id_b, &master.ppube, &mut rng).unwrap();
         let resp2 = responder_process(
-            &id_a, &id_b, &master.ppube, &de_b, &round1_2.r_a, 32, false, &mut rng,
-        ).unwrap();
+            &id_a,
+            &id_b,
+            &master.ppube,
+            &de_b,
+            &round1_2.r_a,
+            32,
+            false,
+            &mut rng,
+        )
+        .unwrap();
         assert!(initiator_finish(state2, &resp2.r_b, &de_a, &id_a, &id_b, 32, None).is_ok());
     }
 }

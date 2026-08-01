@@ -1,12 +1,12 @@
 //! Key generation and management for SM9
 
+use crate::curve::ScalarMul;
 use crate::curve::g1::G1Point;
 use crate::curve::g2::G2Point;
-use crate::curve::ScalarMul;
 // use crate::field::FieldElement;
+use crate::Sm9Error;
 use crate::hash;
 use crate::z256::Z256;
-use crate::Sm9Error;
 use rand::CryptoRng;
 use subtle::ConditionallySelectable;
 use zeroize::{Zeroize, ZeroizeOnDrop};

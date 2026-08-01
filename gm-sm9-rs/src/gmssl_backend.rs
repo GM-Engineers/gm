@@ -6,14 +6,14 @@
 
 use crate::error::Sm9Error;
 use crate::ffi::{
-    c_char, c_int, c_uchar, size_t, sm9_decrypt, sm9_enc_master_key_extract_key,
+    SM9_ENC_KEY, SM9_ENC_MASTER_KEY, SM9_MAX_CIPHERTEXT_SIZE, SM9_MAX_PLAINTEXT_SIZE, SM9_OK,
+    SM9_POINT, SM9_SIGN_KEY, SM9_SIGN_MASTER_KEY, SM9_SIGNATURE_SIZE, SM9_TWIST_POINT, c_char,
+    c_int, c_uchar, size_t, sm9_decrypt, sm9_enc_master_key_extract_key,
     sm9_enc_master_key_generate, sm9_encrypt, sm9_fn_t, sm9_sign_finish, sm9_sign_init,
     sm9_sign_key_to_der, sm9_sign_master_key_extract_key, sm9_sign_master_key_generate,
     sm9_sign_master_public_key_from_der, sm9_sign_master_public_key_to_der, sm9_sign_update,
     sm9_twist_point_from_uncompressed_octets, sm9_twist_point_to_uncompressed_octets,
-    sm9_verify_finish, sm9_verify_init, sm9_verify_update, SM9_ENC_KEY, SM9_ENC_MASTER_KEY,
-    SM9_MAX_CIPHERTEXT_SIZE, SM9_MAX_PLAINTEXT_SIZE, SM9_OK, SM9_POINT, SM9_SIGNATURE_SIZE,
-    SM9_SIGN_KEY, SM9_SIGN_MASTER_KEY, SM9_TWIST_POINT,
+    sm9_verify_finish, sm9_verify_init, sm9_verify_update,
 };
 use libc::free;
 use std::ffi::CString;
@@ -105,7 +105,7 @@ impl GmSignMasterKey {
     /// We convert to standard format: c0 (32 bytes) || c1 (32 bytes)
     pub fn to_bytes(&self) -> Result<[u8; 128], Sm9Error> {
         let mut octets = [0u8; 129]; // GmSSL uses 129 bytes (1 byte prefix + 128 bytes)
-                                     // SAFETY: GmSSL FFI — to_uncompressed_octets writes to stack-allocated 129-byte buffer (1 prefix + 128 data).
+        // SAFETY: GmSSL FFI — to_uncompressed_octets writes to stack-allocated 129-byte buffer (1 prefix + 128 data).
         unsafe {
             let code =
                 sm9_twist_point_to_uncompressed_octets(&self.inner.Ppubs, octets.as_mut_ptr());

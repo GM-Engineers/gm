@@ -273,7 +273,10 @@ async fn tcp_connect_with_retry(addr: &str, max_attempts: u32) -> std::io::Resul
     for attempt in 0..max_attempts {
         match TcpStream::connect(addr).await {
             Ok(stream) => return Ok(stream),
-            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused && attempt < max_attempts - 1 => {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::ConnectionRefused
+                    && attempt < max_attempts - 1 =>
+            {
                 // GmSSL tls13_server exits after each connection; launchd restarts it ~1s later
                 tokio::time::sleep(Duration::from_millis(300 << attempt)).await;
             }
@@ -361,7 +364,7 @@ async fn test_gmssl_tls13_client_connects_to_gmtls_server() {
     use gm_tls::{TlsAcceptor, TlsConfig};
     use std::process::Command;
     use tokio::net::TcpListener;
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     let cert_path = gmssl_cert_path();
     // Find GmSSL binary (prefer custom build, fall back to PATH)
@@ -388,16 +391,26 @@ async fn test_gmssl_tls13_client_connects_to_gmtls_server() {
         let mut child = Command::new(&gmssl_bin)
             .args([
                 "tls13_client",
-                "-host", "127.0.0.1",
-                "-port", "4435",
-                "-server_name", "localhost",
-                "-cacert", &cert_path,
-                "-cipher_suite", "TLS_SM4_GCM_SM3",
-                "-supported_group", "sm2p256v1",
-                "-sig_alg", "sm2sig_sm3",
-                "-cert", &cert_path,
-                "-key", &key_path,
-                "-pass", "test",
+                "-host",
+                "127.0.0.1",
+                "-port",
+                "4435",
+                "-server_name",
+                "localhost",
+                "-cacert",
+                &cert_path,
+                "-cipher_suite",
+                "TLS_SM4_GCM_SM3",
+                "-supported_group",
+                "sm2p256v1",
+                "-sig_alg",
+                "sm2sig_sm3",
+                "-cert",
+                &cert_path,
+                "-key",
+                &key_path,
+                "-pass",
+                "test",
             ])
             .env("DYLD_LIBRARY_PATH", "/tmp/gmssl-install/lib")
             .stdin(std::process::Stdio::piped())
@@ -417,27 +430,26 @@ async fn test_gmssl_tls13_client_connects_to_gmtls_server() {
     let accept_result = timeout(Duration::from_secs(15), listener.accept()).await;
 
     match accept_result {
-        Ok(Ok((tcp, _addr))) => {
-            match acceptor.accept(tcp).await {
-                Ok(mut stream) => {
-                    println!("GmSSL client connected and TLS handshake succeeded!");
-                    stream
-                        .write_application_data(b"hello from gm-tls server")
-                        .await
-                        .expect("write failed");
-                }
-                Err(e) => {
-                    println!("TLS handshake with GmSSL client failed: {}", e);
-                    println!("This is informative — GmSSL cipher suite may differ from gm-tls");
-                }
+        Ok(Ok((tcp, _addr))) => match acceptor.accept(tcp).await {
+            Ok(mut stream) => {
+                println!("GmSSL client connected and TLS handshake succeeded!");
+                stream
+                    .write_application_data(b"hello from gm-tls server")
+                    .await
+                    .expect("write failed");
             }
-        }
+            Err(e) => {
+                println!("TLS handshake with GmSSL client failed: {}", e);
+                println!("This is informative — GmSSL cipher suite may differ from gm-tls");
+            }
+        },
         Ok(Err(e)) => {
             println!("Accept error: {}", e);
         }
         Err(_) => {
             println!(
-                "No incoming connection within 15s (GmSSL client may not support gm-tls cipher suites)"
+                "No incoming connection within 15s (GmSSL client may not support gm-tls cipher \
+                 suites)"
             );
         }
     }

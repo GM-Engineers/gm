@@ -5,9 +5,9 @@
 //!
 //! Based on GmSSL implementation (guanzhi/GmSSL).
 
-use crate::pairing::curve::{g1::G1Point, g2::G2Point, Identity};
 use crate::arith::z256::Z256;
-use crate::arith::{FieldElement, Fp, Fp12, Fp2, Fp4};
+use crate::arith::{FieldElement, Fp, Fp2, Fp4, Fp12};
+use crate::pairing::curve::{Identity, g1::G1Point, g2::G2Point};
 
 /// R-ate pairing parameter for SM9 (from GmSSL)
 /// This is the binary expansion of the R-ate parameter
@@ -461,8 +461,8 @@ fn final_exponentiation_hard_part(f: &Fp12) -> Fp12 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pairing::curve::g1::G1Point;
     use crate::pairing::curve::Identity;
+    use crate::pairing::curve::g1::G1Point;
 
     #[test]
     fn test_pairing_identity() {

@@ -8,12 +8,12 @@
 
 #![no_main]
 
-use libfuzzer_sys::{fuzz_target, arbitrary::Arbitrary};
-use gm_tls::gm::{
-    create_session_state, decrypt_session_ticket, encrypt_session_ticket, SessionKeys,
-    TicketKey, TicketKeySet,
-};
 use gm_crypto::sm4::SM4_GCM_NONCE_LENGTH;
+use gm_tls::gm::{
+    SessionKeys, TicketKey, TicketKeySet, create_session_state, decrypt_session_ticket,
+    encrypt_session_ticket,
+};
+use libfuzzer_sys::{arbitrary::Arbitrary, fuzz_target};
 use std::sync::Arc;
 use tokio::runtime::Builder;
 
@@ -114,12 +114,19 @@ fn run_session_ticket_test(input: SessionStateInput) {
     let max_lifetime = input.lifetime_hint.min(86400) as u64;
 
     if age_seconds <= max_lifetime {
-        let _ = rt.block_on(decrypt_session_ticket(&ticket, &key_set, session_store.clone()));
+        let _ = rt.block_on(decrypt_session_ticket(
+            &ticket,
+            &key_set,
+            session_store.clone(),
+        ));
     }
 
     // Test key rotation with same state
     let mut key_set2 = TicketKeySet::new(ticket_key.clone());
-    key_set2.add_key(TicketKey { id: 2, secret: [0xAB; 32] });
+    key_set2.add_key(TicketKey {
+        id: 2,
+        secret: [0xAB; 32],
+    });
 
     let ticket_rotated = match encrypt_session_ticket(&state, &key_set) {
         Ok(t) => t,
@@ -137,9 +144,17 @@ fn run_session_ticket_test(input: SessionStateInput) {
 
     // Test replay detection
     let session_store3 = Arc::new(gm_tls::session_store::InMemorySessionStore::new());
-    let first_result = rt.block_on(decrypt_session_ticket(&ticket_rotated, &key_set, session_store3.clone()));
+    let first_result = rt.block_on(decrypt_session_ticket(
+        &ticket_rotated,
+        &key_set,
+        session_store3.clone(),
+    ));
     if first_result.is_ok() {
-        let second_result = rt.block_on(decrypt_session_ticket(&ticket_rotated, &key_set, session_store3));
+        let second_result = rt.block_on(decrypt_session_ticket(
+            &ticket_rotated,
+            &key_set,
+            session_store3,
+        ));
         // Replay should be detected
         if second_result.is_ok() {
             // This would be a bug - same ticket used twice should fail on second use

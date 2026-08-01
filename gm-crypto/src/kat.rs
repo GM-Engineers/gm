@@ -437,35 +437,46 @@ fn kat_sm2_pairwise() -> KatResult {
 /// for both initiator and responder, using deterministic test keys.
 fn kat_sm2_kex() -> KatResult {
     // Use deterministic test keys from sm2_vectors
-    let keypair_a = Sm2KeyPair::from_private_key(sm2_vectors::TEST_PRIVATE_KEY)
-        .map_err(|e| CryptoError::Sm2Error(format!("KEX KAT: failed to create keypair A: {}", e)))?;
-    let keypair_b = Sm2KeyPair::from_private_key(sm2_vectors::GBT32918_PRIVATE_KEY)
-        .map_err(|e| CryptoError::Sm2Error(format!("KEX KAT: failed to create keypair B: {}", e)))?;
+    let keypair_a = Sm2KeyPair::from_private_key(sm2_vectors::TEST_PRIVATE_KEY).map_err(|e| {
+        CryptoError::Sm2Error(format!("KEX KAT: failed to create keypair A: {}", e))
+    })?;
+    let keypair_b =
+        Sm2KeyPair::from_private_key(sm2_vectors::GBT32918_PRIVATE_KEY).map_err(|e| {
+            CryptoError::Sm2Error(format!("KEX KAT: failed to create keypair B: {}", e))
+        })?;
 
     // A initiates the exchange
-    let mut session_a = KexSession::new_initiator(&keypair_a, b"user_a")
-        .map_err(|e| CryptoError::Sm2Error(format!("KEX KAT: failed to create session A: {}", e)))?;
-    let msg1 = session_a.generate_msg1()
+    let mut session_a = KexSession::new_initiator(&keypair_a, b"user_a").map_err(|e| {
+        CryptoError::Sm2Error(format!("KEX KAT: failed to create session A: {}", e))
+    })?;
+    let msg1 = session_a
+        .generate_msg1()
         .map_err(|e| CryptoError::Sm2Error(format!("KEX KAT: failed to generate msg1: {}", e)))?;
 
     // B processes msg1
-    let mut session_b = KexSession::new_responder(&keypair_b, b"user_b")
-        .map_err(|e| CryptoError::Sm2Error(format!("KEX KAT: failed to create session B: {}", e)))?;
-    let msg2 = session_b.process_msg1(&msg1, keypair_a.public_key())
+    let mut session_b = KexSession::new_responder(&keypair_b, b"user_b").map_err(|e| {
+        CryptoError::Sm2Error(format!("KEX KAT: failed to create session B: {}", e))
+    })?;
+    let msg2 = session_b
+        .process_msg1(&msg1, keypair_a.public_key())
         .map_err(|e| CryptoError::Sm2Error(format!("KEX KAT: failed to process msg1: {}", e)))?;
 
     // A processes msg2
-    let msg3 = session_a.process_msg2(&msg2, keypair_b.public_key())
+    let msg3 = session_a
+        .process_msg2(&msg2, keypair_b.public_key())
         .map_err(|e| CryptoError::Sm2Error(format!("KEX KAT: failed to process msg2: {}", e)))?;
 
     // B processes msg3
-    session_b.process_msg3(&msg3)
+    session_b
+        .process_msg3(&msg3)
         .map_err(|e| CryptoError::Sm2Error(format!("KEX KAT: failed to process msg3: {}", e)))?;
 
     // Both should have the same shared secret
-    let result_a = session_a.get_result()
+    let result_a = session_a
+        .get_result()
         .ok_or_else(|| CryptoError::Sm2Error("KEX KAT: session A has no result".to_string()))?;
-    let result_b = session_b.get_result()
+    let result_b = session_b
+        .get_result()
         .ok_or_else(|| CryptoError::Sm2Error("KEX KAT: session B has no result".to_string()))?;
 
     if result_a.shared_secret != result_b.shared_secret {

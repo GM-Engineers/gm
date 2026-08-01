@@ -8,12 +8,12 @@
 
 #![no_main]
 
-use libfuzzer_sys::{fuzz_target, arbitrary::Arbitrary};
 use gm_tls::gm::{
-    compute_transcript_hash, compute_transcript_hash_multi,
-    select_alpn, ClientHello, Finished, ServerHello,
+    ClientHello, Finished, ServerHello, compute_transcript_hash, compute_transcript_hash_multi,
+    select_alpn,
 };
-use gm_tls::{serialize, deserialize};
+use gm_tls::{deserialize, serialize};
+use libfuzzer_sys::{arbitrary::Arbitrary, fuzz_target};
 
 #[derive(Arbitrary, Debug)]
 struct HandshakeFuzzInput {
@@ -82,7 +82,10 @@ fuzz_target!(|input: HandshakeFuzzInput| {
         let sh_decoded: Result<ServerHello, _> = deserialize(&sh_bytes);
         if let Ok(decoded_sh) = sh_decoded {
             assert_eq!(server_hello.random, decoded_sh.random);
-            assert_eq!(server_hello.require_client_auth, decoded_sh.require_client_auth);
+            assert_eq!(
+                server_hello.require_client_auth,
+                decoded_sh.require_client_auth
+            );
         }
     }
 
@@ -100,7 +103,11 @@ fuzz_target!(|input: HandshakeFuzzInput| {
 
     // Test multi-message transcript hash
     if input.transcript_multi.len() <= 10 {
-        let slices: Vec<&[u8]> = input.transcript_multi.iter().map(|v| v.as_slice()).collect();
+        let slices: Vec<&[u8]> = input
+            .transcript_multi
+            .iter()
+            .map(|v| v.as_slice())
+            .collect();
         let multi_result = compute_transcript_hash_multi(&slices);
         if let Ok(multi_hash) = multi_result {
             assert_eq!(multi_hash.len(), 32);
@@ -108,7 +115,9 @@ fuzz_target!(|input: HandshakeFuzzInput| {
     }
 
     // Test Finished serialization
-    let finished = Finished { verify_data: input.finished_signature };
+    let finished = Finished {
+        verify_data: input.finished_signature,
+    };
     let fin_encoded = serialize(&finished);
     if let Ok(fin_bytes) = fin_encoded {
         let fin_decoded: Result<Finished, _> = deserialize(&fin_bytes);

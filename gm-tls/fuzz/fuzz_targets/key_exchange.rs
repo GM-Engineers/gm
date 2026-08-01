@@ -6,12 +6,16 @@
 //! 3. Ephemeral key generation uniqueness
 
 #![no_main]
+// `Scalar::from_bytes` requires `&GenericArray<u8, U32>` from the pinned
+// `generic-array` 0.14 / `sm2` 0.13 stack; both crates are deprecated upstream
+// in favour of `generic-array` 1.x. Silence until the dependency is upgraded.
+#![allow(deprecated)]
 
-use libfuzzer_sys::{fuzz_target, arbitrary::Arbitrary};
+use elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
 use gm_tls::gm::{derive_session_keys_sm2, generate_sm2_ephemeral};
+use libfuzzer_sys::{arbitrary::Arbitrary, fuzz_target};
 use sm2::EncodedPoint;
 use sm2::ProjectivePoint;
-use elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
 use sm2::Scalar;
 
 #[derive(Arbitrary, Debug)]
@@ -25,6 +29,7 @@ enum KeyExchangeInput {
 }
 
 #[derive(Arbitrary, Debug)]
+#[allow(dead_code)] // fuzz-only fields kept for input diversity
 struct KeyExchangeFuzzInput {
     client_random: [u8; 32],
     server_random: [u8; 32],

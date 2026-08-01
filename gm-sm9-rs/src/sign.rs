@@ -1,5 +1,6 @@
 //! SM9 signature algorithm
 
+use crate::Sm9Error;
 use crate::curve::g1::G1Point;
 use crate::curve::g2::G2Point;
 use crate::curve::{Identity, ScalarMul};
@@ -9,7 +10,6 @@ use crate::key::SignUserKey;
 use crate::key::{random_scalar, sub_mod};
 use crate::pairing;
 use crate::z256::Z256;
-use crate::Sm9Error;
 use rand::CryptoRng;
 use zeroize::ZeroizeOnDrop;
 
@@ -144,10 +144,11 @@ impl Signature {
         // Parse S (BIT STRING)
         let (s_bytes, _rest) = parse_asn1_bit_string(rest)?;
         if s_bytes.len() != 65 || s_bytes[0] != 0x04 {
-            return Err(Sm9Error::InvalidParameter(
-                format!("Invalid S point format: expected 65 bytes with 0x04 prefix, got {} bytes with prefix 0x{:02x}", 
-                    s_bytes.len(), s_bytes.first().unwrap_or(&0))
-            ));
+            return Err(Sm9Error::InvalidParameter(format!(
+                "Invalid S point format: expected 65 bytes with 0x04 prefix, got {} bytes with prefix 0x{:02x}",
+                s_bytes.len(),
+                s_bytes.first().unwrap_or(&0)
+            )));
         }
 
         let x = crate::field::fp::Fp::from_bytes(&s_bytes[1..33])
@@ -286,7 +287,7 @@ impl Signer {
         // GmSSL: sm9_z256_pairing(g, &key->Ppubs, sm9_z256_generator()) = e(P1, Ppubs)
         // Our pairing(p: G1, q: G2) computes e(P, Q), so we pass (P1, Ppubs)
         let p1 = crate::params::g1_generator();
-        let g = pairing::pairing(&p1, &self.key.ppubs);
+        let g = pairing::ate::pairing(&p1, &self.key.ppubs);
 
         const MAX_SIGN_RETRIES: u32 = 128; // Practical limit; probability of hitting this is <2^-128
         for _ in 0..MAX_SIGN_RETRIES {
@@ -363,12 +364,12 @@ impl Verifier {
 
         // g = e(P1, Ppubs) where P1 ∈ G1, Ppubs ∈ G2
         let p1 = crate::params::g1_generator();
-        let g = pairing::pairing(&p1, &self.ppubs);
+        let g = pairing::ate::pairing(&p1, &self.ppubs);
 
         // S 必须非单位元
 
         // u = e(S, P) where S ∈ G1, P ∈ G2
-        let u = pairing::pairing(&signature.s, &p);
+        let u = pairing::ate::pairing(&signature.s, &p);
 
         // t = g^h
         let t = g.pow(&signature.h);

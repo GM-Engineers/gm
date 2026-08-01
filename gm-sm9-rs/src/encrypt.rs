@@ -1,13 +1,13 @@
 //! SM9 encryption algorithm
 
-use crate::curve::g1::G1Point;
 use crate::curve::ScalarMul;
+use crate::curve::g1::G1Point;
 // use crate::field::FieldElement;
-use crate::hash;
-use crate::key::random_scalar;
-use crate::key::EncUserKey;
-use crate::pairing;
 use crate::Sm9Error;
+use crate::hash;
+use crate::key::EncUserKey;
+use crate::key::random_scalar;
+use crate::pairing;
 use rand::CryptoRng;
 use sm3::{Digest, Sm3};
 use zeroize::ZeroizeOnDrop;
@@ -197,7 +197,7 @@ impl Encryptor {
 
             // g = e(Ppube, P2)
             let p2 = crate::params::g2_generator();
-            let g = pairing::pairing(&self.ppube, &p2);
+            let g = pairing::ate::pairing(&self.ppube, &p2);
 
             // w = g^r
             let w = g.pow(&r);
@@ -253,7 +253,7 @@ impl Decryptor {
     /// SM9 KEM decryption
     fn kem_decrypt(&self, c1: &G1Point, id: &[u8], klen: usize) -> Result<Vec<u8>, Sm9Error> {
         // w = e(C1, de)
-        let w = pairing::pairing(c1, &self.key.de);
+        let w = pairing::ate::pairing(c1, &self.key.de);
         let w_bytes = w.to_bytes_gmssl();
 
         // K = KDF(C1 || w || ID, klen)

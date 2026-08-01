@@ -42,7 +42,6 @@ async fn create_test_service() -> CaServiceImpl {
     let keypair = Sm2KeyPair::generate().expect("failed to generate CA key");
     let signer = CaSigner::new(keypair, "Test CA");
 
-    
     CaServiceImpl::new(signer, Arc::new(store))
 }
 
