@@ -6,8 +6,8 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "GM/TLS (国密TLS) core library with SM2/SM3/SM4 support"
 repository = "https://github.com/GM-Engineers/gm"
-keywords = ["tls", "gm", "sm2", "sm3", "sm4", "gmtls", "cryptography", "ssl"]
-categories = ["cryptography", "network-programming", "security"]
+keywords = ["tls", "gmtls", "gm", "sm2", "cryptography"]
+categories = ["cryptography", "network-programming"]
 rust-version = "1.85"
 readme = "README.md"
 
