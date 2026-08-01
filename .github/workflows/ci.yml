@@ -77,7 +77,8 @@ jobs:
       - name: Run tests - gm-sm9-rs
         run: timeout 180 cargo test -p gm-sm9-rs --all-targets -- --test-threads=1 --nocapture
       - name: Run tests - gm-tls (grpc)
-        run: timeout 240 cargo test -p gm-tls --all-targets --features grpc -- --test-threads=1 --nocapture
+        # No --all-targets: the criterion bench target rejects libtest args.
+        run: timeout 240 cargo test -p gm-tls --features grpc -- --test-threads=1 --nocapture
       - name: Run tests - gm-ca
         run: timeout 240 cargo test -p gm-ca --all-targets -- --test-threads=1 --nocapture
       - name: Run tests - gm-http-client
