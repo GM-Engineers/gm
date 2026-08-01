@@ -62,10 +62,21 @@ jobs:
         with:
           path: target
           key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.toml') }}
-      - name: Run tests (with default features + gm-tls/grpc)
-        # --test-threads=1 avoids parallel port/race hangs under CI's high
-        # parallelism; --nocapture surfaces the last-running test if it hangs.
-        run: timeout 500 cargo test --workspace --all-targets --features gm-tls/grpc --no-fail-fast -- --nocapture --test-threads=1
+      # Run per-crate so a CI-only hang identifies its crate (libtest does not
+      # print a hanging test's name). Each step has its own timeout; the failing
+      # step names the culprit crate.
+      - name: Run tests - gm-der
+        run: timeout 180 cargo test -p gm-der --all-targets -- --test-threads=1 --nocapture
+      - name: Run tests - gm-crypto
+        run: timeout 240 cargo test -p gm-crypto --all-targets -- --test-threads=1 --nocapture
+      - name: Run tests - gm-sm9-rs
+        run: timeout 180 cargo test -p gm-sm9-rs --all-targets -- --test-threads=1 --nocapture
+      - name: Run tests - gm-tls (grpc)
+        run: timeout 240 cargo test -p gm-tls --all-targets --features grpc -- --test-threads=1 --nocapture
+      - name: Run tests - gm-ca
+        run: timeout 240 cargo test -p gm-ca --all-targets -- --test-threads=1 --nocapture
+      - name: Run tests - gm-http-client
+        run: timeout 180 cargo test -p gm-http-client --all-targets -- --test-threads=1 --nocapture
       - name: Run doctests
         run: timeout 300 cargo test --workspace --doc --no-fail-fast
       - name: Run full-chain gRPC/TLS integration test (isolated, non-blocking)
