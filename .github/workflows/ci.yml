@@ -68,6 +68,13 @@ jobs:
         run: timeout 500 cargo test --workspace --all-targets --features gm-tls/grpc --no-fail-fast -- --nocapture --test-threads=1
       - name: Run doctests
         run: timeout 300 cargo test --workspace --doc --no-fail-fast
+      - name: Run full-chain gRPC/TLS integration test (isolated, non-blocking)
+        # test_full_chain_grpc_ca_plus_tls_handshake is #[ignore]d in the default
+        # suite because it intermittently hangs on CI (handshake deadlock in the
+        # in-development GM/TLS stack). We still attempt it here, isolated and
+        # non-blocking, so a hang does not break the pipeline.
+        run: timeout 120 cargo test -p gm-ca --test full_chain_test -- --ignored --nocapture
+        continue-on-error: true
       - name: Build in release mode (with default features + gm-tls/grpc)
         run: timeout 600 cargo build --workspace --release --all-targets --features gm-tls/grpc
 
