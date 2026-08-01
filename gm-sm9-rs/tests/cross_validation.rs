@@ -390,7 +390,7 @@ mod cross_validation {
     fn test_pairing_with_gmssl_pubkey() {
         // Test pairing using GmSSL-generated public key
         use gm_sm9_rs::pairing::ate::pairing;
-        use gm_sm9_rs::{GmSignMasterKey, GmSigner, GmVerifier};
+        use gm_sm9_rs::{GmSignMasterKey, GmSigner};
         use gm_sm9_rs::{SignMasterKey, Signature, Verifier};
 
         // Generate with GmSSL

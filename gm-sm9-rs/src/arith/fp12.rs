@@ -431,6 +431,6 @@ mod tests {
 
         let start = Instant::now();
         let _result = a.pow(&exp);
-        let elapsed = start.elapsed();
+        let _elapsed = start.elapsed();
     }
 }

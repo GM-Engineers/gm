@@ -110,8 +110,8 @@ pub fn miller_loop(p: &G1Point, q: &G2Point) -> Fp12 {
 
 /// Multiply Fp12 by a sparse line function
 /// Based on GmSSL's sm9_z256_fp12_line_mul
-/// The line function has the form: lw[0] + lw[1]*w^2 + lw[2]*w^3
-/// which corresponds to Fp12: (lw[0] + lw[2]*v) + 0*w + (lw[1])*w^2
+/// The line function has the form: `lw[0] + lw[1]*w^2 + lw[2]*w^3`
+/// which corresponds to Fp12: `(lw[0] + lw[2]*v) + 0*w + (lw[1])*w^2`
 fn fp12_line_mul(a: &Fp12, lw0: &Fp2, lw1: &Fp2, lw2: &Fp2) -> Fp12 {
     // Construct lw4 = lw[0] + lw[2]*v (Fp4)
     let lw4 = Fp4::new(*lw0, *lw2);
@@ -142,8 +142,8 @@ fn fp12_line_mul(a: &Fp12, lw0: &Fp2, lw1: &Fp2, lw2: &Fp2) -> Fp12 {
 
 /// Line function for point doubling: l_{T,T}(P)
 /// Based on GmSSL's sm9_z256_eval_g_tangent (second version)
-/// Updates T in place to 2*T, returns lw[0], lw[1], lw[2]
-/// where g_line = lw[0] + lw[1]*w^2 + lw[2]*w^3
+/// Updates T in place to 2*T, returns `lw[0], lw[1], lw[2]`
+/// where g_line = `lw[0] + lw[1]*w^2 + lw[2]*w^3`
 fn line_function_double_lw(t: &mut G2Point, p_aff: &(Fp, Fp)) -> (Fp2, Fp2, Fp2) {
     if t.is_identity() {
         return (Fp2::ZERO, Fp2::ZERO, Fp2::ZERO);
@@ -202,7 +202,7 @@ fn line_function_double_lw(t: &mut G2Point, p_aff: &(Fp, Fp)) -> (Fp2, Fp2, Fp2)
 /// Line function for point addition: l_{T,Q}(P) with precomputed values
 /// Based on GmSSL's sm9_z256_eval_g_line (second version)
 /// Uses precomputed values from Q for efficiency
-/// Updates T in place to T+Q, returns lw[0], lw[1], lw[2]
+/// Updates T in place to T+Q, returns `lw[0], lw[1], lw[2]`
 #[allow(clippy::too_many_arguments)]
 fn line_function_add_lw(
     t: &mut G2Point,
@@ -289,7 +289,7 @@ fn line_function_add_lw(
 /// Line function for point addition without precomputed values
 /// Based on GmSSL's sm9_z256_eval_g_line_no_pre
 /// Computes pre values from T (the added point) on the fly
-/// Updates P in place to P+T, returns lw[0], lw[1], lw[2]
+/// Updates P in place to P+T, returns `lw[0], lw[1], lw[2]`
 fn line_function_add_lw_no_pre(p: &mut G2Point, t: &G2Point, q_aff: &(Fp, Fp)) -> (Fp2, Fp2, Fp2) {
     if p.is_identity() || t.is_identity() {
         return (Fp2::ZERO, Fp2::ZERO, Fp2::ZERO);

@@ -46,17 +46,17 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.toml') }}
       - name: Cache cargo index
         uses: actions/cache@v4
         with:
           path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.toml') }}
       - name: Cache target directory
         uses: actions/cache@v4
         with:
           path: target
-          key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.toml') }}
       - name: Run tests (with all features)
         run: cargo test --workspace --all-targets --all-features
       - name: Run doctests
@@ -70,13 +70,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: llvm-tools-preview
-      - name: Build fuzz targets
+      - name: Build fuzz targets (compile check)
         run: cargo build --workspace --manifest-path gm-tls/fuzz/Cargo.toml
-        env:
-          CFLAGS: -fsanitize=address,fuzzer-no-link
-          RUSTFLAGS: -Sanitizer=fuzzer
 
   security-audit:
     name: Security Audit (cargo-audit + cargo-deny)
@@ -84,15 +79,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install cargo-audit
-        run: cargo install cargo-audit
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-reg-security-${{ hashFiles('**/Cargo.toml') }}
+      - name: Cache advisory DB
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/advisory-db
+          key: ${{ runner.os }}-advisory-db-v2
+          restore-keys: ${{ runner.os }}-advisory-db-
+      - name: Generate Cargo.lock (library workspace does not commit one)
+        run: cargo generate-lockfile --workspace
+      - name: Install security tools
+        run: cargo install cargo-audit cargo-deny
       - name: Update advisory database
         run: cargo audit --update-db
-      - name: Run security audit
-        run: cargo audit
-      - name: Install cargo-deny
-        run: cargo install cargo-deny
-      - name: Run license and advisory check
+        env:
+          RUST_BACKTRACE: 0
+      - name: Run security audit (cargo-audit)
+        run: cargo audit --fix
+        env:
+          RUST_BACKTRACE: 0
+      - name: Run license and advisory check (cargo-deny)
         run: cargo deny check
 
   gmssl-interop:
@@ -105,12 +115,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-gmssl-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-gmssl-${{ hashFiles('**/Cargo.toml') }}
       - name: Cache cargo index
         uses: actions/cache@v4
         with:
           path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-gmssl-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-index-gmssl-${{ hashFiles('**/Cargo.toml') }}
       - name: Build GmSSL Docker image
         run: docker build -f docker/Dockerfile.gmssl -t gmssl-test .
       - name: Generate test certificates

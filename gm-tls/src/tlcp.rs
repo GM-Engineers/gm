@@ -2102,7 +2102,7 @@ const TLCP_RECORD_TYPE_CCS: u8 = 0x14;
 /// Write a plaintext TLCP handshake record to the transport.
 ///
 /// During the handshake phase, records are sent unencrypted.
-/// Format: [content_type=0x16][version=0x0101][length(2)][handshake_message]
+/// Format: `[content_type=0x16][version=0x0101][length(2)][handshake_message]`
 async fn write_handshake_record<S: AsyncWrite + Unpin>(
     transport: &mut S,
     msg: &[u8],
@@ -2725,7 +2725,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
 
     /// Decrypt a CBC+HMAC record.
     ///
-    /// Format: [HMAC(32)][IV(16)][ciphertext with padding]
+    /// Format: `[HMAC(32)][IV(16)][ciphertext with padding]`
     fn decrypt_cbc(&mut self, buf: &[u8], header: &[u8; 5]) -> Result<Vec<u8>, TlsError> {
         if buf.len() < SM3_HMAC_LENGTH + SM4_CBC_IV_LENGTH + SM4_BLOCK_SIZE {
             return Err(TlsError::HandshakeFailed(

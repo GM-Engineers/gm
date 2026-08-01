@@ -391,7 +391,7 @@ mod tests {
             0x3155249aa9f97b04,
         ]);
 
-        let result = mont_mul(&a_mont, &a_mont);
+        let _result = mont_mul(&a_mont, &a_mont);
 
         // Expected: a_mont^2 * R^-1 mod p
         // We need to verify this using Python or another method

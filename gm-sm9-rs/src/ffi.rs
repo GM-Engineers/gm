@@ -73,7 +73,7 @@ pub const SM9_SIGN_MASTER_KEY_MAX_SIZE: usize = 171;
 pub const SM9_SIGN_KEY_SIZE: usize = 204;
 
 /// SM9 big number (256 bits, 8 x uint64_t)
-/// Matches GmSSL 3.1.1's sm9_bn_t = uint64_t[8]
+/// Matches GmSSL 3.1.1's `sm9_bn_t = uint64_t[8]`
 /// Note: Only first 4 limbs (32 bytes) hold the actual 256-bit value;
 /// upper 4 limbs are padding/alignment but must be present for C struct compatibility.
 #[allow(non_camel_case_types)]
@@ -81,7 +81,7 @@ pub type sm9_bn_t = [u64; 8];
 
 /// SM9 function (element in scalar field Fp)
 /// Also used for signature component h
-/// Note: In GmSSL 3.1.1, sm9_fn_t = sm9_bn_t = uint64_t[8]
+/// Note: In GmSSL 3.1.1, `sm9_fn_t = sm9_bn_t = uint64_t[8]`
 /// Only first 4 limbs hold the value; upper 4 are padding.
 #[repr(C)]
 #[derive(Debug, Clone, Default)]

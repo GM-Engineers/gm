@@ -693,7 +693,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> GmTlsStream<S> {
 
     /// Process a decrypted post-handshake message.
     ///
-    /// Handshake message format: [HandshakeType(1)][length(3)][body...]
+    /// Handshake message format: `[HandshakeType(1)][length(3)][body...]`
     fn process_inner_handshake(&mut self, msg: &[u8]) -> Result<(), TlsError> {
         if msg.len() < 4 {
             return Err(TlsError::InvalidMessage(

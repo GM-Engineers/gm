@@ -66,6 +66,7 @@ pub const SM9_KEY_EXCHANGE_HID: u8 = 0x03;
 /// Carries the ephemeral secret `r_a`, the public `Q_B` for later pairing
 /// computation, and identifiers needed for KDF and key confirmation.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct InitiatorState {
     /// Ephemeral random scalar
     pub r_a: Z256,
@@ -75,7 +76,7 @@ pub struct InitiatorState {
     id_a: Vec<u8>,
     /// Responder identity (for KDF / confirmation)
     id_b: Vec<u8>,
-    /// R_A = [r_a]Q_B (we already sent this, keep for KDF)
+    /// `R_A = [r_a]Q_B` (we already sent this, keep for KDF)
     r_a_point: G1Point,
 }
 
@@ -90,7 +91,7 @@ pub struct InitiatorRound1 {
 /// Output of the responder (B): ephemeral point R_B and the derived shared key.
 #[derive(Clone)]
 pub struct ResponderOutput {
-    /// R_B = [r_B]Q_A — send to initiator
+    /// `R_B = [r_B]Q_A` — send to initiator
     pub r_b: G1Point,
     /// Shared key SK_B derived by B
     pub shared_key: Vec<u8>,
