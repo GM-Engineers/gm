@@ -63,7 +63,9 @@ jobs:
           path: target
           key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.toml') }}
       - name: Run tests (with default features + gm-tls/grpc)
-        run: timeout 500 cargo test --workspace --all-targets --features gm-tls/grpc --no-fail-fast
+        # --test-threads=1 avoids parallel port/race hangs under CI's high
+        # parallelism; --nocapture surfaces the last-running test if it hangs.
+        run: timeout 500 cargo test --workspace --all-targets --features gm-tls/grpc --no-fail-fast -- --nocapture --test-threads=1
       - name: Run doctests
         run: timeout 300 cargo test --workspace --doc --no-fail-fast
       - name: Build in release mode (with default features + gm-tls/grpc)
