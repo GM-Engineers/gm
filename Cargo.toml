@@ -5,7 +5,6 @@ members = [
     "gm-crypto",
     "gm-sm9-rs",
     "gm-tls",
-    "gm-tls/fuzz",
     "gm-ca",
     "gm-http-client",
 ]

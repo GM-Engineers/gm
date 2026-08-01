@@ -7,6 +7,11 @@ edition = "2024"
 # source to demonstrate test-coverage completeness.
 publish = false
 
+# Detach from the root workspace: cargo-fuzz dev tooling must be its own
+# workspace so `cargo test --workspace` / `cargo clippy --workspace` never
+# pull in the libFuzzer binaries (which would run forever and hang CI).
+[workspace]
+
 [package.metadata]
 cargo-fuzz = true
 
