@@ -1,5 +1,7 @@
 # Security Considerations
 
+**[中文版](./SECURITY.zh-CN.md)**
+
 ## Memory Management
 
 ### Key Zeroization
