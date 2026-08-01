@@ -66,8 +66,6 @@ jobs:
         run: timeout 500 cargo test --workspace --all-targets --all-features --no-fail-fast
       - name: Run doctests
         run: timeout 300 cargo test --workspace --doc --no-fail-fast
-      - name: Run doctests
-        run: cargo test --workspace --doc
       - name: Build in release mode (with all features)
         run: timeout 600 cargo build --workspace --release --all-targets --all-features
 
