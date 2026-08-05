@@ -2,7 +2,7 @@
 authors = ["Eric Zhang"]
 rust-version = "1.85"
 name = "gm-ca"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "GM/CA - Generic CA service for SM2 certificates"
@@ -37,7 +37,7 @@ rand = "0.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 metrics = "0.24"
-metrics-exporter-prometheus = "0.16"
+metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"] }
 subtle = "2"
 zeroize = { version = "1", features = ["derive"] }
 
