@@ -45,7 +45,7 @@ zeroize = { version = "1", features = ["derive"] }
 tokio-test = "0.4"
 tempfile = "3"
 elliptic-curve = "0.13"
-asn1 = "0.17"
+asn1 = "0.24"
 
 [build-dependencies]
 tonic-build = { version = "0.14", features = ["transport"] }
