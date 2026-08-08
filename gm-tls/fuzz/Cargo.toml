@@ -26,7 +26,7 @@ time = "0.3"
 sm2 = { version = "0.13", features = ["dsa", "arithmetic"] }
 elliptic-curve = "0.13"
 subtle = "2"
-generic-array = "0.14"
+generic-array = "1.4"
 
 # Build profile overrides live in the workspace root (`Cargo.toml`); per-package
 # `[profile.*]` sections are ignored by cargo and would emit a warning.
