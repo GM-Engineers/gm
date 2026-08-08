@@ -67,6 +67,12 @@
 //! }
 //! ```
 
+// `async_trait` (used in `session_store.rs`) generates `#[must_use]` futures. Newer
+// clippy (CI runs on nightly) flags this as `clippy::double_must_use` because
+// `futures::Future` is already `#[must_use]`. This is a false positive on
+// macro-generated code we don't control, so we allow it here.
+#![allow(clippy::double_must_use)]
+
 pub mod audit;
 #[doc(hidden)]
 pub mod cert_verify;
