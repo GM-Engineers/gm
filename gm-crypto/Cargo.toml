@@ -15,7 +15,7 @@ readme = "README.md"
 gm-der = { path = "../gm-der", version = "0.1.0" }
 sm2 = { version = "0.13", features = ["dsa", "pkcs8", "arithmetic", "pem"] }
 sm3 = { version = "0.4" }
-sm4 = { version = "0.5" }
+sm4 = { version = "0.6" }
 time = "0.3"
 ghash = "0.5"
 ctr = "0.9"
