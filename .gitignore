@@ -40,6 +40,7 @@ Thumbs.db
 **/fuzz/**/corpus/
 **/fuzz/**/artifacts/
 **/fuzz/**/crash-*
+**/fuzz/slow-unit-*
 **/fuzz/**/*.options
 **/fuzz/**/*.launcher
 **/fuzz/**/target/
