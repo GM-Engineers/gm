@@ -44,7 +44,7 @@ zeroize = { version = "1", features = ["derive"] }
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3"
-elliptic-curve = "0.13"
+elliptic-curve = "0.14"
 asn1 = "0.17"
 
 [build-dependencies]

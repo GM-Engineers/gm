@@ -24,7 +24,7 @@ arbitrary = { version = "1.4", features = ["derive"] }
 tokio = { version = "1", features = ["rt"] }
 time = "0.3"
 sm2 = { version = "0.13", features = ["dsa", "arithmetic"] }
-elliptic-curve = "0.13"
+elliptic-curve = "0.14"
 subtle = "2"
 generic-array = "0.14"
 

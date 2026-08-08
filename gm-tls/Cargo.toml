@@ -18,7 +18,7 @@ all-features = true
 gm-der = { path = "../gm-der", version = "0.1.0" }
 gm-crypto = { path = "../gm-crypto", version = "0.1.0" }
 indexmap = "2"
-elliptic-curve = "0.13"
+elliptic-curve = "0.14"
 hex = "0.4"
 subtle = "2.6"
 rand = "0.10"
