@@ -37,7 +37,7 @@ once_cell = "1.19"
 async-trait = "0.1"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "postgres", "chrono"] }
 deadpool-redis = "0.17"
-redis = { version = "0.26", features = ["tokio-comp", "connection-manager"] }
+redis = { version = "1.6", features = ["tokio-comp", "connection-manager"] }
 
 # Optional: tonic gRPC integration
 tonic = { version = "0.14", optional = true }
