@@ -17,7 +17,7 @@ sm2 = { version = "0.13", features = ["dsa", "pkcs8", "arithmetic", "pem"] }
 sm3 = { version = "0.4" }
 sm4 = { version = "0.5" }
 time = "0.3"
-ghash = "0.5"
+ghash = "0.6"
 ctr = "0.9"
 universal-hash = "0.5"
 hex = "0.4"
