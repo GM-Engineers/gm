@@ -26,7 +26,7 @@ gm-crypto = { path = "../gm-crypto", default-features = false, version = "0.1.0"
 libc = { version = "0.2", optional = true }
 
 # Hash functions
-sm3 = "0.4"
+sm3 = "0.5"
 once_cell = "1"
 digest = "0.10"
 
