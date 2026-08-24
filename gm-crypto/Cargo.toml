@@ -18,7 +18,7 @@ sm3 = { version = "0.4" }
 sm4 = { version = "0.5" }
 time = "0.3"
 ghash = "0.5"
-ctr = "0.9"
+ctr = "0.10"
 universal-hash = "0.5"
 hex = "0.4"
 base64 = { version = "0.22", features = ["alloc"] }
