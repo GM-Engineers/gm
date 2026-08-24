@@ -30,7 +30,7 @@ rand = "0.10"
 rand_core = { version = "0.6", features = ["getrandom"] }
 subtle = "2.6"
 zeroize = { version = "1", features = ["derive"] }
-pem = "3.0"
+pem = "4.0"
 x509-parser = "0.16"
 signature = "2.2"
 pkcs8 = { version = "0.10", features = ["encryption", "pem"] }
