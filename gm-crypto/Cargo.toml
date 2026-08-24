@@ -33,7 +33,7 @@ zeroize = { version = "1", features = ["derive"] }
 pem = "3.0"
 x509-parser = "0.16"
 signature = "2.2"
-pkcs8 = { version = "0.10", features = ["encryption", "pem"] }
+pkcs8 = { version = "0.11", features = ["encryption", "pem"] }
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full"] }
