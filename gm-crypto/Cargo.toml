@@ -21,7 +21,7 @@ ghash = "0.5"
 ctr = "0.9"
 universal-hash = "0.5"
 hex = "0.4"
-base64 = { version = "0.22", features = ["alloc"] }
+base64 = { version = "0.23", features = ["alloc"] }
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2"
 typenum = "1"
