@@ -7,24 +7,173 @@ updates:
       day: "monday"
       time: "09:00"
       timezone: "Asia/Shanghai"
-    open-pull-requests-limit: 10
+    # Reduce concurrent PRs so reviewers can keep up
+    open-pull-requests-limit: 5
     labels:
       - "dependencies"
       - "automated"
     commit-message:
       prefix: "deps"
       include: "scope"
+    # Cooldown: wait N days after a new version is released before opening a PR.
+    # This avoids premature updates and gives upstream time to ship fixes.
+    cooldown:
+      default-days: 3
+      semver-patch-days: 1
+      semver-minor-days: 4
+      semver-major-days: 14
+    # Only open PRs for new versions; never rebase onto stale PRs silently.
+    rebase-strategy: "disabled"
+    # Group transitive updates so we don't get a cascade of single-crate PRs.
     groups:
+      rustcrypto-block-modes:
+        patterns:
+          - "cipher"
+          - "ctr"
+          - "cbc"
+          - "cfb-mode"
+          - "ofb"
+          - "ghash"
+          - "universal-hash"
+        update-types:
+          - "minor"
+          - "patch"
+      rustcrypto-formats:
+        patterns:
+          - "der"
+          - "pem"
+          - "pkcs1"
+          - "pkcs5"
+          - "pkcs7"
+          - "pkcs8"
+          - "pkcs10"
+          - "x509-parser"
+          - "asn1"
+          - "const-oid"
+          - "spki"
+        update-types:
+          - "minor"
+          - "patch"
+      rustcrypto-elliptic-curves:
+        patterns:
+          - "elliptic-curve"
+          - "ecdsa"
+          - "k256"
+          - "p256"
+          - "p384"
+          - "sec1"
+          - "sm2"
+        update-types:
+          - "minor"
+          - "patch"
+      rustcrypto-hash:
+        patterns:
+          - "digest"
+          - "sha1"
+          - "sha2"
+          - "sha3"
+          - "sm3"
+          - "blake2"
+          - "blake3"
+          - "hmac"
+          - "crypto-common"
+          - "inout"
+        update-types:
+          - "minor"
+          - "patch"
       prod-dependencies:
         dependency-type: "production"
+        exclude-patterns:
+          - "cipher"
+          - "ctr"
+          - "cbc"
+          - "cfb-mode"
+          - "ofb"
+          - "ghash"
+          - "universal-hash"
+          - "der"
+          - "pem"
+          - "pkcs1"
+          - "pkcs5"
+          - "pkcs7"
+          - "pkcs8"
+          - "pkcs10"
+          - "x509-parser"
+          - "asn1"
+          - "const-oid"
+          - "spki"
+          - "elliptic-curve"
+          - "ecdsa"
+          - "k256"
+          - "p256"
+          - "p384"
+          - "sec1"
+          - "sm2"
+          - "digest"
+          - "sha1"
+          - "sha2"
+          - "sha3"
+          - "sm3"
+          - "blake2"
+          - "blake3"
+          - "hmac"
+          - "crypto-common"
+          - "inout"
         update-types:
           - "minor"
           - "patch"
       dev-dependencies:
         dependency-type: "development"
+        exclude-patterns:
+          - "cipher"
+          - "ctr"
+          - "cbc"
+          - "cfb-mode"
+          - "ofb"
+          - "ghash"
+          - "universal-hash"
+          - "der"
+          - "pem"
+          - "pkcs1"
+          - "pkcs5"
+          - "pkcs7"
+          - "pkcs8"
+          - "pkcs10"
+          - "x509-parser"
+          - "asn1"
+          - "const-oid"
+          - "spki"
+          - "elliptic-curve"
+          - "ecdsa"
+          - "k256"
+          - "p256"
+          - "p384"
+          - "sec1"
+          - "sm2"
+          - "digest"
+          - "sha1"
+          - "sha2"
+          - "sha3"
+          - "sm3"
+          - "blake2"
+          - "blake3"
+          - "hmac"
+          - "crypto-common"
+          - "inout"
         update-types:
           - "minor"
           - "patch"
+    # Temporarily ignore versions known to require SemVer-major-style code
+    # adaptation. Re-evaluate when upstream stabilises.
+    ignore:
+      - dependency-name: "redis"
+        # 0.26 → 1.x is a major break; redis-rs API was rewritten.
+        versions:
+          - ">=1.0.0, <2.0.0"
+      - dependency-name: "tokio"
+        # Avoid surprise MSRV bumps; bump manually.
+        versions:
+          - ">=2.0.0, <3.0.0"
 
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -33,9 +182,13 @@ updates:
       day: "monday"
       time: "09:00"
       timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 3
     labels:
       - "dependencies"
       - "ci"
     commit-message:
       prefix: "ci"
       include: "scope"
+    cooldown:
+      default-days: 3
+    rebase-strategy: "disabled"
