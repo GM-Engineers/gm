@@ -1,0 +1,67 @@
+name: Security Vulnerability
+description: 报告安全漏洞（**不要**在公开 issue 中披露可利用细节）/ Report a security vulnerability (do NOT disclose exploit details publicly)
+title: "[security] "
+labels: ["security", "needs-triage"]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ⚠️ **对于可立即被利用的漏洞，请勿在此公开披露。**
+        请通过 [SECURITY.md](https://github.com/GM-Engineers/gm/blob/main/SECURITY.md) 中列出的私密渠道联系维护者。
+        公开披露前请等待 CVE 编号分配或维护者确认修复时间表。
+
+        ⚠️ **For immediately-exploitable vulnerabilities, do NOT disclose details here.**
+        Contact maintainers privately via the channels listed in
+        [SECURITY.md](https://github.com/GM-Engineers/gm/blob/main/SECURITY.md).
+        Wait for CVE assignment or maintainer confirmation before public disclosure.
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: 严重度估计 / Severity estimate
+      options:
+        - Critical (remote code execution / authentication bypass)
+        - High (key material leak / MITM)
+        - Medium (DoS / information leak)
+        - Low (theoretical / requires unusual conditions)
+    validations:
+      required: true
+
+  - type: input
+    id: affected
+    attributes:
+      label: 受影响组件 / Affected components
+      description: crate 名 + 版本 + 受影响的代码路径
+      placeholder: "gm-tlcp 0.1.0, src/tlcp/mod.rs:1814 (now fixed in 0.1.1)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 漏洞描述 / Vulnerability description
+      description: |
+        在此 issue 中**仅**给出高层描述（攻击面、影响范围）。
+        **不要**在此处粘贴 PoC、完整堆栈或可利用代码——这些应在私密沟通中提交。
+        High-level description only (attack surface, impact). NO PoC, NO full stack trace, NO exploit code here.
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: 影响 / Impact
+      description: |
+        受影响用户数（crater 反推）、可观测症状、攻击者能力需求。
+        Estimated affected users, observable symptoms, attacker capability required.
+
+  - type: checkbox
+    id: ack
+    attributes:
+      label: 我理解公开披露的责任，承诺先通过私密渠道上报 / I understand responsible disclosure and will contact maintainers privately first
+      options:
+        - label: 确认 / Acknowledge
+      validations:
+        required: true

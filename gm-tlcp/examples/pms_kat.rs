@@ -1,8 +1,18 @@
 //! TLCP ECDHE Pre-Master Secret (PMS) Known-Answer Test.
 //!
-//! Hardcoded test vectors from a deterministic gmssl `tlcp_server` trace.
-//! Used to verify that gm-tlcp's PMS derivation matches GmSSL 3.3.0-dev
-//! master byte-for-byte. Run with:
+//! ⚠️ **TEST-ONLY ARTIFACT — DO NOT USE THESE KEYS IN PRODUCTION** ⚠️
+//!
+//! This example embeds a 32-byte SM2 **private key** and its 64-byte public key
+//! pair, plus the expected 48-byte PMS output. These are **public-knowledge test
+//! vectors** from a deterministic `gmssl tlcp_server` trace used to verify that
+//! `gm-tlcp`'s PMS derivation matches GmSSL 3.3.0-dev master byte-for-byte.
+//!
+//! Anyone reading this source has the private key, so any TLCP handshake using
+//! these bytes offers **zero authentication**. Production code paths must
+//! generate fresh keypairs via [`gm_crypto::sm2::Sm2KeyPair::generate()`]
+//! (CSPRNG) and never reuse the bytes below.
+//!
+//! Run with:
 //!
 //! ```bash
 //! cargo run --example pms_kat -p gm-tlcp

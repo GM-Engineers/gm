@@ -72,6 +72,12 @@ pub enum TlcpError {
     TlsRecordError(String),
 
     /// 握手消息解析错误（ASN.1 解码失败、字段长度越界等）
+    ///
+    /// **保留变体**：当前 gm-tlcp 实现主要使用 [`TlcpError::HandshakeFailed`] / [`TlcpError::InvalidMessage`]
+    /// 上报 ASN.1 与消息体解析错误（这些错误现阶段无需细分「ASN.1 解析」vs「字段语义」）。
+    /// 本变体保留以便未来拆分手 `tlcp::messages::*::from_bytes()` 中的 `nom` / `der`
+    /// 错误时使用；下游 `match` 应以 `_` 通配兜底（[`TlcpError`] 是 `#[non_exhaustive]`），
+    /// 未来 0.2.0 可能在追加错误细分后开始构造本变体。
     #[error("parse error: {0}")]
     ParseError(String),
 

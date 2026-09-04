@@ -120,7 +120,7 @@ TLCP uses protocol version 0x0101 and does NOT implement:
 ### Session Resumption
 
 TLCP session resumption uses session IDs (not session tickets as in TLS 1.3).
-Session cache uses LRU eviction with configurable capacity (default: 1024 sessions)
+Session cache uses FIFO eviction with configurable capacity (default: 1024 sessions)
 and 24-hour TTL.
 
 ## Traffic Secret Protection

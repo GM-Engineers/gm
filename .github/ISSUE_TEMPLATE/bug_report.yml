@@ -1,0 +1,121 @@
+name: Bug Report
+description: 报告 gm-tlcp / gm-tls / gm-crypto 等 crate 的 bug / Report a bug in any crate
+title: "[bug] "
+labels: ["bug", "needs-triage"]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先查阅 [已知问题清单](https://github.com/GM-Engineers/gm/issues?q=is%3Aissue+label%3Abug)
+        和 [CHANGELOG](https://github.com/GM-Engineers/gm/blob/main/CHANGELOG.md)，
+        确认尚未报告且非预期行为。
+        Please check the [issue tracker](https://github.com/GM-Engineers/gm/issues) and
+        [CHANGELOG](https://github.com/GM-Engineers/gm/blob/main/CHANGELOG.md) first.
+
+  - type: dropdown
+    id: crate
+    attributes:
+      label: 受影响的 crate / Affected crate
+      description: 选择出问题的 crate / Pick the crate where the bug occurs
+      options:
+        - gm-tlcp
+        - gm-tls
+        - gm-crypto
+        - gm-der
+        - gm-ca
+        - gm-http-client
+        - gm-sm9-rs
+        - gm-kms
+        - 其他 / Other (请说明 / specify below)
+      validations:
+        required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本 / Version
+      description: |
+        受影响 crate 的精确版本（运行 `cargo tree -p <crate> | head` 或查看 Cargo.lock）。
+        Exact version of the affected crate.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: rustc
+    attributes:
+      label: Rust 工具链 / Rust toolchain
+      description: "`rustc --version` 的完整输出"
+      placeholder: "rustc 1.85.0 (a28077b28 2025-02-13)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统 / Operating system
+      options:
+        - Linux (x86_64)
+        - Linux (aarch64)
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Windows (x86_64)
+        - 其他 / Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: 问题概述 / Summary
+      description: 一句话描述问题 / One-sentence summary
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤 / Reproduction steps
+      description: |
+        1. 调用方法（CLI / API / TLS handshake）
+        2. 输入参数 / 测试向量
+        3. 期望输出
+        4. 实际输出
+        5. （如适用）日志片段
+      placeholder: |
+        1. Run `cargo run --example simple_client`
+        2. Server uses TLCP cipher suite `0xE011`
+        3. Expected: handshake succeeds
+        4. Actual: panics with "bad_record_mac" after ServerHelloDone
+    validations:
+      required: true
+
+  - type: textarea
+    id: stack
+    attributes:
+      label: 堆栈跟踪 / Stack trace
+      description: |
+        如果是 panic，请粘贴 RUST_BACKTRACE=full 输出。
+        If a panic, paste RUST_BACKTRACE=full output.
+      render: shell
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息 / Additional context
+      description: |
+        其他相关信息：是否使用自定义证书？是否在 Wireshark 中抓到 pcap？
+        Any other relevant context (custom certs? pcap? regression from earlier version?).
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: 提交前确认 / Confirmations
+      options:
+        - label: 我已确认这不是 CHANGELOG 中已声明的预期行为 / I have verified this is not a declared behavior in CHANGELOG
+          required: true
+        - label: 我已搜索过 issues 列表，未发现重复报告 / I have searched the issue tracker for duplicates
+          required: true
+        - label: 我愿意按 [CONTRIBUTING.md](https://github.com/GM-Engineers/gm/blob/main/CONTRIBUTING.md) 配合复现 / I am willing to help reproduce per CONTRIBUTING.md

@@ -1,0 +1,64 @@
+name: Feature Request
+description: 请求新功能或对现有功能的改进 / Request a new feature or improvement
+title: "[feat] "
+labels: ["enhancement", "needs-triage"]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        在创建 issue 前请确认：
+        - 在 [issues](https://github.com/GM-Engineers/gm/issues?q=is%3Aissue+label%3Aenhancement) 中未发现重复
+        - 不是已经在 [CHANGELOG](https://github.com/GM-Engineers/gm/blob/main/CHANGELOG.md) 中规划的
+
+        Please verify before filing:
+        - Not a duplicate of existing enhancement issues
+        - Not already on the roadmap in CHANGELOG
+
+  - type: dropdown
+    id: crate
+    attributes:
+      label: 受影响的 crate / Affected crate
+      options:
+        - gm-tlcp
+        - gm-tls
+        - gm-crypto
+        - gm-der
+        - gm-ca
+        - gm-http-client
+        - gm-sm9-rs
+        - gm-kms
+        - 其他 / Other
+      validations:
+        required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 问题 / 问题背景 / Problem statement
+      description: 当前在使用中遇到什么不便？/ What pain point does this address?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 提案 / Proposal
+      description: |
+        API 设计草案、使用示例、与已有 API 的关系。
+        API sketch, usage example, how it relates to existing APIs.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 已考虑过的替代方案 / Alternatives considered
+      description: 为什么选这个方案而不是其他？/ Why this and not alternatives?
+
+  - type: textarea
+    id: breaking
+    attributes:
+      label: 是否破坏 API 兼容？/ Backwards compatibility
+      description: |
+        是否需要 SemVer-major 升级？是否需要 migration guide？
+        SemVer-major? Migration guide needed?
