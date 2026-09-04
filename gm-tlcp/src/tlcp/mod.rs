@@ -107,7 +107,7 @@
 //! # 互操作性 Interoperability
 //!
 //! - **GmSSL 3.3.0-dev** (`master`): handshake + APP_DATA byte-for-byte
-//!   round-trip verified (see [`tests/gmssl_interop.rs`]). All four
+//!   round-trip verified (see `tests/gmssl_interop.rs`). All four
 //!   TLCP cipher suites covered across both CBC and GCM modes.
 //!   `no_common_cipher_suite` negative path and server-side cipher-
 //!   suite preference semantics also verified.
@@ -1796,8 +1796,6 @@ impl TlcpConnector {
                 .map_err(|e| TlcpError::HandshakeFailed(format!("compute Z_server: {}", e)))?;
             let z_client = crate::tlcp::pms::sm2_compute_z(&client_enc_pub_xy, default_user_id)
                 .map_err(|e| TlcpError::HandshakeFailed(format!("compute Z_client: {}", e)))?;
-            eprintln!("[gm-tlcp] Z_server = {:02x?}", &z_server[..8]);
-            eprintln!("[gm-tlcp] Z_client = {:02x?}", &z_client[..8]);
             // 6. PMS = KDF(x_V || y_V || Z_server || Z_client, 48).
             let pms_vec = crate::tlcp::pms::compute_tlcp_ecdhe_pms(
                 &client_enc_pub_xy,
@@ -1811,7 +1809,6 @@ impl TlcpConnector {
                 48,
             )
             .map_err(|e| TlcpError::HandshakeFailed(format!("PMS derivation: {}", e)))?;
-            eprintln!("[gm-tlcp] PMS = {:02x?}", &pms_vec[..]);
             // 7. CKE wire format = ECParameters-wrapped 65-byte
             //    uncompressed client ephemeral SEC1 (R_A).
             let cke = TlcpClientKeyExchange::new_ecdhe(client_ephemeral_sec1);
@@ -1862,18 +1859,6 @@ impl TlcpConnector {
                 .map_err(|e| TlcpError::HandshakeFailed(format!("client key load: {:?}", e)))?;
             let client_signer = gm_crypto::sm2::Sm2Signer::new(&client_kp)
                 .map_err(|e| TlcpError::HandshakeFailed(format!("client signer: {:?}", e)))?;
-            eprintln!(
-                "[gm-tlcp] CV signing raw transcript ({} bytes; NOT pre-hashed) — \
-                 sm2 crate will internally compute SM3(Z || transcript) where Z is \
-                 derived from the client sign pubkey + distid",
-                client_hs.transcript.len(),
-            );
-            // Dump the transcript to a temp file so we can diff it
-            // against gmssl's server-side transcript for debugging.
-            if let Ok(mut f) = std::fs::File::create("/tmp/gm-tlcp-transcript.bin") {
-                use std::io::Write;
-                let _ = f.write_all(&client_hs.transcript);
-            }
             let signature: [u8; 64] = client_signer
                 .sign(&client_hs.transcript)
                 .map_err(|e| TlcpError::HandshakeFailed(format!("CV sign: {:?}", e)))?
@@ -1892,10 +1877,7 @@ impl TlcpConnector {
                 gm_crypto::sm2::GM_TLS_DEFAULT_ID,
             ) {
                 Ok(verifier) => match verifier.verify(&client_hs.transcript, &signature) {
-                    Ok(()) => eprintln!(
-                        "[gm-tlcp] CV self-verify OK — if server rejects, transcript \
-                         likely diverges from gmssl's conn->transcript"
-                    ),
+                    Ok(()) => {}
                     Err(e) => {
                         return Err(TlcpError::HandshakeFailed(format!(
                             "CV self-verify FAILED locally ({:?}) — the signature is \
@@ -1905,10 +1887,12 @@ impl TlcpConnector {
                         )));
                     }
                 },
-                Err(e) => eprintln!(
-                    "[gm-tlcp] CV self-verify skipped: Sm2Verifier::new failed: {:?}",
-                    e
-                ),
+                Err(e) => {
+                    return Err(TlcpError::HandshakeFailed(format!(
+                        "CV self-verify skipped: Sm2Verifier::new failed: {:?}",
+                        e
+                    )));
+                }
             }
             let mut cv_body = Vec::with_capacity(2 + signature_der.len());
             cv_body.push((signature_der.len() >> 8) as u8);

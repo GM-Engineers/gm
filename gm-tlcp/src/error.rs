@@ -10,7 +10,8 @@
 //! - **`#[non_exhaustive]`**：未来新增变体不会破坏下游 match 穷尽性
 //! - **错误分类**：所有变体均可归入「握手错误」、「记录层错误」、「I/O 错误」三类
 //!
-//! 拆分理由详见 [ADR-001](https://github.com/GM-Engineers/gm-kms/blob/main/discuss/10-adr-gm-tlcp-split.md) §3.5。
+//! 拆分理由详见 [`TlcpError`] 枚举的历史变更（搜索 git log 中的 'extract TLCP' 相关 commit），
+//! 以及 crate 级 `lib.rs` 中的 `Relationship with gm-tls` 章节。
 //!
 //! # 示例
 //!

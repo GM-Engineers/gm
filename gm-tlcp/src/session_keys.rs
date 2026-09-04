@@ -14,7 +14,8 @@
 //! # 与 `gm_tls::session_ticket::SessionKeys` 的关系
 //!
 //! 本结构体是 `gm_tls::session_ticket::SessionKeys` 的 TLCP 子集复制，
-//! 拆分原因：避免 `gm-tlcp` 反向依赖 `gm-tls`（ADR-001 §3.5）。
+//! 拆分原因：避免 `gm-tlcp` 反向依赖 `gm-tls`（详见 crate 级 `lib.rs`
+//! 中的 `Relationship with gm-tls` 章节）。
 //!
 //! # 安全性 Security
 //!

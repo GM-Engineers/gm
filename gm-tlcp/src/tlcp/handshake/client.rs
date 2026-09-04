@@ -282,7 +282,7 @@ impl TlcpHandshake {
     ///
     /// `verify_data = PRF(master_secret, "client finished", SM3(handshake_messages))[0..12]`
     /// where the PRF is the SM3-based TLS 1.2 iterated expansion
-    /// ([`TlcpKeyMaterial::prf_expand`]), not a single SM3 invocation.
+    /// (see `prf_expand` in `TlcpKeyMaterial`), not a single SM3 invocation.
     pub fn compute_client_finished(&self) -> Result<TlcpFinished, TlcpError> {
         let master = self
             .master_secret
