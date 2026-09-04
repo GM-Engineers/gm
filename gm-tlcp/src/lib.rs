@@ -101,7 +101,7 @@
 //! ├── session_keys.rs      // SessionKeys（双向 SM4 密钥 + GCM base nonce）
 //! └── tlcp/              // 协议实现：22 个 .rs（3 个顶层 mod + 4 个握手 mod + 8 个消息 mod + 2 个密码学 mod），详情见各子模块文档
 //! ```
-//! |
+//!
 //! 按职责拆分见 `tlcp/` 下各子模块的模块级文档。
 //!
 //! # API 入口点 API Entry Points
@@ -127,9 +127,12 @@
 //!
 //! # 与 gm-tls 的关系 Relationship with gm-tls
 //!
-//! `gm-tlcp` **不**依赖 `gm-tls`；`gm-tls` 依赖 `gm-tlcp`（通过 `path = "../gm-tlcp"`）。
-//! 旧路径 `gm_tls::tlcp::*` 在 `gm-tls` 0.2.0+ 标记为 `#[deprecated]`，仍可继续使用
-//! 但带迁移警告。新代码请直接 `use gm_tlcp::...`。
+//! `gm-tlcp` **不**依赖 `gm-tls`；`gm-tls` 也不再从 `gm-tls/src/tlcp.rs`
+//! 借用 TLCP 实现（`tlcp.rs` 已于本 crate 提取时一并删除，见
+//! [`gm-tls/CHANGELOG.md`](https://github.com/GM-Engineers/gm/blob/main/gm/gm-tls/CHANGELOG.md)
+//! 与 [`gm-tlcp` 提取 commit](https://github.com/GM-Engineers/gm/commit/28fbca1)）。
+//! 两个 crate 完全独立：gm-tls 仅在 TLS 1.3 路径上使用本 crate 没有的
+//! 独立实现。请直接 `use gm_tlcp::...` 访问 TLCP。
 //!
 //! # 许可证 License
 //!

@@ -30,7 +30,7 @@ TLCP（Transport Layer Cryptographic Protocol，传输层密码协议）是 GB/T
 - ✅ Session resumption via session IDs (`TlcpSessionCache`)
 - ✅ Alert 协议（`TlcpAlert` / `TlcpAlertDescription`）
 - ✅ 全部 4 个密码套件
-- ✅ 58 unit tests + 4 gmssl interop integration tests
+- ✅ 58 lib tests + 32 integration tests (`tests/integration_tlcp.rs`) + 4 default gmssl interop tests (7 more `#[ignore]`d, run with `--ignored` when `gmssl` is on `PATH`)
 - ✅ GmSSL 3.3.0-dev (`master`) handshake + APP_DATA byte-for-byte 互操作验证
 - ❌ Tongsuo 8.3.0 round-trip — Tongsuo-side NTLS state-machine 拒绝 `0x0101`，调查见 `interop/tongsuo/upstream/`
 

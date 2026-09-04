@@ -33,7 +33,7 @@ The same `interop_client` (default settings, `gmssl_padding_compat = false`) has
 
 ## Root cause analysis (off-by-one in gm-tlcp, not GmSSL)
 
-RFC 5246 §6.2.3.2 (and GB/T 38636-2020 §6.2.3) specifies the MAC-then-Encrypt record as:
+RFC 5246 §6.2.3.2 (and GB/T 38636-2020 §6.2.3.2) specifies the MAC-then-Encrypt record as:
 
 ```
 struct {
@@ -66,7 +66,7 @@ mac = padding - 32;
 
 So `outlen = inlen - 32 - padding_len - 1`, i.e. the **single trailing byte is not counted in `outlen`**.
 
-gm-tlcp's `write_cbc_record` (in `src/tlcp.rs` ~line 2779) currently does:
+gm-tlcp's `encrypt_cbc_record` (in `src/tlcp/mod.rs` ~line 527) currently does:
 
 ```rust
 let inner_len = plaintext.len() + SM3_HMAC_LENGTH;
@@ -109,7 +109,9 @@ and the symmetric decryption side needs to strip `padding_len + 1` bytes.
 ## References
 
 - RFC 5246 §6.2.3.2 (TLS 1.2 record-layer MAC-then-Encrypt with explicit `padding_length` byte)
-- GB/T 38636-2020 §6.2.3 (TLCP adopts the same MAC-then-Encrypt structure)
+- GB/T 38636-2020 §6.2.3.2 (TLCP adopts the same MAC-then-Encrypt structure)
 - GmSSL commits `57c9433` (2026-06-01) and `c12edeb` (2026-06-13) — both fixes to `sm4_cbc_padding_decrypt`
 - GmSSL `src/tls.c:460-490` (the `tls_cbc_decrypt` parser that consumes our records)
-- gm-tlcp `src/tlcp.rs:2779` (the buggy `write_cbc_record`)
+- gm-tlcp `src/tlcp/mod.rs:~527` (the buggy `encrypt_cbc_record` — note:
+  this analysis predates the 18-sub-module split when the function
+  lived in `src/tlcp.rs` at line 2779)

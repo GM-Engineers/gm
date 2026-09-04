@@ -160,7 +160,8 @@ The `interop/tongsuo/` directory (build / run Tongsuo for cross-impl
 interop testing) lives in the GitHub repo so anyone can reproduce
 our Tongsuo interop results. It MUST NOT ship to crates.io because:
 
-- The Tongsuo build is ~16 MB of static binary + fuzz corpora.
+- The Tongsuo build tree is ~176 MB (16 MB static binary + 67 MB
+  fuzz corpora + spec/test sources).
 - The `interop/` scripts are POSIX `bash` + Docker — useless to a
   Windows / non-Docker downstream user.
 - The `tests/gmssl_interop.rs` integration test that consumes the
