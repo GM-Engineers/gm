@@ -1,13 +1,15 @@
 //! GM/TLS handshake types and utilities.
 //!
-//! This module contains the **shared handshake message types** used by both
-//! TLS 1.3 (RFC 8446) and TLCP (GB/T 38636-2020) implementations in this crate.
+//! This module contains the **shared handshake message types** used by the
+//! TLS 1.3 + SM (RFC 8446) implementation in this crate. TLCP (GB/T 38636-2020)
+//! support has been moved to the standalone `gm-tlcp` crate; the TLCP-specific
+//! handshake types (TlcpClientHello, TlcpServerKeyExchange, ...) live there.
 //!
 //! - The **TLS 1.3 + SM** path (`src/gm.rs`) is the default and production-ready,
 //!   using protocol version byte `0x0303`.
-//! - The **TLCP** path (`src/tlcp.rs`) is a reference implementation of the Chinese
-//!   national standard, using protocol version byte `0x0101`. Note: TLCP is being
-//!   extracted into a separate `gm-tlcp` crate; see `gm-kms/discuss/10-adr-gm-tlcp-split.md`.
+//! - **TLCP** (`gm-tlcp` crate, no longer in this repo): reference implementation
+//!   of the Chinese national standard, using protocol version byte `0x0101`.
+//!   See [`gm-tlcp` crate documentation](https://docs.rs/gm-tlcp) for details.
 //!
 //! Despite sharing some wire-format types here, the two protocols are **not
 //! wire-compatible**: TLCP uses a different handshake flow (ServerKeyExchange,
@@ -55,7 +57,7 @@
 //! (GB/T 38636-2020): it uses the same record-layer frame structure but different handshake
 //! message flow and dual-certificate semantics. Do not assume these types work for both
 //! without consulting the respective protocol paths (`src/gm.rs` for TLS 1.3 + SM,
-//! `src/tlcp.rs` for TLCP).
+//! or the `gm-tlcp` crate for TLCP).
 //! Each message struct implements `to_bytes()` and `from_bytes()` methods for wire-format serialization.
 //!
 //! # Extension Format
@@ -86,11 +88,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Client hello message (TLS 1.3 wire format per RFC 8446 §4.1.2).
 ///
-/// This struct is used by both the TLS 1.3 + SM path (`src/gm.rs`) and the TLCP
-/// path (`src/tlcp.rs`) as a building block, but TLCP does **not** use TLS 1.3
-/// ClientHello directly on the wire — TLCP defines its own ClientHello format
-/// (GB/T 38636-2020) with similar fields but different extension semantics.
-/// Use `src/tlcp.rs` for the actual TLCP handshake flow.
+/// This struct is used by the TLS 1.3 + SM path (`src/gm.rs`) as a building
+/// block. TLCP defines its own ClientHello format (GB/T 38636-2020, see the
+/// `gm-tlcp` crate) with similar fields but different extension semantics;
+/// these types here are TLS 1.3 wire-format only.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ClientHello {
     /// Protocol version (0x0303 for TLS 1.3, 0x0101 for TLCP)
@@ -528,11 +529,10 @@ impl ClientHelloExtension {
 
 /// Server hello message (TLS 1.3 wire format per RFC 8446 §4.1.3).
 ///
-/// This struct is used by both the TLS 1.3 + SM path (`src/gm.rs`) and the TLCP
-/// path (`src/tlcp.rs`) as a building block, but TLCP does **not** use TLS 1.3
-/// ServerHello directly on the wire — TLCP defines its own ServerHello format
-/// (GB/T 38636-2020) with similar fields but different extension semantics.
-/// Use `src/tlcp.rs` for the actual TLCP handshake flow.
+/// This struct is used by the TLS 1.3 + SM path (`src/gm.rs`) as a building
+/// block. TLCP defines its own ServerHello format (GB/T 38636-2020, see the
+/// `gm-tlcp` crate) with similar fields but different extension semantics;
+/// these types here are TLS 1.3 wire-format only.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ServerHello {
     /// Protocol version (0x0303 for TLS 1.3, 0x0101 for TLCP)

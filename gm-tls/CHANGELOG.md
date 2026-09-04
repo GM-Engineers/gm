@@ -11,8 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **BREAKING**: TLCP support has been removed from `gm-tls` and now lives
   exclusively in the standalone `gm-tlcp` crate. The previous
-  `gm_tls::tlcp::*` re-export shim (deprecated since 0.2.0) is gone, along
-  with the `GmTlsStream::with_version(..., TLCP_VERSION_1_0)` bridge.
+  `gm_tls::tlcp::*` re-export shim and the `GmTlsStream::with_version(...,
+  TLCP_VERSION_1_0)` bridge were both **removed outright** (no deprecation
+  cycle — the entire TLCP path moved out under the same major version).
   Consumers of TLCP must `use gm_tlcp::*` directly and depend on the
   `gm-tlcp` crate. The split is documented in ADR-001 / gm-kms/discuss/10.
 
