@@ -48,16 +48,81 @@
 //!
 //! # Status
 //!
-//! This is an initial implementation providing:
-//! - TLCP handshake message types
-//! - Dual certificate handling
-//! - SM2 ECDHE key exchange
-//! - SM4-GCM/CBC record layer (reuses gm-tls record layer)
-//! - Session resumption via session IDs
+//! Implemented and tested:
 //!
-//! Not yet implemented:
-//! - Full handshake state machine
-//! - Alert protocol
+//! - Full TLCP handshake state machine (client + server, 11 message types)
+//! - Dual certificate handling (sign cert + enc cert, both required)
+//! - SM2 ECDHE key exchange with SM3-based PRF
+//! - SM4-GCM and SM4-CBC + HMAC-SM3 record layer encryption
+//! - Session resumption via session IDs (`TlcpSessionCache`)
+//! - Alert protocol (`TlcpAlert`, `TlcpAlertDescription`)
+//! - 4 cipher suites (ECDHE/GCM, ECDHE/CBC, static-ECC/GCM, static-ECC/CBC)
+//!
+//! Not implemented (out of scope for GB/T 38636-2020):
+//!
+//! - 0-RTT / Early Data (not defined in the standard)
+//! - PSK / PSK-DHE modes (not defined in the standard)
+//!
+//! # API 入口索引 API Entry Index
+//!
+//! ## 高层 API（推荐先看）
+//!
+//! - [`TlcpConnector`] / [`TlcpConnector::connect_with_certs`] — TLCP 客户端
+//! - [`TlcpAcceptor`] / [`TlcpAcceptor::accept_with_certs`] — TLCP 服务端
+//! - [`TlcpStream`] — 加密流（实现 [`tokio::io::AsyncRead`]/[`tokio::io::AsyncWrite`]）
+//!
+//! ## 握手消息类型（按协议流程顺序）
+//!
+//! - [`TlcpClientHello`] → [`TlcpServerHello`] → [`TlcpCertPair`] → [`TlcpServerKeyExchange`]
+//!   → [`TlcpServerHelloDone`] → [`TlcpClientKeyExchange`] → [`TlcpFinished`]
+//!
+//! ## 密码套件
+//!
+//! - [`TlcpCipherSuite`] 枚举 4 个套件；常量：
+//!   - [`TLS_ECDHE_SM4_GCM_SM3`] (`0xE011`) — **首选**，生产推荐
+//!   - [`TLS_ECDHE_SM4_CBC_SM3`] (`0xE013`)
+//!   - [`TLS_ECC_SM4_GCM_SM3`]   (`0xE001`) — 静态密钥，性能优化场景
+//!   - [`TLS_ECC_SM4_CBC_SM3`]   (`0xE003`)
+//!
+//! ## 会话恢复
+//!
+//! - [`TlcpSessionCache`] — 跨连接缓存
+//! - [`TlcpResumedSession`] / [`TlcpResumeResult`] — 恢复结果
+//!
+//! ## 握手状态机
+//!
+//! - [`TlcpHandshake`] — 客户端握手状态机入口
+//! - [`TlcpServerHandshake`] — 服务端握手状态机入口
+//! - [`TlcpHandshakeState`] — 状态枚举（`ClientHelloSent` → `ServerHelloReceived` → ...）
+//!
+//! ## 告警协议
+//!
+//! - [`TlcpAlert`] / [`TlcpAlertLevel`] / [`TlcpAlertDescription`]
+//!
+//! ## 常量
+//!
+//! - [`TLCP_VERSION_1_0`] = `[0x01, 0x01]` — TLCP 协议版本字节
+//! - [`MAX_TLCP_RECORD_SIZE`] = `16 * 1024` — 单条 TLCP record 最大长度
+//!
+//! # 互操作性 Interoperability（待补）
+//!
+//! 本 crate 当前的集成测试覆盖**自握手**（client ↔ server in-memory stream）。
+//! **与其他 TLCP 实现（GmSSL、Tongsuo、华为 iMaster 等）的字节级互操作测试尚未实施**。
+//!
+//! 计划在 Phase 2 补齐：
+//!
+//! - 在 `tests/interop_gmssl.rs` 添加 GmSSL 3.x C 客户端/服务端的 wire-level 对照
+//! - 在 `tests/interop_tongsuo.rs` 添加 Tongsuo（铜锁）的同样对照
+//! - 失败案例：提交 issue 并附抓包文件（TLS 1.3 Wireshark 解析器对 TLCP 无效，
+//!   可用 `xxd` / `hexdump` 工具分析 raw record bytes）
+//!
+//! 在互操作性测试落地之前，**不建议**将本实现用于与其他 TLCP 实现互通的生产部署。
+//!
+//! # 历史背景 Historical Context
+//!
+//! 本实现最初嵌入在 `gm-tls` crate 的 `tlcp` 子模块（4502 行，含集成测试）。
+//! 按 ADR-001 在 2026 年拆分为独立 `gm-tlcp` crate，以明确 TLCP 与 TLS 1.3 的
+//! **协议层不兼容性**（两者不能 wire-compatible 互通，必须独立 crate）。
 
 use crate::error::TlcpError;
 use crate::metrics;
@@ -3382,7 +3447,7 @@ impl TlcpAcceptor {
     ///
     /// # Note
     /// The simplified fallback simulates ECDHE with a pre-master secret.
-    /// Production use requires dual certificates configured via [`with_dual_certs`](TlcpAcceptor::with_dual_certs).
+    /// Production use requires dual certificates configured via [`TlcpAcceptor::with_dual_certs`].
     pub async fn accept<S>(&self, transport: S) -> Result<TlcpStream<S>, TlcpError>
     where
         S: AsyncRead + AsyncWrite + Unpin,
