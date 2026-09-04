@@ -237,32 +237,31 @@ jobs:
         run: cargo build -p gm-tlcp --tests
       - name: Install gmssl on host (so test runner finds it)
         #: The integration test uses `gmssl sm2keygen` / `gmssl certgen`
-        #: from the host to generate fresh certs. Strategy: try `apt-get
-        #: install gmssl` first (fast + uses the distro repo), then fall
-        #: back to building a tiny Alpine-style chroot via `docker create`
-        #: + a writable bind-mount. The previous `docker cp` approach was
-        #: unreliable because it tried to copy a symlink (the image's
-        #: `/usr/local/bin/gmssl` is a symlink to
-        #: `/usr/local/gmssl/bin/gmssl` per docker/Dockerfile.gmssl).
+        #: from the host. After three different extraction strategies
+        #: (`docker cp`, `docker run cat`, `docker run tar + ldconfig`)
+        #: all failed at this step on the GitHub Actions runner for
+        #: reasons unrelated to the test logic itself (likely a CI
+        #: environment quirk around bind-mounted /usr/local/* paths),
+        #: the simplest reliable approach is: keep gmssl inside the
+        #: docker container and expose a tiny wrapper script that
+        #: forwards argv via `docker run --rm`. The wrapper is a
+        #: POSIX sh one-liner; LD_LIBRARY_PATH is set explicitly
+        #: inside the container to match the Dockerfile's ENV.
         run: |
           set -e
           if ! command -v gmssl >/dev/null 2>&1; then
-            echo 'attempting apt-get install gmssl...' >&2
-            if ! sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends gmssl 2>/dev/null; then
-              echo 'apt failed, extracting from docker image...' >&2
-              # Build a self-contained tgz of /usr/local/gmssl/ from the
-              # Docker image, then extract the bin + lib to the host.
-              docker run --rm gmssl-test:latest \
-                tar -C /usr/local -czf - gmssl > /tmp/gmssl.tar.gz
-              sudo mkdir -p /usr/local/gmssl
-              sudo tar -C /usr/local -xzf /tmp/gmssl.tar.gz
-              sudo ln -sf /usr/local/gmssl/bin/gmssl /usr/local/bin/gmssl
-              echo /usr/local/gmssl/lib | sudo tee /etc/ld.so.conf.d/gmssl.conf > /dev/null
-              sudo ldconfig
-            fi
+            sudo tee /usr/local/bin/gmssl > /dev/null <<'WRAPPER'
+#!/bin/sh
+exec docker run --rm \
+  -e LD_LIBRARY_PATH=/usr/local/gmssl/lib \
+  -v /tmp:/tmp \
+  gmssl-test:latest \
+  /usr/local/gmssl/bin/gmssl "$@"
+WRAPPER
+            sudo chmod +x /usr/local/bin/gmssl
           fi
           gmssl version
-          echo 'gmssl install OK'
+          echo 'gmssl wrapper installed OK'
       - name: Run gm-tlcp × GmSSL TLCP interop tests
         run: |
           cd gm-tlcp
