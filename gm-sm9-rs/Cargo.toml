@@ -20,7 +20,7 @@ gmssl = ["dep:libc"]
 
 [dependencies]
 gm-der = { path = "../gm-der", version = "0.1.0" }
-gm-crypto = { path = "../gm-crypto", default-features = false, version = "0.1.0" }
+gm-crypto = { path = "../gm-crypto", default-features = false, version = "0.2.0" }
 
 # FFI support (gmssl feature only)
 libc = { version = "0.2", optional = true }

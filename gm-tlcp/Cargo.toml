@@ -45,7 +45,7 @@ exclude = [
 
 [dependencies]
 # 国密算法原语（SM2/SM3/SM4/SM9）
-gm-crypto = { path = "../gm-crypto", version = "0.1.0" }
+gm-crypto = { path = "../gm-crypto", version = "0.2.0" }
 
 # Underlying EC primitive for the TLCP PMS KDF (x_hat transform,
 # ProjectivePoint arithmetic). We re-export gm-crypto's transitive

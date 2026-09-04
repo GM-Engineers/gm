@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 gm-der = { path = "../gm-der", version = "0.1.0" }
-gm-crypto = { path = "../gm-crypto", version = "0.1.0" }
+gm-crypto = { path = "../gm-crypto", version = "0.2.0" }
 gm-tls = { path = "../gm-tls", features = ["grpc"], version = "0.1.0" }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
