@@ -116,6 +116,7 @@
 //! | **作为 TLCP 客户端** | [`TlcpConnector::new`] + [`TlcpConnector::connect_with_certs`] |
 //! | **低层握手消息构造/解析** | [`tlcp::TlcpClientHello`] / [`tlcp::TlcpServerHello`] / [`tlcp::TlcpServerKeyExchange`] 等 |
 //! | **会话恢复 Session resumption** | [`tlcp::TlcpSessionCache`] + [`tlcp::TlcpResumedSession`] |
+//!   (**注意**：`TlcpConnector::connect_with_certs` 与 `TlcpAcceptor::accept_with_certs` 当前走的是完整 ECDHE 握手机制；resume API 保留供上层使用，但 `is_resumed` 标志不会被自动生效。未来 PR 将补上 resume 生产路径。) |
 //! | **错误处理 Error handling** | [`TlcpError`]（所有错误的统一入口） |
 //! | **指标采集 Metrics** | [`metrics::record_bytes`] |
 //!
