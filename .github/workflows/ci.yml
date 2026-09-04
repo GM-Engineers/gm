@@ -239,14 +239,23 @@ jobs:
         #: The integration test uses `gmssl sm2keygen` / `gmssl certgen`
         #: from the host to generate fresh certs. Install via apt; if the
         #: distro repo lacks it, we fall back to a copy of the binary from
-        #: the Docker image.
+        #: the Docker image. We install into /usr/local/bin (writable on
+        #: the standard `ubuntu-latest` GitHub runner, which is rootless
+        #: only inside container jobs — here we're on the host and need
+        #: sudo). Use a stage dir under /tmp/gmssl-stage first to avoid
+        #: permission races with concurrent jobs.
         run: |
-          if ! command -v gmssl >/dev/null; then
+          set -e
+          mkdir -p /tmp/gmssl-stage
+          if ! command -v gmssl >/dev/null 2>&1; then
             docker create --name gmssl-extract gmssl-test:latest >/dev/null
-            docker cp gmssl-extract:/usr/local/gmssl/bin/gmssl /usr/local/bin/gmssl
+            docker cp gmssl-extract:/usr/local/gmssl/bin/gmssl /tmp/gmssl-stage/gmssl
             docker rm -f gmssl-extract >/dev/null
+            chmod +x /tmp/gmssl-stage/gmssl
+            sudo mv /tmp/gmssl-stage/gmssl /usr/local/bin/gmssl
           fi
-          gmssl version || (echo "gmssl install failed"; exit 1)
+          gmssl version
+          echo "gmssl install OK"
       - name: Run gm-tlcp × GmSSL TLCP interop tests
         run: |
           cd gm-tlcp

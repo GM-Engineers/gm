@@ -64,6 +64,13 @@ pub fn gmssl_present() -> bool {
 /// All paths are absolute. Pre-extracted DER blobs are provided so
 /// callers do not have to re-parse PEM for every test (e.g. when
 /// loading the cert into `TlcpAcceptor::with_dual_certs`).
+/// `GmsslCerts` exposes both PEM paths and DER-decoded byte buffers
+/// of every certificate in the generated chain. The PEM fields
+/// (`client_cert`, `client_key`) are retained for symmetry with the
+/// server-side fields even when only the DER buffers are consumed by
+/// a given test; the redundant fields are marked `#[allow(dead_code)]`
+/// to satisfy nightly clippy.
+#[allow(dead_code)]
 pub struct GmsslCerts {
     /// Combined sign + enc cert PEM (one chain).
     pub chain_crt: PathBuf,
@@ -483,7 +490,6 @@ pub fn read_pem_to_der(path: &Path, label: &str) -> Option<Vec<u8>> {
 /// Pull the uncompressed SM2 public key (65 bytes: `04 || x || y`) out
 /// of an X.509 certificate's SubjectPublicKeyInfo BIT STRING.
 fn extract_uncompressed_pubkey_from_der(cert_der: &[u8]) -> Option<Vec<u8>> {
-    use base64::Engine;
     // The SubjectPublicKeyInfo BIT STRING starts with `03 <len> 00 <key-bytes>`.
     // Search for the SM2 OID (1.2.840.10045.2.1) followed by SM2 curve OID
     // (1.2.156.10197.1.301), then the BIT STRING wrapping the public key.

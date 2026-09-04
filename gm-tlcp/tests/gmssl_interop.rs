@@ -278,7 +278,7 @@ async fn gmssl_tlcp_handshake_and_app_data() {
 
     // 2. Spawn the GmSSL tlcp_server on a free port.
     let port = pick_free_port();
-    let mut server = spawn_gmssl_tlcp_server(&certs, port, TLCP_CIPHER_SUITES)
+    let server = spawn_gmssl_tlcp_server(&certs, port, TLCP_CIPHER_SUITES)
         .await
         .expect("spawn gmssl");
     wait_for_port(port)
@@ -299,7 +299,7 @@ async fn gmssl_tlcp_handshake_and_app_data() {
     // and the client certificate chain (signing cert + CA cert, in
     // leaf-first order). The latter is required by GmSSL 2026-06+
     // master, which forces a CertificateRequest for ECDHE suites.
-    let mut connector = build_gmssl_compatible_connector(&certs, Some(TLCP_CIPHER_SUITES));
+    let connector = build_gmssl_compatible_connector(&certs, Some(TLCP_CIPHER_SUITES));
 
     // 4. Connect.
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
@@ -385,7 +385,7 @@ async fn gmssl_tlcp_handshake_with_all_suites() {
         // Connector with full client-cert chain (required by GmSSL
         // 2026-06+ master for all ECDHE_*_SM4_* suites) offering
         // ONLY this one suite so we know which one is negotiated.
-        let mut connector = build_gmssl_compatible_connector(&certs, Some(&[suite_id][..]));
+        let connector = build_gmssl_compatible_connector(&certs, Some(&[suite_id][..]));
 
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
         let tcp = TcpStream::connect(addr).await.expect("TCP connect");
@@ -575,7 +575,7 @@ async fn gmssl_tlcp_large_app_data() {
     // 64 KiB: must span ≥4 TLCP records (record_payload_max = 16384).
     let payload: Vec<u8> = (0..(64 * 1024)).map(|i| (i & 0xFF) as u8).collect();
 
-    let mut connector = build_gmssl_compatible_connector(&certs, Some(TLCP_CIPHER_SUITES));
+    let connector = build_gmssl_compatible_connector(&certs, Some(TLCP_CIPHER_SUITES));
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let tcp = TcpStream::connect(addr).await.expect("TCP connect");
@@ -724,7 +724,7 @@ async fn gmssl_tlcp_cipher_suite_preference() {
         // 2026-06+ master for all ECDHE_*_SM4_* suites) offering the
         // case's specific suite list so we can observe preference
         // semantics.
-        let mut connector = build_gmssl_compatible_connector(&certs, Some(&case.offer));
+        let connector = build_gmssl_compatible_connector(&certs, Some(&case.offer));
 
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
         let tcp = TcpStream::connect(addr).await.expect("TCP connect");
@@ -779,7 +779,7 @@ async fn gmssl_tlcp_multiple_sequential_sessions() {
         // all ECDHE_*_SM4_* suites), so the new session ID and
         // ephemeral keys don't collide with any prior session's
         // cached state.
-        let mut connector = build_gmssl_compatible_connector(&certs, Some(TLCP_CIPHER_SUITES));
+        let connector = build_gmssl_compatible_connector(&certs, Some(TLCP_CIPHER_SUITES));
         let tcp = TcpStream::connect(addr).await.expect("TCP connect");
         let mut client = connector.connect_with_certs(tcp).await.expect("handshake");
 

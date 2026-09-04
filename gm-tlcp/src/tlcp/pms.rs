@@ -258,14 +258,14 @@ mod tests {
         let default_id: &[u8] = b"1234567812345678";
 
         // Long-term static SM2 key pairs.
-        let a_sk = SecretKey::from_bytes((&[0x11u8; 32]).as_ref().into()).expect("A static sk");
-        let b_sk = SecretKey::from_bytes((&[0x22u8; 32]).as_ref().into()).expect("B static sk");
+        let a_sk = SecretKey::from_bytes([0x11u8; 32].as_ref().into()).expect("A static sk");
+        let b_sk = SecretKey::from_bytes([0x22u8; 32].as_ref().into()).expect("B static sk");
         let a_apk = a_sk.public_key().to_encoded_point(false);
         let b_apk = b_sk.public_key().to_encoded_point(false);
 
         // Ephemeral key pairs.
-        let ra_sk = SecretKey::from_bytes((&[0x33u8; 32]).as_ref().into()).expect("A eph sk");
-        let rb_sk = SecretKey::from_bytes((&[0x44u8; 32]).as_ref().into()).expect("B eph sk");
+        let ra_sk = SecretKey::from_bytes([0x33u8; 32].as_ref().into()).expect("A eph sk");
+        let rb_sk = SecretKey::from_bytes([0x44u8; 32].as_ref().into()).expect("B eph sk");
         let ra_apk = ra_sk.public_key().to_encoded_point(false);
         let rb_apk = rb_sk.public_key().to_encoded_point(false);
 
