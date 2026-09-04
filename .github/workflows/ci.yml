@@ -238,21 +238,19 @@ jobs:
       - name: Install gmssl on host (so test runner finds it)
         #: The integration test uses `gmssl sm2keygen` / `gmssl certgen`
         #: from the host to generate fresh certs. Install via apt; if the
-        #: distro repo lacks it, we fall back to a copy of the binary from
-        #: the Docker image. We install into /usr/local/bin (writable on
-        #: the standard `ubuntu-latest` GitHub runner, which is rootless
-        #: only inside container jobs — here we're on the host and need
-        #: sudo). Use a stage dir under /tmp/gmssl-stage first to avoid
-        #: permission races with concurrent jobs.
+        #: distro repo lacks it, we fall back to extracting the binary
+        #: from the Docker image. The image's `/usr/local/gmssl/bin/gmssl`
+        #: is the real binary; `/usr/local/bin/gmssl` is just a symlink
+        #: (see docker/Dockerfile.gmssl), so we use `docker run` with
+        #: `cat` to stream the binary through the host filesystem rather
+        #: than `docker cp` (which has historically mishandled symlinks
+        #: when the target is a multi-line interpreter script).
         run: |
           set -e
-          mkdir -p /tmp/gmssl-stage
           if ! command -v gmssl >/dev/null 2>&1; then
-            docker create --name gmssl-extract gmssl-test:latest >/dev/null
-            docker cp gmssl-extract:/usr/local/gmssl/bin/gmssl /tmp/gmssl-stage/gmssl
-            docker rm -f gmssl-extract >/dev/null
-            chmod +x /tmp/gmssl-stage/gmssl
-            sudo mv /tmp/gmssl-stage/gmssl /usr/local/bin/gmssl
+            docker run --rm gmssl-test:latest cat /usr/local/gmssl/bin/gmssl \
+              | sudo tee /usr/local/bin/gmssl > /dev/null
+            sudo chmod +x /usr/local/bin/gmssl
           fi
           gmssl version
           echo "gmssl install OK"
