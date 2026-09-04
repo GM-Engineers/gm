@@ -9,13 +9,13 @@
 
 ## 1. 架构概览 / Architecture Overview
 
-`gm-http-client` 提供基于 GM/TLS 的 HTTPS 客户端，核心特性：
+`gm-http-client` 提供基于 TLS 1.3 + SM 算法的 HTTPS 客户端（标准 TLS 1.3 + SM 密码套件，**不是** TLCP），核心特性：
 
-`gm-http-client` provides GM/TLS-based HTTPS client with core features:
+`gm-http-client` provides TLS 1.3 + SM-based HTTPS client (standard TLS 1.3 with SM cipher suites, **not** TLCP) with core features:
 
 | 特性 Feature | 说明 Description |
 |------------|-----------------|
-| **国密 TLS** | 使用 SM2/SM3/SM4 的 TLS 连接 / TLS connection using SM2/SM3/SM4 |
+| **TLS 1.3 + SM** | 使用 SM2/SM3/SM4 的 TLS 1.3 连接（RFC 8446） / TLS 1.3 connection using SM2/SM3/SM4 |
 | **连接池** | 复用 TCP/TLS 连接，减少握手开销 / Reuse TCP/TLS connections to reduce handshake overhead |
 | **SSRF 防护** | 阻止对私有 IP 的访问 / Block access to private IPs |
 | **超时控制** | 连接/读取/写入超时 / Connection/read/write timeout |
@@ -187,7 +187,7 @@ pub enum HttpClientError {
 | `SsrfBlocked` 错误 | 目标地址在私有 IP 范围内 / Target in private IP range | 检查 URL 是否正确 / Check if URL is correct |
 | `ResponseTooLarge` 错误 | 响应体超过 10MB 限制 / Response exceeds 10MB | 使用流式接口，或增大限制 / Use streaming interface or increase limit |
 | 连接池耗尽 / Pool exhausted | 并发请求超过 `max_idle` 设置 / Concurrent requests exceed `max_idle` | 增大 `max_idle` 或启用请求队列 / Increase `max_idle` or enable request queue |
-| TLS 握手失败 / TLS handshake failed | 证书不匹配或不支持 GM/TLS / Certificate mismatch or GM/TLS not supported | 检查证书链，确认服务端支持国密 / Check cert chain, confirm server supports GM |
+| TLS 握手失败 / TLS handshake failed | 证书不匹配或服务端不支持 TLS 1.3 + SM / Certificate mismatch or server does not support TLS 1.3 + SM | 检查证书链，确认服务端使用国密算法 / Check cert chain, confirm server uses SM algorithms |
 
 ---
 

@@ -117,7 +117,89 @@ impl Sm4Cipher {
         Ok(result)
     }
 
-    /// CBC mode encryption
+    /// Raw CBC mode encryption without PKCS#7 padding
+    ///
+    /// `data` must be a non-empty multiple of [`SM4_BLOCK_SIZE`]. The caller is
+    /// responsible for any padding (e.g. PKCS#7) and length-framing the protocol
+    /// requires. This is the right primitive to use when the protocol layer
+    /// already manages padding — using [`encrypt_cbc`](Self::encrypt_cbc) in
+    /// that situation would add a second layer of padding and corrupt the wire
+    /// format.
+    pub fn encrypt_cbc_raw(&self, data: &[u8], iv: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        if iv.len() != SM4_BLOCK_SIZE {
+            return Err(CryptoError::InvalidDataLength(format!(
+                "IV length must be {} bytes",
+                SM4_BLOCK_SIZE
+            )));
+        }
+        if data.is_empty() || data.len() % SM4_BLOCK_SIZE != 0 {
+            return Err(CryptoError::InvalidDataLength(format!(
+                "Raw CBC input must be a non-empty multiple of {} bytes",
+                SM4_BLOCK_SIZE
+            )));
+        }
+
+        let mut result = Vec::with_capacity(data.len());
+        let mut prev_block = iv.to_vec();
+
+        for chunk in data.chunks_exact(SM4_BLOCK_SIZE) {
+            let block_data: Vec<u8> = chunk
+                .iter()
+                .zip(prev_block.iter())
+                .map(|(a, b)| a ^ b)
+                .collect();
+
+            let mut block = *GenericArray::from_slice(&block_data);
+            self.cipher.encrypt_block(&mut block);
+            result.extend_from_slice(block.as_slice());
+            prev_block = block.as_slice().to_vec();
+        }
+
+        Ok(result)
+    }
+
+    /// Raw CBC mode decryption without PKCS#7 padding removal
+    ///
+    /// `encrypted_data` must be a non-empty multiple of [`SM4_BLOCK_SIZE`]. The
+    /// caller is responsible for stripping any padding. Use this instead of
+    /// [`decrypt_cbc`](Self::decrypt_cbc) when the protocol layer manages
+    /// padding itself (e.g. TLCP / TLS 1.1 MAC-then-Encrypt).
+    pub fn decrypt_cbc_raw(
+        &self,
+        encrypted_data: &[u8],
+        iv: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        if iv.len() != SM4_BLOCK_SIZE {
+            return Err(CryptoError::InvalidDataLength(format!(
+                "IV length must be {} bytes",
+                SM4_BLOCK_SIZE
+            )));
+        }
+        if encrypted_data.is_empty() || encrypted_data.len() % SM4_BLOCK_SIZE != 0 {
+            return Err(CryptoError::InvalidDataLength(format!(
+                "Raw CBC input must be a non-empty multiple of {} bytes",
+                SM4_BLOCK_SIZE
+            )));
+        }
+
+        let mut result = Vec::with_capacity(encrypted_data.len());
+        let mut prev_block = iv.to_vec();
+
+        for chunk in encrypted_data.chunks_exact(SM4_BLOCK_SIZE) {
+            let mut block = *GenericArray::from_slice(chunk);
+            self.cipher.decrypt_block(&mut block);
+
+            for (i, byte) in block.as_slice().iter().enumerate() {
+                result.push(byte ^ prev_block[i]);
+            }
+
+            prev_block = chunk.to_vec();
+        }
+
+        Ok(result)
+    }
+
+    /// CBC mode encryption (with PKCS#7 padding)
     pub fn encrypt_cbc(&self, data: &[u8], iv: &[u8]) -> Result<Vec<u8>, CryptoError> {
         if iv.len() != SM4_BLOCK_SIZE {
             return Err(CryptoError::InvalidDataLength(format!(

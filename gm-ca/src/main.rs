@@ -180,8 +180,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // GM/TLS transport: supports three modes
-    // 1. GM/TLS (preferred): set GRPC_TLS_CERT, GRPC_TLS_KEY, GRPC_TLS_CA -> uses SM2/SM3/SM4
+    // TLS 1.3 + SM transport: supports three modes
+    // 1. TLS 1.3 + SM (preferred): set GRPC_TLS_CERT, GRPC_TLS_KEY, GRPC_TLS_CA
+    //    -> uses gm_tls::TlsAcceptor (TLS 1.3 / RFC 8446 + SM cipher suites, NOT TLCP)
     // 2. Plain TCP: no TLS env vars set -> no encryption (development only)
     let grpc_tls_cert = std::env::var("GRPC_TLS_CERT").ok();
     let grpc_tls_key = std::env::var("GRPC_TLS_KEY").ok();
@@ -189,9 +190,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match (&grpc_tls_cert, &grpc_tls_key, &grpc_tls_ca) {
         (Some(cert_path), Some(key_path), Some(ca_path)) => {
-            // Mode 1: GM/TLS — full SM2/SM3/SM4 encryption for gRPC
+            // Mode 1: TLS 1.3 + SM — full SM2/SM3/SM4 encryption for gRPC
             info!(
-                "gRPC GM/TLS enabled with cert={}, key={}, ca={}",
+                "gRPC TLS 1.3 + SM enabled with cert={}, key={}, ca={}",
                 cert_path, key_path, ca_path
             );
             let tls_config = gm_tls::TlsConfig::load(cert_path, key_path, ca_path)?
@@ -204,7 +205,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
             let serve_future = async {
-                info!("GM/CA Server listening on {} (GM/TLS)", addr);
+                info!("GM/CA Server listening on {} (TLS 1.3 + SM)", addr);
                 Server::builder()
                     .add_service(health_server)
                     .add_service(CaServiceServer::with_interceptor(service, interceptor))
@@ -236,7 +237,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Mode 2: Plain TCP — no TLS (development only)
             warn!(
                 "gRPC running without TLS — for development only! \
-                   Set GRPC_TLS_CERT, GRPC_TLS_KEY, GRPC_TLS_CA to enable GM/TLS."
+                   Set GRPC_TLS_CERT, GRPC_TLS_KEY, GRPC_TLS_CA to enable TLS 1.3 + SM."
             );
 
             let tcp_listener = tokio::net::TcpListener::bind(addr).await?;
@@ -276,7 +277,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => {
             return Err(
                 "All three GRPC_TLS_CERT, GRPC_TLS_KEY, and GRPC_TLS_CA must be set \
-                        to enable GM/TLS. Set all three or none."
+                        to enable TLS 1.3 + SM. Set all three or none."
                     .into(),
             );
         }

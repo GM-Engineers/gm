@@ -1,0 +1,65 @@
+[package]
+authors = ["Eric Zhang"]
+name = "gm-tlcp"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "TLCP (Transport Layer Cryptographic Protocol, GB/T 38636-2020) core library in pure Rust with SM2/SM3/SM4 support"
+repository = "https://github.com/GM-Engineers/gm"
+keywords = ["tlcp", "gmtls", "gm", "sm2", "cryptography"]
+categories = ["cryptography", "network-programming"]
+rust-version = "1.85"
+readme = "README.md"
+
+# ---------------------------------------------------------------------------
+# 依赖说明（按 GB/T 38636-2020 TLCP 拆分规划）
+# ---------------------------------------------------------------------------
+# 当前阶段：本 crate 是空骨架（Phase 1 第一批），以下依赖按"完整 TLCP
+# 迁入后所需"预先声明，便于 Phase 1 主体（搬运 4502 行 tlcp.rs）时直接使用。
+# ---------------------------------------------------------------------------
+
+[dependencies]
+# 国密算法原语（SM2/SM3/SM4/SM9）
+gm-crypto = { path = "../gm-crypto", version = "0.1.0" }
+
+# 异步运行时（handshake / 流 I/O）
+tokio = { version = "1", features = ["io-util", "net", "sync"] }
+
+# 错误定义
+thiserror = "2"
+
+# 密钥材料零化（握手密钥、会话密钥等敏感数据）
+zeroize = { version = "1", features = ["derive"] }
+
+# 安全随机数（handshake random、临时密钥对等）
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+# 常量时间比较（Finished 验签、HMAC 等）
+subtle = "2.6"
+
+# 结构化日志（handshake 状态、alert、错误追踪）
+tracing = "0.1"
+
+# Prometheus 指标（仅 record_bytes）
+metrics = "0.23"
+
+[features]
+default = []
+
+# 预留 feature 开关
+# grpc   = []   # tonic / gRPC over TLCP（待实现）
+# interop = []  # GmSSL 字节级对照向量（待实现）
+
+[dev-dependencies]
+# 集成测试用
+tokio = { version = "1", features = ["full"] }
+tokio-test = "0.4"
+
+# 注：以下依赖**不**进本 crate（避免污染 TLCP 边界 / 未直接使用）：
+#   - metrics/audit：emit 端直接用 tracing；落库/告警由应用层负责
+#   - sqlx/redis：会话存储抽象由协议调用方决定（与 TLS 1.3 共用）
+#   - x509-parser/time：仅 cert_verify 用，列入独立 cert-verify 子模块再决定
+#   - serde：TLCP 握手消息不走 JSON/Postcard 等通用序列化（用 ASN.1 + 自有 PRF）
+#   - async-trait：当前 API 用泛型而非 dyn trait
+#   - gm-der：tlcp.rs 未直接引用，Phase 1 主体实际需要时再添加（ASN.1 编码方案待定）
+#   - rand：rand_core 已足够；rand 0.10 仅 gm-tls 用（tls 1.3 握手流）

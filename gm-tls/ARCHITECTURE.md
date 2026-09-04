@@ -16,7 +16,7 @@ gm-tls/
 │   ├── crypto_traits.rs    # 密码学抽象 trait
 │   ├── metrics.rs          # Prometheus 指标
 │   ├── error.rs            # 错误类型定义
-│   └── serialization.rs    # ASN.1 DER 序列化（RFC 8446 / GB/T 38636-2020）
+│   └── serialization.rs    # ASN.1 DER 序列化（TLS 1.3 RFC 8446 与 TLCP GB/T 38636-2020 共用）
 ├── tests/                  # 测试套件
 │   ├── gm_tls_tests.rs         # 单元测试 (61)
 │   ├── property_tests.rs        # 属性测试 (17)

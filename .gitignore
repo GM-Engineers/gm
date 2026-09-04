@@ -55,3 +55,15 @@ docs/book/
 
 # Cargo.lock — library workspace; consumers resolve their own versions, so not committed
 Cargo.lock
+
+# ---------------------------------------------------------------------------
+# Interop testing artifacts (defense-in-depth — never commit these)
+# ---------------------------------------------------------------------------
+# Tongsuo build artifacts under gm-tlcp/interop/. The .gitignore inside
+# that directory already covers this; these top-level patterns are a
+# backstop in case someone accidentally inits git in a subdirectory
+# with a different .gitignore scope, or moves files around.
+**/Tongsuo-*/
+**/tongsuo-bin/
+**/Tongsuo-*.tar.gz
+**/interop/run/

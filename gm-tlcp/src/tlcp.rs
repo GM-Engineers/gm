@@ -59,10 +59,10 @@
 //! - Full handshake state machine
 //! - Alert protocol
 
-use crate::error::TlsError;
+use crate::error::TlcpError;
 use crate::metrics;
-use crate::record_layer::next_nonce;
-use crate::session_ticket::SessionKeys;
+use crate::record::next_nonce;
+use crate::session_keys::SessionKeys;
 use gm_crypto::sm2::Sm2EcdhKeypair;
 use gm_crypto::sm3::Sm3Hmac;
 use gm_crypto::sm4::{SM4_BLOCK_SIZE, SM4_GCM_NONCE_LENGTH, Sm4Cipher};
@@ -159,9 +159,9 @@ impl TlcpResumedSession {
     }
 
     /// Derive session keys from this resumed session
-    pub fn derive_session_keys(&self) -> Result<SessionKeys, TlsError> {
+    pub fn derive_session_keys(&self) -> Result<SessionKeys, TlcpError> {
         let suite = TlcpCipherSuite::from_id(self.cipher_suite).ok_or_else(|| {
-            TlsError::HandshakeFailed(format!("Unknown cipher suite {:02x?}", self.cipher_suite))
+            TlcpError::HandshakeFailed(format!("Unknown cipher suite {:02x?}", self.cipher_suite))
         })?;
 
         let km = TlcpKeyMaterial::derive(
@@ -352,8 +352,8 @@ pub enum HandshakeType {
 }
 
 impl TryFrom<u8> for HandshakeType {
-    type Error = TlsError;
-    fn try_from(value: u8) -> Result<Self, TlsError> {
+    type Error = TlcpError;
+    fn try_from(value: u8) -> Result<Self, TlcpError> {
         match value {
             0x01 => Ok(Self::ClientHello),
             0x02 => Ok(Self::ServerHello),
@@ -364,7 +364,7 @@ impl TryFrom<u8> for HandshakeType {
             0x0F => Ok(Self::CertificateVerify),
             0x10 => Ok(Self::ClientKeyExchange),
             0x14 => Ok(Self::Finished),
-            _ => Err(TlsError::InvalidHandshakeType(value)),
+            _ => Err(TlcpError::InvalidHandshakeType(value)),
         }
     }
 }
@@ -394,7 +394,7 @@ pub struct TlcpClientHello {
 
 impl TlcpClientHello {
     /// Create a new ClientHello with default settings
-    pub fn new() -> Result<Self, TlsError> {
+    pub fn new() -> Result<Self, TlcpError> {
         let mut random = [0u8; 32];
         rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut random);
 
@@ -420,7 +420,7 @@ impl TlcpClientHello {
     }
 
     /// Serialize to bytes
-    pub fn to_bytes(&self) -> Result<Vec<u8>, TlsError> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, TlcpError> {
         let mut buf = Vec::with_capacity(128);
 
         // Handshake header: type + length (3 bytes)
@@ -471,9 +471,9 @@ impl TlcpClientHello {
     /// Deserialize a ClientHello from handshake message bytes.
     ///
     /// `data` should be the body (after the 4-byte handshake header).
-    pub fn from_body(data: &[u8]) -> Result<Self, TlsError> {
+    pub fn from_body(data: &[u8]) -> Result<Self, TlcpError> {
         if data.len() < 36 {
-            return Err(TlsError::InvalidMessage(
+            return Err(TlcpError::InvalidMessage(
                 "ClientHello too short".to_string(),
             ));
         }
@@ -485,14 +485,14 @@ impl TlcpClientHello {
 
         // Session ID
         if pos >= data.len() {
-            return Err(TlsError::InvalidMessage(
+            return Err(TlcpError::InvalidMessage(
                 "ClientHello truncated at session_id_len".to_string(),
             ));
         }
         let sid_len = data[pos] as usize;
         pos += 1;
         if pos + sid_len > data.len() {
-            return Err(TlsError::InvalidMessage(
+            return Err(TlcpError::InvalidMessage(
                 "ClientHello truncated at session_id".to_string(),
             ));
         }
@@ -501,14 +501,14 @@ impl TlcpClientHello {
 
         // Cipher suites
         if pos + 2 > data.len() {
-            return Err(TlsError::InvalidMessage(
+            return Err(TlcpError::InvalidMessage(
                 "ClientHello truncated at cipher_suites_len".to_string(),
             ));
         }
         let cs_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
         pos += 2;
         if pos + cs_len > data.len() || cs_len % 2 != 0 {
-            return Err(TlsError::InvalidMessage(
+            return Err(TlcpError::InvalidMessage(
                 "ClientHello truncated at cipher_suites".to_string(),
             ));
         }
@@ -520,14 +520,14 @@ impl TlcpClientHello {
 
         // Compression methods
         if pos >= data.len() {
-            return Err(TlsError::InvalidMessage(
+            return Err(TlcpError::InvalidMessage(
                 "ClientHello truncated at compression_len".to_string(),
             ));
         }
         let comp_len = data[pos] as usize;
         pos += 1;
         if pos + comp_len > data.len() {
-            return Err(TlsError::InvalidMessage(
+            return Err(TlcpError::InvalidMessage(
                 "ClientHello truncated at compression".to_string(),
             ));
         }
@@ -589,9 +589,9 @@ pub struct TlcpServerHello {
 
 impl TlcpServerHello {
     /// Parse from bytes
-    pub fn from_bytes(data: &[u8]) -> Result<Self, TlsError> {
+    pub fn from_bytes(data: &[u8]) -> Result<Self, TlcpError> {
         if data.len() < 38 {
-            return Err(TlsError::InvalidMessage(
+            return Err(TlcpError::InvalidMessage(
                 "ServerHello too short".to_string(),
             ));
         }
@@ -602,7 +602,7 @@ impl TlcpServerHello {
 
         let session_id_len = data[34] as usize;
         if data.len() < 35 + session_id_len + 3 {
-            return Err(TlsError::InvalidMessage(
+            return Err(TlcpError::InvalidMessage(
                 "ServerHello truncated".to_string(),
             ));
         }
@@ -792,13 +792,13 @@ impl Sm2EcdheParams {
     }
 
     /// Deserialize from ServerKeyExchange body bytes
-    pub fn from_bytes(data: &[u8]) -> Result<Self, TlsError> {
+    pub fn from_bytes(data: &[u8]) -> Result<Self, TlcpError> {
         if data.is_empty() {
-            return Err(TlsError::InvalidMessage("Empty ECDHE params".to_string()));
+            return Err(TlcpError::InvalidMessage("Empty ECDHE params".to_string()));
         }
         let pub_len = data[0] as usize;
         if data.len() < 1 + pub_len + 2 {
-            return Err(TlsError::InvalidMessage(format!(
+            return Err(TlcpError::InvalidMessage(format!(
                 "ECDHE params too short: {} bytes, need at least {}",
                 data.len(),
                 1 + pub_len + 2
@@ -807,7 +807,7 @@ impl Sm2EcdheParams {
         let ephemeral_public = data[1..1 + pub_len].to_vec();
         let sig_len = u16::from_be_bytes([data[1 + pub_len], data[2 + pub_len]]) as usize;
         if data.len() < 1 + pub_len + 2 + sig_len {
-            return Err(TlsError::InvalidMessage(format!(
+            return Err(TlcpError::InvalidMessage(format!(
                 "ECDHE signature too short: {} bytes, need {}",
                 data.len() - 1 - pub_len - 2,
                 sig_len
@@ -847,9 +847,9 @@ impl TlcpServerKeyExchange {
         client_random: &[u8; 32],
         server_random: &[u8; 32],
         sign_key: &gm_crypto::sm2::Sm2Signer,
-    ) -> Result<(Self, Sm2EcdhKeypair), TlsError> {
+    ) -> Result<(Self, Sm2EcdhKeypair), TlcpError> {
         let ephemeral_kp = Sm2EcdhKeypair::generate()
-            .map_err(|e| TlsError::HandshakeFailed(format!("ECDHE keygen failed: {}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("ECDHE keygen failed: {}", e)))?;
         let ephemeral_pub = ephemeral_kp.public_key_bytes();
 
         // Sign: client_random || server_random || ephemeral_public
@@ -860,7 +860,7 @@ impl TlcpServerKeyExchange {
 
         let signature = sign_key
             .sign(&to_sign)
-            .map_err(|e| TlsError::HandshakeFailed(format!("SKE sign failed: {}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("SKE sign failed: {}", e)))?;
 
         Ok((
             Self {
@@ -876,7 +876,7 @@ impl TlcpServerKeyExchange {
         client_random: &[u8; 32],
         server_random: &[u8; 32],
         verifier: &gm_crypto::sm2::Sm2Verifier,
-    ) -> Result<(), TlsError> {
+    ) -> Result<(), TlcpError> {
         let mut signed_data =
             Vec::with_capacity(32 + 32 + self.ecdhe_params.ephemeral_public.len());
         signed_data.extend_from_slice(client_random);
@@ -885,7 +885,7 @@ impl TlcpServerKeyExchange {
 
         verifier
             .verify(&signed_data, &self.ecdhe_params.signature)
-            .map_err(|e| TlsError::HandshakeFailed(format!("SKE signature verify failed: {}", e)))
+            .map_err(|e| TlcpError::HandshakeFailed(format!("SKE signature verify failed: {}", e)))
     }
 
     /// Serialize to TLS record bytes
@@ -901,7 +901,7 @@ impl TlcpServerKeyExchange {
     }
 
     /// Deserialize from handshake message body (after type + length prefix)
-    pub fn from_body(body: &[u8]) -> Result<Self, TlsError> {
+    pub fn from_body(body: &[u8]) -> Result<Self, TlcpError> {
         let ecdhe_params = Sm2EcdheParams::from_bytes(body)?;
         Ok(Self { ecdhe_params })
     }
@@ -920,7 +920,7 @@ impl TlcpServerHelloDone {
     }
 
     /// Deserialize (body is empty)
-    pub fn from_body(_body: &[u8]) -> Result<Self, TlsError> {
+    pub fn from_body(_body: &[u8]) -> Result<Self, TlcpError> {
         Ok(Self)
     }
 }
@@ -966,15 +966,15 @@ impl TlcpClientKeyExchange {
     }
 
     /// Deserialize from handshake message body
-    pub fn from_body(body: &[u8]) -> Result<Self, TlsError> {
+    pub fn from_body(body: &[u8]) -> Result<Self, TlcpError> {
         if body.is_empty() {
-            return Err(TlsError::InvalidMessage(
+            return Err(TlcpError::InvalidMessage(
                 "Empty ClientKeyExchange".to_string(),
             ));
         }
         let key_len = body[0] as usize;
         if body.len() < 1 + key_len {
-            return Err(TlsError::InvalidMessage(format!(
+            return Err(TlcpError::InvalidMessage(format!(
                 "ClientKeyExchange too short: {} bytes, need {}",
                 body.len(),
                 1 + key_len
@@ -1055,7 +1055,7 @@ impl Drop for TlcpHandshake {
 
 impl TlcpHandshake {
     /// Create a new client-side handshake context
-    pub fn new_client() -> Result<Self, TlsError> {
+    pub fn new_client() -> Result<Self, TlcpError> {
         let mut random = [0u8; 32];
         rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut random);
 
@@ -1084,7 +1084,7 @@ impl TlcpHandshake {
     ///
     /// If the server accepts the session ID, the handshake will be abbreviated
     /// (no ECDHE key exchange, no certificate verification needed).
-    pub fn new_client_with_session(session: TlcpResumedSession) -> Result<Self, TlsError> {
+    pub fn new_client_with_session(session: TlcpResumedSession) -> Result<Self, TlcpError> {
         let mut random = [0u8; 32];
         rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut random);
 
@@ -1117,7 +1117,7 @@ impl TlcpHandshake {
     ///
     /// If a cached session is available (set via `new_client_with_session`),
     /// the session_id will be included to request session resumption.
-    pub fn create_client_hello(&mut self) -> Result<TlcpClientHello, TlsError> {
+    pub fn create_client_hello(&mut self) -> Result<TlcpClientHello, TlcpError> {
         self.state = TlcpHandshakeState::HelloSent;
 
         // Build ClientHello using the client_random already stored in this context
@@ -1135,14 +1135,14 @@ impl TlcpHandshake {
     ///
     /// If the server returns the same session_id we sent, this is a resumed session.
     /// If the server returns a new session_id, a full handshake is required.
-    pub fn process_server_hello(&mut self, hello: &TlcpServerHello) -> Result<(), TlsError> {
+    pub fn process_server_hello(&mut self, hello: &TlcpServerHello) -> Result<(), TlcpError> {
         if self.state != TlcpHandshakeState::HelloSent {
-            return Err(TlsError::InvalidHandshakeType(0x02));
+            return Err(TlcpError::InvalidHandshakeType(0x02));
         }
 
         // Verify version
         if hello.version != TLCP_VERSION_1_0 {
-            return Err(TlsError::InvalidMessage(format!(
+            return Err(TlcpError::InvalidMessage(format!(
                 "Unsupported TLCP version: {:02x?}",
                 hello.version
             )));
@@ -1166,9 +1166,9 @@ impl TlcpHandshake {
     }
 
     /// Process server certificates (dual cert)
-    pub fn process_server_certs(&mut self, certs: TlcpCertPair) -> Result<(), TlsError> {
+    pub fn process_server_certs(&mut self, certs: TlcpCertPair) -> Result<(), TlcpError> {
         if self.state != TlcpHandshakeState::HelloSent {
-            return Err(TlsError::InvalidHandshakeType(0x0B));
+            return Err(TlcpError::InvalidHandshakeType(0x0B));
         }
         self.server_certs = Some(certs);
         self.state = TlcpHandshakeState::ServerCertsReceived;
@@ -1180,17 +1180,17 @@ impl TlcpHandshake {
     /// Uses SM3-based PRF: master_secret = SM3(pre_master_secret || client_random || server_random)
     ///
     /// After derivation, the pre-master secret is zeroized as it is no longer needed.
-    pub fn derive_master_secret(&mut self) -> Result<(), TlsError> {
+    pub fn derive_master_secret(&mut self) -> Result<(), TlcpError> {
         let pms = self
             .pre_master_secret
             .as_ref()
-            .ok_or_else(|| TlsError::HandshakeFailed("No pre-master secret".to_string()))?;
+            .ok_or_else(|| TlcpError::HandshakeFailed("No pre-master secret".to_string()))?;
 
         let cr = &self.client_random;
         let sr = self
             .server_random
             .as_ref()
-            .ok_or_else(|| TlsError::HandshakeFailed("No server random".to_string()))?;
+            .ok_or_else(|| TlcpError::HandshakeFailed("No server random".to_string()))?;
 
         // Simple SM3-based key derivation
         let mut input = Vec::with_capacity(pms.len() + 64);
@@ -1199,7 +1199,7 @@ impl TlcpHandshake {
         input.extend_from_slice(sr);
 
         let master = gm_crypto::sm3::Sm3Hasher::hash(&input)
-            .map_err(|e| TlsError::HandshakeFailed(e.to_string()))?;
+            .map_err(|e| TlcpError::HandshakeFailed(e.to_string()))?;
 
         // Zeroize pre-master secret — no longer needed after master secret derivation
         if let Some(ref mut pms) = self.pre_master_secret {
@@ -1249,21 +1249,21 @@ impl TlcpHandshake {
     ///
     /// verify_data = SM3(master_secret || SM3(handshake_messages))[0..12]
     /// with label "client finished"
-    pub fn compute_client_finished(&self) -> Result<TlcpFinished, TlsError> {
+    pub fn compute_client_finished(&self) -> Result<TlcpFinished, TlcpError> {
         let master = self
             .master_secret
             .as_ref()
-            .ok_or_else(|| TlsError::HandshakeFailed("No master secret".to_string()))?;
+            .ok_or_else(|| TlcpError::HandshakeFailed("No master secret".to_string()))?;
 
         TlcpFinished::compute(master, "client finished", &self.transcript)
     }
 
     /// Compute the server Finished message (client-side verification)
-    pub fn compute_server_finished(&self) -> Result<TlcpFinished, TlsError> {
+    pub fn compute_server_finished(&self) -> Result<TlcpFinished, TlcpError> {
         let master = self
             .master_secret
             .as_ref()
-            .ok_or_else(|| TlsError::HandshakeFailed("No master secret".to_string()))?;
+            .ok_or_else(|| TlcpError::HandshakeFailed("No master secret".to_string()))?;
 
         TlcpFinished::compute(master, "server finished", &self.transcript)
     }
@@ -1272,27 +1272,27 @@ impl TlcpHandshake {
     ///
     /// Uses the cached master secret with the new random values from the
     /// abbreviated handshake. Should only be called when `is_resumed()` is true.
-    pub fn derive_resumed_keys(&self) -> Result<SessionKeys, TlsError> {
+    pub fn derive_resumed_keys(&self) -> Result<SessionKeys, TlcpError> {
         let _session = self
             .resumed_session
             .as_ref()
-            .ok_or_else(|| TlsError::InvalidState("No resumed session".to_string()))?;
+            .ok_or_else(|| TlcpError::InvalidState("No resumed session".to_string()))?;
         let suite = TlcpCipherSuite::from_id(
             self.cipher_suite
-                .ok_or_else(|| TlsError::InvalidState("No cipher suite".to_string()))?,
+                .ok_or_else(|| TlcpError::InvalidState("No cipher suite".to_string()))?,
         )
-        .ok_or_else(|| TlsError::HandshakeFailed("Unknown cipher suite".to_string()))?;
+        .ok_or_else(|| TlcpError::HandshakeFailed("Unknown cipher suite".to_string()))?;
 
         // For resumed sessions, derive keys using the cached master_secret
         // with the NEW client_random and server_random from the abbreviated handshake
         let master = self
             .master_secret
             .as_ref()
-            .ok_or_else(|| TlsError::InvalidState("No master secret".to_string()))?;
+            .ok_or_else(|| TlcpError::InvalidState("No master secret".to_string()))?;
         let cr = self.client_random;
         let sr = self
             .server_random
-            .ok_or_else(|| TlsError::InvalidState("No server random".to_string()))?;
+            .ok_or_else(|| TlcpError::InvalidState("No server random".to_string()))?;
 
         let km = TlcpKeyMaterial::derive(master, &cr, &sr, suite)?;
         km.to_session_keys()
@@ -1321,9 +1321,9 @@ impl TlcpFinished {
     ///
     /// For TLCP, the PRF is SM3-based:
     ///   verify_data = SM3(master_secret || label || SM3(transcript))[0..12]
-    pub fn compute(master_secret: &[u8], label: &str, transcript: &[u8]) -> Result<Self, TlsError> {
+    pub fn compute(master_secret: &[u8], label: &str, transcript: &[u8]) -> Result<Self, TlcpError> {
         let transcript_hash = gm_crypto::sm3::Sm3Hasher::hash(transcript)
-            .map_err(|e| TlsError::HandshakeFailed(e.to_string()))?;
+            .map_err(|e| TlcpError::HandshakeFailed(e.to_string()))?;
 
         // PRF: SM3(master_secret || label || transcript_hash)
         let mut input = Vec::with_capacity(master_secret.len() + label.len() + 32);
@@ -1332,7 +1332,7 @@ impl TlcpFinished {
         input.extend_from_slice(&transcript_hash);
 
         let prf_output = gm_crypto::sm3::Sm3Hasher::hash(&input)
-            .map_err(|e| TlsError::HandshakeFailed(e.to_string()))?;
+            .map_err(|e| TlcpError::HandshakeFailed(e.to_string()))?;
 
         let mut verify_data = [0u8; 12];
         verify_data.copy_from_slice(&prf_output[..12]);
@@ -1407,7 +1407,7 @@ impl TlcpKeyMaterial {
         client_random: &[u8; 32],
         server_random: &[u8; 32],
         cipher_suite: TlcpCipherSuite,
-    ) -> Result<Self, TlsError> {
+    ) -> Result<Self, TlcpError> {
         // key_block seed = server_random || client_random
         let mut seed = Vec::with_capacity(64);
         seed.extend_from_slice(server_random);
@@ -1457,7 +1457,7 @@ impl TlcpKeyMaterial {
         label: &[u8],
         seed: &[u8],
         length: usize,
-    ) -> Result<Vec<u8>, TlsError> {
+    ) -> Result<Vec<u8>, TlcpError> {
         let mut full_seed = Vec::with_capacity(label.len() + seed.len());
         full_seed.extend_from_slice(label);
         full_seed.extend_from_slice(seed);
@@ -1471,7 +1471,7 @@ impl TlcpKeyMaterial {
             a_input.extend_from_slice(secret);
             a_input.extend_from_slice(&a);
             a = gm_crypto::sm3::Sm3Hasher::hash(&a_input)
-                .map_err(|e| TlsError::HandshakeFailed(e.to_string()))?;
+                .map_err(|e| TlcpError::HandshakeFailed(e.to_string()))?;
 
             // output_i = SM3(secret || A_i || seed)
             let mut out_input = Vec::with_capacity(secret.len() + a.len() + full_seed.len());
@@ -1479,7 +1479,7 @@ impl TlcpKeyMaterial {
             out_input.extend_from_slice(&a);
             out_input.extend_from_slice(&full_seed);
             let out_block = gm_crypto::sm3::Sm3Hasher::hash(&out_input)
-                .map_err(|e| TlsError::HandshakeFailed(e.to_string()))?;
+                .map_err(|e| TlcpError::HandshakeFailed(e.to_string()))?;
 
             result.extend_from_slice(&out_block);
         }
@@ -1523,7 +1523,7 @@ pub struct TlcpServerHandshake {
 
 impl TlcpServerHandshake {
     /// Create a new server-side handshake context
-    pub fn new() -> Result<Self, TlsError> {
+    pub fn new() -> Result<Self, TlcpError> {
         let mut random = [0u8; 32];
         rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut random);
 
@@ -1547,7 +1547,7 @@ impl TlcpServerHandshake {
     ///
     /// The cache enables session resumption: when a client sends a session_id
     /// that matches a cached session, the server can skip the full handshake.
-    pub fn with_session_cache(cache: TlcpSessionCache) -> Result<Self, TlsError> {
+    pub fn with_session_cache(cache: TlcpSessionCache) -> Result<Self, TlcpError> {
         let mut random = [0u8; 32];
         rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut random);
 
@@ -1571,9 +1571,9 @@ impl TlcpServerHandshake {
     ///
     /// If the client sends a session_id that matches a cached session,
     /// sets `is_resumed` to true and stores the resumed session state.
-    pub async fn process_client_hello(&mut self, hello: &TlcpClientHello) -> Result<(), TlsError> {
+    pub async fn process_client_hello(&mut self, hello: &TlcpClientHello) -> Result<(), TlcpError> {
         if self.state != TlcpHandshakeState::Idle {
-            return Err(TlsError::InvalidState(format!(
+            return Err(TlcpError::InvalidState(format!(
                 "Expected Idle state, got {:?}",
                 self.state
             )));
@@ -1581,7 +1581,7 @@ impl TlcpServerHandshake {
 
         // Verify version
         if hello.version != TLCP_VERSION_1_0 {
-            return Err(TlsError::InvalidMessage(format!(
+            return Err(TlcpError::InvalidMessage(format!(
                 "Unsupported TLCP version: {:02x?}",
                 hello.version
             )));
@@ -1625,7 +1625,7 @@ impl TlcpServerHandshake {
             .find_map(|cs_id| TlcpCipherSuite::from_id(*cs_id));
 
         let suite = selected
-            .ok_or_else(|| TlsError::HandshakeFailed("No supported cipher suite".to_string()))?;
+            .ok_or_else(|| TlcpError::HandshakeFailed("No supported cipher suite".to_string()))?;
 
         self.cipher_suite = Some(suite);
         self.state = TlcpHandshakeState::HelloSent;
@@ -1641,14 +1641,14 @@ impl TlcpServerHandshake {
     ///
     /// For resumed sessions, returns the matching session_id.
     /// For new sessions, returns a newly generated session_id.
-    pub fn create_server_hello(&self) -> Result<TlcpServerHello, TlsError> {
+    pub fn create_server_hello(&self) -> Result<TlcpServerHello, TlcpError> {
         if self.state != TlcpHandshakeState::HelloSent {
-            return Err(TlsError::InvalidState("Not in HelloSent state".to_string()));
+            return Err(TlcpError::InvalidState("Not in HelloSent state".to_string()));
         }
 
         let suite = self
             .cipher_suite
-            .ok_or_else(|| TlsError::HandshakeFailed("No cipher suite selected".to_string()))?;
+            .ok_or_else(|| TlcpError::HandshakeFailed("No cipher suite selected".to_string()))?;
 
         Ok(TlcpServerHello {
             version: TLCP_VERSION_1_0,
@@ -1666,12 +1666,12 @@ impl TlcpServerHandshake {
     }
 
     /// Complete the key exchange and derive master secret
-    pub fn complete_key_exchange(&mut self, pre_master_secret: Vec<u8>) -> Result<(), TlsError> {
+    pub fn complete_key_exchange(&mut self, pre_master_secret: Vec<u8>) -> Result<(), TlcpError> {
         self.pre_master_secret = Some(pre_master_secret);
 
         let cr = self
             .client_random
-            .ok_or_else(|| TlsError::HandshakeFailed("No client random".to_string()))?;
+            .ok_or_else(|| TlcpError::HandshakeFailed("No client random".to_string()))?;
 
         // master_secret = SM3(pre_master_secret || client_random || server_random)
         let mut input = Vec::with_capacity(self.pre_master_secret.as_ref().unwrap().len() + 64);
@@ -1680,7 +1680,7 @@ impl TlcpServerHandshake {
         input.extend_from_slice(&self.server_random);
 
         let master = gm_crypto::sm3::Sm3Hasher::hash(&input)
-            .map_err(|e| TlsError::HandshakeFailed(e.to_string()))?;
+            .map_err(|e| TlcpError::HandshakeFailed(e.to_string()))?;
 
         self.master_secret = Some(master);
         self.state = TlcpHandshakeState::KeyExchange;
@@ -1689,39 +1689,39 @@ impl TlcpServerHandshake {
     }
 
     /// Derive key material for the record layer
-    pub fn derive_key_material(&self) -> Result<TlcpKeyMaterial, TlsError> {
+    pub fn derive_key_material(&self) -> Result<TlcpKeyMaterial, TlcpError> {
         let master = self
             .master_secret
             .as_ref()
-            .ok_or_else(|| TlsError::HandshakeFailed("No master secret".to_string()))?;
+            .ok_or_else(|| TlcpError::HandshakeFailed("No master secret".to_string()))?;
 
         let cr = self
             .client_random
-            .ok_or_else(|| TlsError::HandshakeFailed("No client random".to_string()))?;
+            .ok_or_else(|| TlcpError::HandshakeFailed("No client random".to_string()))?;
 
         let suite = self
             .cipher_suite
-            .ok_or_else(|| TlsError::HandshakeFailed("No cipher suite".to_string()))?;
+            .ok_or_else(|| TlcpError::HandshakeFailed("No cipher suite".to_string()))?;
 
         TlcpKeyMaterial::derive(master, &cr, &self.server_random, suite)
     }
 
     /// Compute the server Finished message
-    pub fn compute_server_finished(&self) -> Result<TlcpFinished, TlsError> {
+    pub fn compute_server_finished(&self) -> Result<TlcpFinished, TlcpError> {
         let master = self
             .master_secret
             .as_ref()
-            .ok_or_else(|| TlsError::HandshakeFailed("No master secret".to_string()))?;
+            .ok_or_else(|| TlcpError::HandshakeFailed("No master secret".to_string()))?;
 
         TlcpFinished::compute(master, "server finished", &self.transcript)
     }
 
     /// Verify the client Finished message
-    pub fn verify_client_finished(&self, client_finished: &TlcpFinished) -> Result<bool, TlsError> {
+    pub fn verify_client_finished(&self, client_finished: &TlcpFinished) -> Result<bool, TlcpError> {
         let master = self
             .master_secret
             .as_ref()
-            .ok_or_else(|| TlsError::HandshakeFailed("No master secret".to_string()))?;
+            .ok_or_else(|| TlcpError::HandshakeFailed("No master secret".to_string()))?;
 
         let expected = TlcpFinished::compute(master, "client finished", &self.transcript)?;
         Ok(client_finished.verify(&expected.verify_data))
@@ -1821,12 +1821,12 @@ pub enum TlcpAlertLevel {
 }
 
 impl TryFrom<u8> for TlcpAlertLevel {
-    type Error = TlsError;
-    fn try_from(value: u8) -> Result<Self, TlsError> {
+    type Error = TlcpError;
+    fn try_from(value: u8) -> Result<Self, TlcpError> {
         match value {
             0x01 => Ok(Self::Warning),
             0x02 => Ok(Self::Fatal),
-            _ => Err(TlsError::InvalidMessage(format!(
+            _ => Err(TlcpError::InvalidMessage(format!(
                 "Invalid alert level: {}",
                 value
             ))),
@@ -1873,8 +1873,8 @@ pub enum TlcpAlertDescription {
 }
 
 impl TryFrom<u8> for TlcpAlertDescription {
-    type Error = TlsError;
-    fn try_from(value: u8) -> Result<Self, TlsError> {
+    type Error = TlcpError;
+    fn try_from(value: u8) -> Result<Self, TlcpError> {
         match value {
             0x00 => Ok(Self::CloseNotify),
             0x0A => Ok(Self::UnexpectedMessage),
@@ -1892,7 +1892,7 @@ impl TryFrom<u8> for TlcpAlertDescription {
             0x47 => Ok(Self::InsufficientSecurity),
             0x50 => Ok(Self::InternalError),
             0x5A => Ok(Self::UserCanceled),
-            _ => Err(TlsError::InvalidMessage(format!(
+            _ => Err(TlcpError::InvalidMessage(format!(
                 "Unknown alert description: {}",
                 value
             ))),
@@ -1944,9 +1944,9 @@ impl TlcpAlert {
     }
 
     /// Parse from bytes
-    pub fn from_bytes(data: &[u8]) -> Result<Self, TlsError> {
+    pub fn from_bytes(data: &[u8]) -> Result<Self, TlcpError> {
         if data.len() < 2 {
-            return Err(TlsError::InvalidMessage(
+            return Err(TlcpError::InvalidMessage(
                 "Alert message too short".to_string(),
             ));
         }
@@ -1980,14 +1980,14 @@ impl TlcpKeyMaterial {
     ///
     /// Only supports GCM cipher suites (SM4-GCM). For CBC suites,
     /// use the raw key material directly.
-    pub fn to_session_keys(&self) -> Result<crate::session_ticket::SessionKeys, TlsError> {
+    pub fn to_session_keys(&self) -> Result<crate::SessionKeys, TlcpError> {
         if self.client_enc_key.len() != 16 || self.server_enc_key.len() != 16 {
-            return Err(TlsError::HandshakeFailed(
+            return Err(TlcpError::HandshakeFailed(
                 "GCM requires 16-byte keys".to_string(),
             ));
         }
         if self.client_iv.len() != 12 || self.server_iv.len() != 12 {
-            return Err(TlsError::HandshakeFailed(
+            return Err(TlcpError::HandshakeFailed(
                 "GCM requires 12-byte nonces".to_string(),
             ));
         }
@@ -1997,7 +1997,7 @@ impl TlcpKeyMaterial {
         client_nonce.copy_from_slice(&self.client_iv);
         server_nonce.copy_from_slice(&self.server_iv);
 
-        Ok(crate::session_ticket::SessionKeys {
+        Ok(crate::SessionKeys {
             client_key: self.client_enc_key.clone(),
             client_nonce,
             server_key: self.server_enc_key.clone(),
@@ -2146,9 +2146,9 @@ async fn read_plaintext_record<S: AsyncRead + Unpin>(
 ///
 /// A single record may contain multiple handshake messages (or a partial one).
 /// This function parses the first message and returns (handshake_type, body, remaining).
-fn parse_handshake_message(payload: &[u8]) -> Result<(HandshakeType, Vec<u8>, &[u8]), TlsError> {
+fn parse_handshake_message(payload: &[u8]) -> Result<(HandshakeType, Vec<u8>, &[u8]), TlcpError> {
     if payload.len() < 4 {
-        return Err(TlsError::InvalidMessage(
+        return Err(TlcpError::InvalidMessage(
             "Handshake message too short".to_string(),
         ));
     }
@@ -2156,7 +2156,7 @@ fn parse_handshake_message(payload: &[u8]) -> Result<(HandshakeType, Vec<u8>, &[
     let body_len =
         ((payload[1] as usize) << 16) | ((payload[2] as usize) << 8) | payload[3] as usize;
     if payload.len() < 4 + body_len {
-        return Err(TlsError::InvalidMessage(format!(
+        return Err(TlcpError::InvalidMessage(format!(
             "Handshake body truncated: {} bytes available, {} needed",
             payload.len() - 4,
             body_len
@@ -2249,7 +2249,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
         cipher_suite: TlcpCipherSuite,
         is_client: bool,
         session_id: Vec<u8>,
-    ) -> Result<Self, TlsError> {
+    ) -> Result<Self, TlcpError> {
         // Helper: copy IV bytes into fixed-size array, zero-padding if shorter
         fn copy_iv<const N: usize>(src: &[u8]) -> [u8; N] {
             let mut arr = [0u8; N];
@@ -2321,23 +2321,23 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
     pub fn from_client_handshake_with_transport(
         handshake: TlcpHandshake,
         transport: S,
-    ) -> Result<Self, TlsError> {
+    ) -> Result<Self, TlcpError> {
         let suite_id = handshake
             .cipher_suite
-            .ok_or_else(|| TlsError::HandshakeFailed("cipher suite not negotiated".into()))?;
+            .ok_or_else(|| TlcpError::HandshakeFailed("cipher suite not negotiated".into()))?;
         let suite = TlcpCipherSuite::from_id(suite_id).ok_or_else(|| {
-            TlsError::HandshakeFailed(format!("unknown cipher suite {:02x?}", suite_id))
+            TlcpError::HandshakeFailed(format!("unknown cipher suite {:02x?}", suite_id))
         })?;
         let key_material = TlcpKeyMaterial::derive(
             handshake
                 .master_secret
                 .as_deref()
-                .ok_or_else(|| TlsError::HandshakeFailed("master secret not derived".into()))?,
+                .ok_or_else(|| TlcpError::HandshakeFailed("master secret not derived".into()))?,
             &handshake.client_random,
             handshake
                 .server_random
                 .as_ref()
-                .ok_or_else(|| TlsError::HandshakeFailed("server random not received".into()))?,
+                .ok_or_else(|| TlcpError::HandshakeFailed("server random not received".into()))?,
             suite,
         )?;
         let session_id = handshake.session_id.clone();
@@ -2352,19 +2352,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
     pub fn from_server_handshake_with_transport(
         handshake: TlcpServerHandshake,
         transport: S,
-    ) -> Result<Self, TlsError> {
+    ) -> Result<Self, TlcpError> {
         let suite = handshake
             .cipher_suite
-            .ok_or_else(|| TlsError::HandshakeFailed("cipher suite not negotiated".into()))?;
+            .ok_or_else(|| TlcpError::HandshakeFailed("cipher suite not negotiated".into()))?;
         let key_material = TlcpKeyMaterial::derive(
             handshake
                 .master_secret
                 .as_deref()
-                .ok_or_else(|| TlsError::HandshakeFailed("master secret not derived".into()))?,
+                .ok_or_else(|| TlcpError::HandshakeFailed("master secret not derived".into()))?,
             handshake
                 .client_random
                 .as_ref()
-                .ok_or_else(|| TlsError::HandshakeFailed("client random not received".into()))?,
+                .ok_or_else(|| TlcpError::HandshakeFailed("client random not received".into()))?,
             &handshake.server_random,
             suite,
         )?;
@@ -2383,26 +2383,26 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
         &mut self.inner
     }
 
-    fn get_cipher_enc(&mut self) -> Result<&mut Sm4Cipher, TlsError> {
+    fn get_cipher_enc(&mut self) -> Result<&mut Sm4Cipher, TlcpError> {
         if self.cipher_enc.is_none() {
             let cipher = Sm4Cipher::new(&self.write_key)
-                .map_err(|e| TlsError::HandshakeFailed(format!("SM4 key error: {:?}", e)))?;
+                .map_err(|e| TlcpError::HandshakeFailed(format!("SM4 key error: {:?}", e)))?;
             self.cipher_enc = Some(cipher);
         }
         self.cipher_enc
             .as_mut()
-            .ok_or_else(|| TlsError::HandshakeFailed("cipher_enc not initialized".into()))
+            .ok_or_else(|| TlcpError::HandshakeFailed("cipher_enc not initialized".into()))
     }
 
-    fn get_cipher_dec(&mut self) -> Result<&mut Sm4Cipher, TlsError> {
+    fn get_cipher_dec(&mut self) -> Result<&mut Sm4Cipher, TlcpError> {
         if self.cipher_dec.is_none() {
             let cipher = Sm4Cipher::new(&self.read_key)
-                .map_err(|e| TlsError::HandshakeFailed(format!("SM4 key error: {:?}", e)))?;
+                .map_err(|e| TlcpError::HandshakeFailed(format!("SM4 key error: {:?}", e)))?;
             self.cipher_dec = Some(cipher);
         }
         self.cipher_dec
             .as_mut()
-            .ok_or_else(|| TlsError::HandshakeFailed("cipher_dec not initialized".into()))
+            .ok_or_else(|| TlcpError::HandshakeFailed("cipher_dec not initialized".into()))
     }
 
     /// Encrypt a record with SM4-GCM, returning the complete record bytes.
@@ -2500,11 +2500,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
     /// ```
     ///
     /// Unlike TLS 1.3, TLCP does NOT append an inner content type byte.
-    pub async fn write_application_data(&mut self, plaintext: &[u8]) -> Result<(), TlsError> {
+    pub async fn write_application_data(&mut self, plaintext: &[u8]) -> Result<(), TlcpError> {
         self.write_seq = self
             .write_seq
             .checked_add(1)
-            .ok_or(TlsError::SequenceOverflow)?;
+            .ok_or(TlcpError::SequenceOverflow)?;
 
         if self.cipher_suite.gcm {
             self.write_gcm(plaintext).await
@@ -2514,7 +2514,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
     }
 
     /// Write application data with SM4-GCM.
-    async fn write_gcm(&mut self, plaintext: &[u8]) -> Result<(), TlsError> {
+    async fn write_gcm(&mut self, plaintext: &[u8]) -> Result<(), TlcpError> {
         let nonce = next_nonce(&self.write_nonce, self.write_seq - 1)?;
         let seq_bytes = (self.write_seq - 1).to_be_bytes();
 
@@ -2532,24 +2532,24 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
 
         let (ciphertext, tag) = cipher
             .encrypt_gcm(plaintext, &nonce, &aad)
-            .map_err(|e| TlsError::HandshakeFailed(format!("GCM encryption failed: {:?}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("GCM encryption failed: {:?}", e)))?;
 
         self.inner
             .write_all(&record_header)
             .await
-            .map_err(|e| TlsError::IoError(e.to_string()))?;
+            .map_err(|e| TlcpError::IoError(e.to_string()))?;
         self.inner
             .write_all(&ciphertext)
             .await
-            .map_err(|e| TlsError::IoError(e.to_string()))?;
+            .map_err(|e| TlcpError::IoError(e.to_string()))?;
         self.inner
             .write_all(&tag)
             .await
-            .map_err(|e| TlsError::IoError(e.to_string()))?;
+            .map_err(|e| TlcpError::IoError(e.to_string()))?;
         self.inner
             .flush()
             .await
-            .map_err(|e| TlsError::IoError(e.to_string()))?;
+            .map_err(|e| TlcpError::IoError(e.to_string()))?;
 
         metrics::record_bytes("tlcp", "send", plaintext.len());
         Ok(())
@@ -2561,7 +2561,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
     /// ```text
     /// [content_type=0x17][version=0x0101][length(2)][HMAC(32)][IV(16)][ciphertext][padding]
     /// ```
-    async fn write_cbc(&mut self, plaintext: &[u8]) -> Result<(), TlsError> {
+    async fn write_cbc(&mut self, plaintext: &[u8]) -> Result<(), TlcpError> {
         let seq_bytes = (self.write_seq - 1).to_be_bytes();
 
         // Construct the IV: base_IV XOR sequence_number
@@ -2579,7 +2579,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
         // SM4-CBC encrypt with PKCS#7 padding
         let ciphertext = cipher
             .encrypt_cbc(plaintext, &iv)
-            .map_err(|e| TlsError::HandshakeFailed(format!("CBC encryption failed: {:?}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("CBC encryption failed: {:?}", e)))?;
 
         // HMAC-SM3 over seq_num || content_type || version || plaintext
         let mut mac_input = Vec::with_capacity(8 + 1 + 2 + plaintext.len());
@@ -2591,7 +2591,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
 
         let hmac = Sm3Hmac::new(&self.write_mac_key)
             .compute(&mac_input)
-            .map_err(|e| TlsError::HandshakeFailed(format!("HMAC-SM3 failed: {:?}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("HMAC-SM3 failed: {:?}", e)))?;
 
         // Record: [header][HMAC(32)][IV(16)][ciphertext]
         let ct_len = SM3_HMAC_LENGTH + SM4_CBC_IV_LENGTH + ciphertext.len();
@@ -2603,23 +2603,23 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
         self.inner
             .write_all(&record_header)
             .await
-            .map_err(|e| TlsError::IoError(e.to_string()))?;
+            .map_err(|e| TlcpError::IoError(e.to_string()))?;
         self.inner
             .write_all(&hmac)
             .await
-            .map_err(|e| TlsError::IoError(e.to_string()))?;
+            .map_err(|e| TlcpError::IoError(e.to_string()))?;
         self.inner
             .write_all(&iv)
             .await
-            .map_err(|e| TlsError::IoError(e.to_string()))?;
+            .map_err(|e| TlcpError::IoError(e.to_string()))?;
         self.inner
             .write_all(&ciphertext)
             .await
-            .map_err(|e| TlsError::IoError(e.to_string()))?;
+            .map_err(|e| TlcpError::IoError(e.to_string()))?;
         self.inner
             .flush()
             .await
-            .map_err(|e| TlsError::IoError(e.to_string()))?;
+            .map_err(|e| TlcpError::IoError(e.to_string()))?;
 
         metrics::record_bytes("tlcp", "send", plaintext.len());
         Ok(())
@@ -2629,13 +2629,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
     ///
     /// Reads one TLCP record, decrypts it, and returns the plaintext.
     /// Unlike TLS 1.3, TLCP does not have inner content type stripping.
-    pub async fn read_application_data(&mut self) -> Result<Vec<u8>, TlsError> {
+    pub async fn read_application_data(&mut self) -> Result<Vec<u8>, TlcpError> {
         // Read 5-byte TLCP record header
         let mut header = [0u8; 5];
         self.inner
             .read_exact(&mut header)
             .await
-            .map_err(|e| TlsError::IoError(e.to_string()))?;
+            .map_err(|e| TlcpError::IoError(e.to_string()))?;
 
         let content_type = header[0];
         let version = [header[1], header[2]];
@@ -2643,14 +2643,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
 
         // Validate version
         if version != TLCP_VERSION {
-            return Err(TlsError::TlsRecordError(format!(
+            return Err(TlcpError::TlsRecordError(format!(
                 "unexpected TLCP version: {:02X}{:02X}",
                 version[0], version[1]
             )));
         }
 
         if ct_len > TLCP_MAX_RECORD_SIZE {
-            return Err(TlsError::HandshakeFailed(
+            return Err(TlcpError::HandshakeFailed(
                 "TLCP record exceeds size limit".into(),
             ));
         }
@@ -2661,12 +2661,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
                 self.inner
                     .read_exact(&mut buf)
                     .await
-                    .map_err(|e| TlsError::IoError(e.to_string()))?;
+                    .map_err(|e| TlcpError::IoError(e.to_string()))?;
 
                 self.read_seq = self
                     .read_seq
                     .checked_add(1)
-                    .ok_or(TlsError::SequenceOverflow)?;
+                    .ok_or(TlcpError::SequenceOverflow)?;
 
                 let plaintext = if self.cipher_suite.gcm {
                     self.decrypt_gcm(&buf, &header)?
@@ -2683,19 +2683,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
                 self.inner
                     .read_exact(&mut buf)
                     .await
-                    .map_err(|e| TlsError::IoError(e.to_string()))?;
+                    .map_err(|e| TlcpError::IoError(e.to_string()))?;
 
                 if buf.len() >= 2 && buf[0] == 0x01 && buf[1] == 0x00 {
                     // close_notify — return empty to signal EOF
                     return Ok(Vec::new());
                 }
-                Err(TlsError::TlsRecordError(format!(
+                Err(TlcpError::TlsRecordError(format!(
                     "TLCP alert: level={} description={}",
                     buf.first().copied().unwrap_or(0),
                     buf.get(1).copied().unwrap_or(0)
                 )))
             }
-            other => Err(TlsError::TlsRecordError(format!(
+            other => Err(TlcpError::TlsRecordError(format!(
                 "unexpected TLCP content type: 0x{:02X}",
                 other
             ))),
@@ -2703,9 +2703,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
     }
 
     /// Decrypt a GCM record.
-    fn decrypt_gcm(&mut self, buf: &[u8], header: &[u8; 5]) -> Result<Vec<u8>, TlsError> {
+    fn decrypt_gcm(&mut self, buf: &[u8], header: &[u8; 5]) -> Result<Vec<u8>, TlcpError> {
         if buf.len() < 16 {
-            return Err(TlsError::HandshakeFailed(
+            return Err(TlcpError::HandshakeFailed(
                 "TLCP GCM record too short".into(),
             ));
         }
@@ -2720,15 +2720,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
         let cipher = self.get_cipher_dec()?;
         cipher
             .decrypt_gcm(ciphertext, &nonce, &aad, tag)
-            .map_err(|e| TlsError::HandshakeFailed(format!("GCM decryption failed: {:?}", e)))
+            .map_err(|e| TlcpError::HandshakeFailed(format!("GCM decryption failed: {:?}", e)))
     }
 
     /// Decrypt a CBC+HMAC record.
     ///
     /// Format: `[HMAC(32)][IV(16)][ciphertext with padding]`
-    fn decrypt_cbc(&mut self, buf: &[u8], header: &[u8; 5]) -> Result<Vec<u8>, TlsError> {
+    fn decrypt_cbc(&mut self, buf: &[u8], header: &[u8; 5]) -> Result<Vec<u8>, TlcpError> {
         if buf.len() < SM3_HMAC_LENGTH + SM4_CBC_IV_LENGTH + SM4_BLOCK_SIZE {
-            return Err(TlsError::HandshakeFailed(
+            return Err(TlcpError::HandshakeFailed(
                 "TLCP CBC record too short".into(),
             ));
         }
@@ -2743,7 +2743,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
         let cipher = self.get_cipher_dec()?;
         let plaintext = cipher
             .decrypt_cbc(ciphertext, &iv)
-            .map_err(|e| TlsError::HandshakeFailed(format!("CBC decryption failed: {:?}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("CBC decryption failed: {:?}", e)))?;
 
         // Verify HMAC-SM3: HMAC(seq_num || content_type || version || length || plaintext)
         let seq_bytes = (self.read_seq - 1).to_be_bytes();
@@ -2756,11 +2756,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
 
         let hmac_computed = Sm3Hmac::new(&self.read_mac_key)
             .compute(&mac_input)
-            .map_err(|e| TlsError::HandshakeFailed(format!("HMAC-SM3 compute failed: {:?}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("HMAC-SM3 compute failed: {:?}", e)))?;
 
         // Constant-time HMAC comparison
         if !bool::from(hmac_received.ct_eq(&hmac_computed)) {
-            return Err(TlsError::HandshakeFailed(
+            return Err(TlcpError::HandshakeFailed(
                 "TLCP CBC HMAC verification failed".into(),
             ));
         }
@@ -2772,7 +2772,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
     ///
     /// Per GB/T 38636-2020, the alert record uses the same encryption
     /// as application data after the handshake is complete.
-    pub async fn close(&mut self) -> Result<(), TlsError> {
+    pub async fn close(&mut self) -> Result<(), TlcpError> {
         if self.close_notify_sent {
             return Ok(());
         }
@@ -2783,7 +2783,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
         self.write_seq = self
             .write_seq
             .checked_add(1)
-            .ok_or(TlsError::SequenceOverflow)?;
+            .ok_or(TlcpError::SequenceOverflow)?;
 
         if self.cipher_suite.gcm {
             self.write_gcm(&alert_payload).await?;
@@ -3125,7 +3125,7 @@ impl TlcpConnector {
     ///
     /// If `server_sign_pubkey` is configured, performs a production ECDHE handshake
     /// with ServerKeyExchange verification. Otherwise falls back to simulated handshake.
-    pub async fn connect<S>(&self, transport: S) -> Result<TlcpStream<S>, TlsError>
+    pub async fn connect<S>(&self, transport: S) -> Result<TlcpStream<S>, TlcpError>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
@@ -3138,7 +3138,7 @@ impl TlcpConnector {
     }
 
     /// Production ECDHE handshake with server certificate verification.
-    pub async fn connect_with_certs<S>(&self, transport: S) -> Result<TlcpStream<S>, TlsError>
+    pub async fn connect_with_certs<S>(&self, transport: S) -> Result<TlcpStream<S>, TlcpError>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
@@ -3151,16 +3151,16 @@ impl TlcpConnector {
         let ch_bytes = client_hello.to_bytes()?;
         write_handshake_record(&mut io, &ch_bytes)
             .await
-            .map_err(|e| TlsError::HandshakeFailed(format!("write ClientHello: {}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("write ClientHello: {}", e)))?;
         client_hs.transcript.extend_from_slice(&ch_bytes);
 
         // Step 2: Read ServerHello
         let (_ct, sh_payload) = read_plaintext_record(&mut io)
             .await
-            .map_err(|e| TlsError::HandshakeFailed(format!("read ServerHello: {}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("read ServerHello: {}", e)))?;
         let (sh_type, sh_body, _rem) = parse_handshake_message(&sh_payload)?;
         if sh_type != HandshakeType::ServerHello {
-            return Err(TlsError::HandshakeFailed(format!(
+            return Err(TlcpError::HandshakeFailed(format!(
                 "Expected ServerHello, got {:?}",
                 sh_type
             )));
@@ -3175,10 +3175,10 @@ impl TlcpConnector {
         // Step 3: Read Certificate
         let (_ct, cert_payload) = read_plaintext_record(&mut io)
             .await
-            .map_err(|e| TlsError::HandshakeFailed(format!("read Certificate: {}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("read Certificate: {}", e)))?;
         let (cert_type, _cert_body, _rem) = parse_handshake_message(&cert_payload)?;
         if cert_type != HandshakeType::Certificate {
-            return Err(TlsError::HandshakeFailed(format!(
+            return Err(TlcpError::HandshakeFailed(format!(
                 "Expected Certificate, got {:?}",
                 cert_type
             )));
@@ -3188,10 +3188,10 @@ impl TlcpConnector {
         // Step 4: Read ServerKeyExchange
         let (_ct, ske_payload) = read_plaintext_record(&mut io)
             .await
-            .map_err(|e| TlsError::HandshakeFailed(format!("read ServerKeyExchange: {}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("read ServerKeyExchange: {}", e)))?;
         let (ske_type, ske_body, _rem) = parse_handshake_message(&ske_payload)?;
         if ske_type != HandshakeType::ServerKeyExchange {
-            return Err(TlsError::HandshakeFailed(format!(
+            return Err(TlcpError::HandshakeFailed(format!(
                 "Expected ServerKeyExchange, got {:?}",
                 ske_type
             )));
@@ -3202,17 +3202,17 @@ impl TlcpConnector {
         // Step 5: Verify ServerKeyExchange signature
         if let (Some(pubkey), Some(distid)) = (&self.server_sign_pubkey, &self.server_sign_distid) {
             let verifier = gm_crypto::sm2::Sm2Verifier::new(pubkey, distid)
-                .map_err(|e| TlsError::HandshakeFailed(format!("verifier create: {}", e)))?;
+                .map_err(|e| TlcpError::HandshakeFailed(format!("verifier create: {}", e)))?;
             ske.verify_signature(&client_random, &server_random, &verifier)?;
         }
 
         // Step 6: Read ServerHelloDone
         let (_ct, shd_payload) = read_plaintext_record(&mut io)
             .await
-            .map_err(|e| TlsError::HandshakeFailed(format!("read ServerHelloDone: {}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("read ServerHelloDone: {}", e)))?;
         let (shd_type, _shd_body, _rem) = parse_handshake_message(&shd_payload)?;
         if shd_type != HandshakeType::ServerHelloDone {
-            return Err(TlsError::HandshakeFailed(format!(
+            return Err(TlcpError::HandshakeFailed(format!(
                 "Expected ServerHelloDone, got {:?}",
                 shd_type
             )));
@@ -3221,18 +3221,18 @@ impl TlcpConnector {
 
         // Step 7: Generate client ephemeral keypair + ClientKeyExchange
         let client_ephemeral_kp = Sm2EcdhKeypair::generate()
-            .map_err(|e| TlsError::HandshakeFailed(format!("client ECDHE keygen: {}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("client ECDHE keygen: {}", e)))?;
         let cke = TlcpClientKeyExchange::new_ecdhe(client_ephemeral_kp.public_key_bytes());
         let cke_bytes = cke.to_bytes();
         write_handshake_record(&mut io, &cke_bytes)
             .await
-            .map_err(|e| TlsError::HandshakeFailed(format!("write ClientKeyExchange: {}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("write ClientKeyExchange: {}", e)))?;
         client_hs.transcript.extend_from_slice(&cke_bytes);
 
         // Step 8: Compute shared secret (PMS)
         let pms = client_ephemeral_kp
             .compute_shared_secret(&ske.ecdhe_params.ephemeral_public)
-            .map_err(|e| TlsError::HandshakeFailed(format!("client ECDHE: {}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("client ECDHE: {}", e)))?;
         client_hs.pre_master_secret = Some(pms);
         client_hs.server_random = Some(server_random);
         client_hs.cipher_suite = Some(server_hello.cipher_suite);
@@ -3250,23 +3250,23 @@ impl TlcpConnector {
         use tokio::io::AsyncWriteExt;
         io.write_all(&ccs_record)
             .await
-            .map_err(|e| TlsError::HandshakeFailed(format!("write CCS: {}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("write CCS: {}", e)))?;
         io.flush().await?;
 
         // Step 10: Create encrypted stream and send Finished
         let suite = TlcpCipherSuite::from_id(server_hello.cipher_suite)
-            .ok_or_else(|| TlsError::HandshakeFailed("unknown cipher suite".to_string()))?;
+            .ok_or_else(|| TlcpError::HandshakeFailed("unknown cipher suite".to_string()))?;
         let session_id = server_hello.session_id.clone();
         let key_material = TlcpKeyMaterial::derive(
             client_hs
                 .master_secret
                 .as_ref()
-                .ok_or_else(|| TlsError::HandshakeFailed("no master secret".to_string()))?,
+                .ok_or_else(|| TlcpError::HandshakeFailed("no master secret".to_string()))?,
             &client_hs.client_random,
             client_hs
                 .server_random
                 .as_ref()
-                .ok_or_else(|| TlsError::HandshakeFailed("no server random".to_string()))?,
+                .ok_or_else(|| TlcpError::HandshakeFailed("no server random".to_string()))?,
             suite,
         )?;
 
@@ -3277,7 +3277,7 @@ impl TlcpConnector {
         stream
             .write_all(&cf_bytes)
             .await
-            .map_err(|e| TlsError::HandshakeFailed(format!("write Finished: {}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("write Finished: {}", e)))?;
         stream.flush().await?;
 
         // Step 11: Read server ChangeCipherSpec + Finished
@@ -3289,7 +3289,7 @@ impl TlcpConnector {
             raw_io
                 .read_exact(&mut ccs_buf)
                 .await
-                .map_err(|e| TlsError::HandshakeFailed(format!("read server CCS: {}", e)))?;
+                .map_err(|e| TlcpError::HandshakeFailed(format!("read server CCS: {}", e)))?;
         }
 
         // Read server Finished (encrypted)
@@ -3297,7 +3297,7 @@ impl TlcpConnector {
         let n = stream
             .read(&mut finished_buf)
             .await
-            .map_err(|e| TlsError::HandshakeFailed(format!("read server Finished: {}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("read server Finished: {}", e)))?;
         let _server_finished_data = &finished_buf[..n];
 
         stream.cached_resumed_session = client_hs.to_resumed_session();
@@ -3383,7 +3383,7 @@ impl TlcpAcceptor {
     /// # Note
     /// The simplified fallback simulates ECDHE with a pre-master secret.
     /// Production use requires dual certificates configured via [`with_dual_certs`](TlcpAcceptor::with_dual_certs).
-    pub async fn accept<S>(&self, transport: S) -> Result<TlcpStream<S>, TlsError>
+    pub async fn accept<S>(&self, transport: S) -> Result<TlcpStream<S>, TlcpError>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
@@ -3405,7 +3405,7 @@ impl TlcpAcceptor {
     /// 5. Derive master secret and key material
     /// 6. Read ChangeCipherSpec + Finished
     /// 7. Send ChangeCipherSpec + Finished
-    pub async fn accept_with_certs<S>(&self, transport: S) -> Result<TlcpStream<S>, TlsError>
+    pub async fn accept_with_certs<S>(&self, transport: S) -> Result<TlcpStream<S>, TlcpError>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
@@ -3415,23 +3415,23 @@ impl TlcpAcceptor {
         let sign_cert = self
             .sign_cert
             .clone()
-            .ok_or_else(|| TlsError::HandshakeFailed("sign cert not configured".to_string()))?;
+            .ok_or_else(|| TlcpError::HandshakeFailed("sign cert not configured".to_string()))?;
         let enc_cert = self
             .enc_cert
             .clone()
-            .ok_or_else(|| TlsError::HandshakeFailed("enc cert not configured".to_string()))?;
+            .ok_or_else(|| TlcpError::HandshakeFailed("enc cert not configured".to_string()))?;
         let sign_kp = self
             .sign_key
             .clone()
-            .ok_or_else(|| TlsError::HandshakeFailed("sign key not configured".to_string()))?;
+            .ok_or_else(|| TlcpError::HandshakeFailed("sign key not configured".to_string()))?;
 
         // Step 1: Read ClientHello
         let (_content_type, record_payload) = read_plaintext_record(&mut io)
             .await
-            .map_err(|e| TlsError::HandshakeFailed(format!("read ClientHello: {}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("read ClientHello: {}", e)))?;
         let (msg_type, body, _remaining) = parse_handshake_message(&record_payload)?;
         if msg_type != HandshakeType::ClientHello {
-            return Err(TlsError::HandshakeFailed(format!(
+            return Err(TlcpError::HandshakeFailed(format!(
                 "Expected ClientHello, got {:?}",
                 msg_type
             )));
@@ -3446,14 +3446,14 @@ impl TlcpAcceptor {
         let session_id = server_hs.session_id.clone();
         let suite = server_hs
             .cipher_suite
-            .ok_or_else(|| TlsError::HandshakeFailed("no cipher suite".to_string()))?;
+            .ok_or_else(|| TlcpError::HandshakeFailed("no cipher suite".to_string()))?;
 
         // Step 3: Send ServerHello
         let server_hello = server_hs.create_server_hello()?;
         let sh_bytes = server_hello.to_bytes();
         write_handshake_record(&mut io, &sh_bytes)
             .await
-            .map_err(|e| TlsError::HandshakeFailed(format!("write ServerHello: {}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("write ServerHello: {}", e)))?;
         server_hs.transcript.extend_from_slice(&sh_bytes);
 
         // Step 4: Send Certificate (dual: sign + enc)
@@ -3461,19 +3461,19 @@ impl TlcpAcceptor {
         let cert_msg = cert_pair.to_certificate_message();
         write_handshake_record(&mut io, &cert_msg)
             .await
-            .map_err(|e| TlsError::HandshakeFailed(format!("write Certificate: {}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("write Certificate: {}", e)))?;
         server_hs.transcript.extend_from_slice(&cert_msg);
         server_hs.set_server_certs(cert_pair);
 
         // Step 5: Generate ECDHE ephemeral keypair + ServerKeyExchange
         let sign_signer = gm_crypto::sm2::Sm2Signer::new(&sign_kp)
-            .map_err(|e| TlsError::HandshakeFailed(format!("sign signer: {}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("sign signer: {}", e)))?;
         let (ske, server_ephemeral_kp) =
             TlcpServerKeyExchange::generate(&client_random, &server_random, &sign_signer)?;
         let ske_bytes = ske.to_bytes();
         write_handshake_record(&mut io, &ske_bytes)
             .await
-            .map_err(|e| TlsError::HandshakeFailed(format!("write ServerKeyExchange: {}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("write ServerKeyExchange: {}", e)))?;
         server_hs.transcript.extend_from_slice(&ske_bytes);
 
         // Step 6: Send ServerHelloDone
@@ -3481,16 +3481,16 @@ impl TlcpAcceptor {
         let shd_bytes = shd.to_bytes();
         write_handshake_record(&mut io, &shd_bytes)
             .await
-            .map_err(|e| TlsError::HandshakeFailed(format!("write ServerHelloDone: {}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("write ServerHelloDone: {}", e)))?;
         server_hs.transcript.extend_from_slice(&shd_bytes);
 
         // Step 7: Read ClientKeyExchange
         let (_ct, cke_payload) = read_plaintext_record(&mut io)
             .await
-            .map_err(|e| TlsError::HandshakeFailed(format!("read ClientKeyExchange: {}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("read ClientKeyExchange: {}", e)))?;
         let (cke_type, cke_body, _rem) = parse_handshake_message(&cke_payload)?;
         if cke_type != HandshakeType::ClientKeyExchange {
-            return Err(TlsError::HandshakeFailed(format!(
+            return Err(TlcpError::HandshakeFailed(format!(
                 "Expected ClientKeyExchange, got {:?}",
                 cke_type
             )));
@@ -3501,15 +3501,15 @@ impl TlcpAcceptor {
         // Step 8: Compute shared secret
         let pms = server_ephemeral_kp
             .compute_shared_secret(&cke.key_exchange)
-            .map_err(|e| TlsError::HandshakeFailed(format!("ECDHE shared secret: {}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("ECDHE shared secret: {}", e)))?;
         server_hs.complete_key_exchange(pms)?;
 
         // Step 9: Read ChangeCipherSpec
         let (ccs_type, _ccs_payload) = read_plaintext_record(&mut io)
             .await
-            .map_err(|e| TlsError::HandshakeFailed(format!("read CCS: {}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("read CCS: {}", e)))?;
         if ccs_type != TLCP_RECORD_TYPE_CCS {
-            return Err(TlsError::HandshakeFailed(format!(
+            return Err(TlcpError::HandshakeFailed(format!(
                 "Expected CCS (0x14), got 0x{:02x}",
                 ccs_type
             )));
@@ -3521,11 +3521,11 @@ impl TlcpAcceptor {
             server_hs
                 .master_secret
                 .as_ref()
-                .ok_or_else(|| TlsError::HandshakeFailed("no master secret".to_string()))?,
+                .ok_or_else(|| TlcpError::HandshakeFailed("no master secret".to_string()))?,
             server_hs
                 .client_random
                 .as_ref()
-                .ok_or_else(|| TlsError::HandshakeFailed("no client random".to_string()))?,
+                .ok_or_else(|| TlcpError::HandshakeFailed("no client random".to_string()))?,
             &server_hs.server_random,
             suite,
         )?;
@@ -3538,7 +3538,7 @@ impl TlcpAcceptor {
         let n = stream
             .read(&mut finished_buf)
             .await
-            .map_err(|e| TlsError::HandshakeFailed(format!("read client Finished: {}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("read client Finished: {}", e)))?;
         // The Finished message is embedded in the decrypted data;
         // in a full implementation we'd parse it and verify.
         // For now, we trust that the crypto layer ensures integrity.
@@ -3558,7 +3558,7 @@ impl TlcpAcceptor {
             raw_io
                 .write_all(&ccs_record)
                 .await
-                .map_err(|e| TlsError::HandshakeFailed(format!("write CCS: {}", e)))?;
+                .map_err(|e| TlcpError::HandshakeFailed(format!("write CCS: {}", e)))?;
             raw_io.flush().await?;
         }
 
@@ -3568,7 +3568,7 @@ impl TlcpAcceptor {
         stream
             .write_all(&sf_bytes)
             .await
-            .map_err(|e| TlsError::HandshakeFailed(format!("write server Finished: {}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("write server Finished: {}", e)))?;
         stream.flush().await?;
 
         stream.cached_resumed_session = server_hs.to_resumed_session();
@@ -3628,28 +3628,28 @@ impl TlcpEcdheContext {
     ///
     /// Both ephemeral keypairs are generated using cryptographically secure RNG.
     /// The shared secret is computed as the x-coordinate of `server_private * client_public`.
-    pub fn generate() -> Result<Self, TlsError> {
+    pub fn generate() -> Result<Self, TlcpError> {
         Self::generate_with_cipher_suite(TLS_ECDHE_SM4_GCM_SM3)
     }
 
     /// Generate context with a specific cipher suite.
-    pub fn generate_with_cipher_suite(_cipher_suite: [u8; 2]) -> Result<Self, TlsError> {
+    pub fn generate_with_cipher_suite(_cipher_suite: [u8; 2]) -> Result<Self, TlcpError> {
         let client_kp = gm_crypto::sm2::Sm2EcdhKeypair::generate()
-            .map_err(|e| TlsError::HandshakeFailed(format!("client ECDHE keygen failed: {}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("client ECDHE keygen failed: {}", e)))?;
         let server_kp = gm_crypto::sm2::Sm2EcdhKeypair::generate()
-            .map_err(|e| TlsError::HandshakeFailed(format!("server ECDHE keygen failed: {}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("server ECDHE keygen failed: {}", e)))?;
 
         // Client computes: shared = ECDH(client_private, server_public)
         let pms = client_kp
             .compute_shared_secret(&server_kp.public_key_bytes())
-            .map_err(|e| TlsError::HandshakeFailed(format!("ECDHE shared secret failed: {}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("ECDHE shared secret failed: {}", e)))?;
 
         // Verify: server computes same shared = ECDH(server_private, client_public)
         let pms_verify = server_kp
             .compute_shared_secret(&client_kp.public_key_bytes())
-            .map_err(|e| TlsError::HandshakeFailed(format!("ECDHE verify failed: {}", e)))?;
+            .map_err(|e| TlcpError::HandshakeFailed(format!("ECDHE verify failed: {}", e)))?;
         if pms != pms_verify {
-            return Err(TlsError::HandshakeFailed(
+            return Err(TlcpError::HandshakeFailed(
                 "ECDHE shared secret mismatch: client and server derived different keys"
                     .to_string(),
             ));
@@ -3694,7 +3694,7 @@ impl TlcpEcdheContext {
 pub async fn connect_tlcp_with_context<S>(
     transport: S,
     ctx: &TlcpEcdheContext,
-) -> Result<TlcpStream<S>, TlsError>
+) -> Result<TlcpStream<S>, TlcpError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -3716,7 +3716,7 @@ pub async fn accept_tlcp_with_context<S>(
     transport: S,
     session_cache: &TlcpSessionCache,
     ctx: &TlcpEcdheContext,
-) -> Result<TlcpStream<S>, TlsError>
+) -> Result<TlcpStream<S>, TlcpError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -3759,7 +3759,7 @@ where
 pub async fn connect_tlcp<S>(
     transport: S,
     _session_cache: &TlcpSessionCache,
-) -> Result<TlcpStream<S>, TlsError>
+) -> Result<TlcpStream<S>, TlcpError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -3795,7 +3795,7 @@ where
 pub async fn accept_tlcp<S>(
     transport: S,
     session_cache: &TlcpSessionCache,
-) -> Result<TlcpStream<S>, TlsError>
+) -> Result<TlcpStream<S>, TlcpError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {

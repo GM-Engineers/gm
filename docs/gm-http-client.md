@@ -4,7 +4,7 @@
 > 英文版：[gm-http-client.en.md](./gm-http-client.en.md)
 
 
-基于 gm-tls 的 HTTPS 客户端，提供 GM/TLS 加密的 HTTP 请求能力，内置 SSRF 防护、连接池和响应大小限制。
+基于 gm-tls 的 HTTPS 客户端，提供 TLS 1.3 + SM 加密的 HTTP 请求能力（标准 TLS 1.3 + SM 密码套件，**不是** TLCP），内置 SSRF 防护、连接池和响应大小限制。
 
 
 ## 添加依赖
@@ -57,7 +57,7 @@ pub struct Response {
 
 ## 连接池
 
-对于需要频繁发起 HTTPS 请求的场景，使用 `ConnectionPool` 复用 GM/TLS 连接，避免每次请求都进行完整的 TLS 握手。
+对于需要频繁发起 HTTPS 请求的场景，使用 `ConnectionPool` 复用 TLS 1.3 + SM 连接，避免每次请求都进行完整的 TLS 握手。
 
 
 ```rust

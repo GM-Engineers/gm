@@ -20,9 +20,9 @@ gm-ca is configured **exclusively through environment variables** — no command
 | `CA_SUBJECT_CN` | No | `GM CA` | CA certificate's Common Name field |
 | `GRPC_LISTEN_ADDR` | No | `[::1]:50051` | gRPC listen address (**default: IPv6 localhost only**) |
 | `METRICS_ADDR` | No | `[::1]:9000` | Prometheus metrics listen address |
-| `GRPC_TLS_CERT` | No | — | Enable GM/TLS transport: client certificate path |
-| `GRPC_TLS_KEY` | No | — | Enable GM/TLS transport: server private key path |
-| `GRPC_TLS_CA` | No | — | Enable GM/TLS transport: CA certificate path |
+| `GRPC_TLS_CERT` | No | — | Enable TLS 1.3 + SM transport: client certificate path |
+| `GRPC_TLS_KEY` | No | — | Enable TLS 1.3 + SM transport: server private key path |
+| `GRPC_TLS_CA` | No | — | Enable TLS 1.3 + SM transport: CA certificate path |
 
 > **Important**: By default `GRPC_LISTEN_ADDR=[::1]:50051` only accepts connections from the local host via IPv6. Set to `0.0.0.0:50051` before deploying if external access is needed.
 
@@ -38,9 +38,10 @@ export CA_AUTH_TOKEN="$(openssl rand -hex 32)"
 cargo run -p gm-ca-server
 ```
 
-### Enabling GM/TLS Transport (Optional)
+### Enabling TLS 1.3 + SM Transport (Optional)
 
-Set all three variables simultaneously to use GM/TLS encryption for gRPC traffic (instead of plaintext TCP):
+Set all three variables simultaneously to use TLS 1.3 + SM encryption for gRPC traffic (instead of plaintext TCP).
+Implemented via `gm-tls::TlsAcceptor` (standard TLS 1.3 with SM cipher suites, **not** TLCP):
 
 
 ```bash

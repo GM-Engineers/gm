@@ -120,10 +120,15 @@ gm-ca sign --cn "client@example.com" \
 
 ### 3.3 TLS Versions
 
-| Protocol | Version | Support |
-|----------|---------|---------|
-| GM/TLS 1.1 | 0x0101 | ✅ TLCP |
-| TLS 1.3 | 0x0303 | ✅ |
+| Protocol | Version Byte | Support |
+|----------|--------------|---------|
+| **TLCP** | `0x0101` | TLCP transport layer cryptography protocol (GB/T 38636-2020). Reference implementation: `gm-tlcp` crate (separately maintained). |
+| **TLS 1.3 + SM** | `0x0303` | This project's `gm-tls` implementation — standard TLS 1.3 (RFC 8446) with SM cipher suites (SM2/SM3/SM4). **NOT TLCP**. |
+| **TLS 1.3** | `0x0303` | Standard TLS 1.3, no SM algorithms. |
+
+> **Important**: Protocol version bytes `0x0101` and `0x0303` are **incompatible, distinct protocols**.
+> This project's REST/gRPC listener uses TLS 1.3 + SM (`0x0303`), **not** TLCP (`0x0101`).
+> For TLCP client interop, use the separate `gm-tlcp` crate.
 
 ---
 
@@ -380,8 +385,8 @@ curl -s http://localhost:8443/health | jq .
 | TLS_AES_128_GCM_SHA256 | 0x1301 | TLS 1.3 |
 | ECC_SM4_GCM_SM3 | 0xE001 | TLCP |
 | ECDHE_SM4_GCM_SM3 | 0xE011 | TLCP |
-| ECC_SM4_CBC_SM3 | 0xE002 | TLCP |
-| ECDHE_SM4_CBC_SM3 | 0xE012 | TLCP |
+| ECC_SM4_CBC_SM3 | 0xE003 | TLCP |
+| ECDHE_SM4_CBC_SM3 | 0xE013 | TLCP |
 
 ## Appendix B: Standard References
 

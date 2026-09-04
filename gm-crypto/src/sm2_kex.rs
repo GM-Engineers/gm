@@ -763,7 +763,6 @@ fn point_xy_bytes(p: &ProjectivePoint) -> Result<([u8; 32], [u8; 32]), CryptoErr
     y.copy_from_slice(&bytes[33..65]);
     Ok((x, y))
 }
-
 /// Compute inner hash for confirmation: SM3(R1 || R2 || x || y || K)
 fn compute_inner_hash(
     r1: &[u8; 64],

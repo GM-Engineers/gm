@@ -1,12 +1,12 @@
 # gm-http-client
 
-支持 GM/TLS 的 HTTP 客户端 - 基于 gm-tls 实现的安全 HTTP 客户端。
+支持 TLS 1.3 + SM 算法的 HTTP 客户端 - 基于 gm-tls（`gm_tls::TlsAcceptor`）实现的安全 HTTP 客户端。
 
 **[English Version](./README.en.md)**
 
 ## 功能特性
 
-- **GM/TLS 加密**: 使用国密TLS协议保护通信安全
+- **TLS 1.3 + SM 加密**: 使用标准 TLS 1.3 (RFC 8446) + SM 密码套件（SM2/SM3/SM4）保护通信安全
 - **简洁 API**: 提供 `get()` 和 `post()` 简便方法
 - **异步支持**: 基于 tokio 异步运行时
 - **SSRF 防护**: 默认阻止对私有 IP、localhost 等内部资源的请求
@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## 连接池
 
-使用 `ConnectionPool` 复用 GM/TLS 连接，减少握手开销：
+使用 `ConnectionPool` 复用 TLS 1.3 + SM 连接，减少握手开销：
 
 ```rust
 use gm_http_client::{GmHttpClient, TlsConfig, ConnectionPool, PooledHttpClient};

@@ -62,3 +62,41 @@ pub fn parse_cert_pem(cert_pem: &str) -> Result<CertInfo, CryptoError> {
         serial_hex: Some(cert.serial.to_string()),
     })
 }
+
+/// Extract the raw SM2 public key bytes (65 bytes, uncompressed 0x04 || x || y)
+/// from a DER-encoded X.509 certificate's SubjectPublicKeyInfo BIT STRING.
+///
+/// Returns the public-key bytes WITHOUT the BIT STRING tag/length/unused-bits
+/// prefix, i.e. the exact bytes needed by `gm_crypto::sm2::Sm2Encryptor::new`
+/// or `Sm2Verifier::new`.
+pub fn extract_sm2_pubkey_from_der(cert_der: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    let (_, cert) = X509Certificate::from_der(cert_der)
+        .map_err(|e| CryptoError::Sm2Error(format!("certificate DER parse failed: {}", e)))?;
+    // x509-parser exposes BIT STRING content separately from the trailing-bits
+    // count, so `raw.data` is already the point octets (no leading unused-bits
+    // byte). DER rules require unused_bits==0, but gmSSL has historically
+    // emitted SPKI BIT STRINGs with non-zero trailing-bits counts (e.g. 4 when
+    // the high nibble of the last byte is zero). Mask those bits defensively
+    // so downstream parsers see canonical bytes.
+    let unused = cert.subject_pki.subject_public_key.unused_bits as usize;
+    if unused > 7 {
+        return Err(CryptoError::Sm2Error(format!(
+            "BIT STRING unused-bits count {} exceeds 7",
+            unused
+        )));
+    }
+    let mut pk: Vec<u8> = cert.subject_pki.subject_public_key.data.to_vec();
+    if unused > 0 {
+        if let Some(last) = pk.last_mut() {
+            *last &= !(0xFFu8 >> (8 - unused));
+        }
+    }
+    if pk.len() != 65 || pk[0] != 0x04 {
+        return Err(CryptoError::Sm2Error(format!(
+            "SM2 public key must be 65-byte uncompressed point, got {} bytes starting with {:02x}",
+            pk.len(),
+            pk.first().copied().unwrap_or(0)
+        )));
+    }
+    Ok(pk.to_vec())
+}

@@ -22,9 +22,9 @@ gm-ca 服务**仅通过环境变量配置**，不接受命令行参数。
 | `CA_SUBJECT_CN` | 否 | `GM CA` | CA 证书的 CN（Common Name）字段|
 | `GRPC_LISTEN_ADDR` | 否 | `[::1]:50051` | gRPC 监听地址（**注意：默认仅监听 IPv6 本机环回**）|
 | `METRICS_ADDR` | 否 | `[::1]:9000` | Prometheus 指标监听地址|
-| `GRPC_TLS_CERT` | 否 | — | 启用 GM/TLS 传输层：客户端证书路径|
-| `GRPC_TLS_KEY` | 否 | — | 启用 GM/TLS 传输层：服务器私钥路径|
-| `GRPC_TLS_CA` | 否 | — | 启用 GM/TLS 传输层：CA 证书路径|
+| `GRPC_TLS_CERT` | 否 | — | 启用 TLS 1.3 + SM 传输层：客户端证书路径|
+| `GRPC_TLS_KEY` | 否 | — | 启用 TLS 1.3 + SM 传输层：服务器私钥路径|
+| `GRPC_TLS_CA` | 否 | — |  启用 TLS 1.3 + SM 传输层：CA 证书路径|
 
 > **重要**: 默认 `GRPC_LISTEN_ADDR=[::1]:50051` 仅接受本机 IPv6 连接。若需要外部访问，启动前需设置为 `0.0.0.0:50051`。
 
@@ -40,9 +40,10 @@ export CA_AUTH_TOKEN="$(openssl rand -hex 32)"
 cargo run -p gm-ca-server
 ```
 
-### 启用 GM/TLS 传输（可选）
+### 启用 TLS 1.3 + SM 传输（可选）
 
-三个变量同时设置时，服务使用 GM/TLS 加密 gRPC 通信（而非明文 TCP）：
+三个变量同时设置时，服务使用 TLS 1.3 + SM 算法加密 gRPC 通信（而非明文 TCP）。
+底层通过 `gm-tls::TlsAcceptor` 实现（标准 TLS 1.3 + SM 密码套件，**不是** TLCP）：
 
 
 ```bash

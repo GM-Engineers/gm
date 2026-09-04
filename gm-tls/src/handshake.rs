@@ -1,8 +1,18 @@
 //! GM/TLS handshake types and utilities.
 //!
-//! This module contains the core handshake message types and cryptographic
-//! operations used during the GM/TLS handshake process based on
-//! GB/T 38636-2020 (TLCP) and RFC 8446.
+//! This module contains the **shared handshake message types** used by both
+//! TLS 1.3 (RFC 8446) and TLCP (GB/T 38636-2020) implementations in this crate.
+//!
+//! - The **TLS 1.3 + SM** path (`src/gm.rs`) is the default and production-ready,
+//!   using protocol version byte `0x0303`.
+//! - The **TLCP** path (`src/tlcp.rs`) is a reference implementation of the Chinese
+//!   national standard, using protocol version byte `0x0101`. Note: TLCP is being
+//!   extracted into a separate `gm-tlcp` crate; see `gm-kms/discuss/10-adr-gm-tlcp-split.md`.
+//!
+//! Despite sharing some wire-format types here, the two protocols are **not
+//! wire-compatible**: TLCP uses a different handshake flow (ServerKeyExchange,
+//! session_id-based resumption, dual certs) compared to TLS 1.3's (key_share,
+//! session tickets, single cert).
 //!
 //! # Handshake Flow
 //!
@@ -38,9 +48,14 @@
 //! - Session Tickets (RFC 5077)
 //! - Supported Versions
 //!
-//! # TLS 1.3 / GB/T 38636-2020 Compliance
+//! # TLS 1.3 + TLCP Wire-Format Caveat
 //!
-//! Handshake messages are encoded using standard TLS 1.3 wire format per RFC 8446 / GB/T 38636-2020.
+//! The shared types here (ClientHello, ServerHello, Certificate, Finished, etc.) follow
+//! TLS 1.3 wire format (RFC 8446). TLCP uses a **similar but incompatible** wire format
+//! (GB/T 38636-2020): it uses the same record-layer frame structure but different handshake
+//! message flow and dual-certificate semantics. Do not assume these types work for both
+//! without consulting the respective protocol paths (`src/gm.rs` for TLS 1.3 + SM,
+//! `src/tlcp.rs` for TLCP).
 //! Each message struct implements `to_bytes()` and `from_bytes()` methods for wire-format serialization.
 //!
 //! # Extension Format
@@ -69,19 +84,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 // Handshake Message Types (DER Encodable)
 // ============================================================================
 
-/// Client hello message (TLS 1.3 / GB/T 38636-2020 format).
+/// Client hello message (TLS 1.3 wire format per RFC 8446 §4.1.2).
 ///
-/// Wire format follows RFC 8446 §4.1.2 ClientHello structure:
-/// ```text
-/// ClientHello {
-///   client_version: ProtocolVersion (2 bytes),
-///   random: Random (32 bytes),
-///   session_id: opaque<0..32>,
-///   cipher_suites: CipherSuite<2..2^16-2>,
-///   compression_methods: CompressionMethod<1..2^8-1>,
-///   extensions: Extension<0..2^16-1>
-/// }
-/// ```
+/// This struct is used by both the TLS 1.3 + SM path (`src/gm.rs`) and the TLCP
+/// path (`src/tlcp.rs`) as a building block, but TLCP does **not** use TLS 1.3
+/// ClientHello directly on the wire — TLCP defines its own ClientHello format
+/// (GB/T 38636-2020) with similar fields but different extension semantics.
+/// Use `src/tlcp.rs` for the actual TLCP handshake flow.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ClientHello {
     /// Protocol version (0x0303 for TLS 1.3, 0x0101 for TLCP)
@@ -517,7 +526,13 @@ impl ClientHelloExtension {
     }
 }
 
-/// Server hello message (TLS 1.3 / GB/T 38636-2020 format).
+/// Server hello message (TLS 1.3 wire format per RFC 8446 §4.1.3).
+///
+/// This struct is used by both the TLS 1.3 + SM path (`src/gm.rs`) and the TLCP
+/// path (`src/tlcp.rs`) as a building block, but TLCP does **not** use TLS 1.3
+/// ServerHello directly on the wire — TLCP defines its own ServerHello format
+/// (GB/T 38636-2020) with similar fields but different extension semantics.
+/// Use `src/tlcp.rs` for the actual TLCP handshake flow.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ServerHello {
     /// Protocol version (0x0303 for TLS 1.3, 0x0101 for TLCP)
@@ -1174,7 +1189,7 @@ pub fn build_server_hello(
 
     let random = random_bytes();
     // Per RFC 8446 §4.1.3: a TLS 1.3 server MUST set the downgrade sentinel
-    // ONLY when it has negotiated down to TLS 1.2 (or legacy TLCP).
+    // ONLY when it has negotiated down to TLS 1.2 (or legacy TLCP / GMSSL 1.1).
     // Writing it unconditionally in a TLS 1.3-only server is incorrect —
     // it breaks legitimate TLS 1.3 clients that check this sentinel.
     // The sentinel is written inside build_server_hello only when the

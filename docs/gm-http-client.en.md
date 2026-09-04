@@ -2,7 +2,7 @@
 
 > Last Updated:2026-06-29
 
-HTTPS client based on gm-tls with GM/TLS encryption, built-in SSRF protection, connection pooling, and response size limits.
+HTTPS client based on gm-tls with TLS 1.3 + SM encryption (standard TLS 1.3 with SM cipher suites, **not** TLCP), built-in SSRF protection, connection pooling, and response size limits.
 
 
 ## Adding Dependencies
@@ -56,7 +56,7 @@ pub struct Response {
 
 ## Connection Pool
 
-For high-frequency HTTPS request scenarios, use `ConnectionPool` to reuse GM/TLS connections and avoid a full TLS handshake on every request.
+For high-frequency HTTPS request scenarios, use `ConnectionPool` to reuse TLS 1.3 + SM connections and avoid a full TLS handshake on every request.
 
 
 ```rust

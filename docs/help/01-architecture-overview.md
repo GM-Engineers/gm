@@ -118,10 +118,13 @@ gm-tls/src/
 
 **协议标准 / Protocol Standards:**
 
-| 标准 Standard | 说明 Description |
-|-------------|-----------------|
-| GB/T 38636-2020 | TLCP 传输层密码协议 / TLCP transport layer cryptography protocol |
-| RFC 8446 | TLS 1.3 协议 / TLS 1.3 protocol |
+| 标准 Standard | 说明 Description | 实现 Implementation |
+|-------------|-----------------|-------------------|
+| GB/T 38636-2020 | TLCP 传输层密码协议 / TLCP transport layer cryptography protocol | `gm-tlcp/` （独立 crate） |
+| RFC 8446 | TLS 1.3 协议 / TLS 1.3 protocol （本项目主路径） | `gm-tls/src/gm.rs` + `handshake.rs` + `record_layer.rs` |
+
+> **说明**：两条路径使用同一套密码原语（SM2/SM3/SM4），但协议层不兼容。
+> TLS 1.3 + SM 是 `gm-tls::TlsAcceptor` 默认路径；TLCP 是独立参开实现。
 
 **核心流程 / Core Flow:**
 
@@ -264,7 +267,11 @@ gm-sm9-rs/src/
 | SM3 哈希 / SM3 hash | GM/T 0004-2012 | gm-crypto/sm3.rs |
 | SM4 对称加密 / SM4 symmetric encryption | GM/T 0002-2012 | gm-crypto/sm4.rs |
 | SM9 标识密码 / SM9 identity-based crypto | GM/T 0044-2016 | gm-sm9-rs/ |
-| TLCP/TLS | GB/T 38636-2020 | gm-tls/ |
+| TLCP 传输层密码协议 / TLCP transport layer crypto protocol | GB/T 38636-2020 | `gm-tlcp/` （独立 crate，参开实现） |
+| TLS 1.3 + SM 算法 / TLS 1.3 with SM algorithms | RFC 8446 | gm-tls/ （本项目 gm-kms REST/gRPC 默认使用此协议） |
+
+> **重要**：TLCP (`0x0101`) 与 TLS 1.3 (`0x0303`) 是**不兼容的不同协议**。
+> `gm-kms` 等上层应用默认走 TLS 1.3 + SM 路径；TLCP 是独立的 `gm-tlcp` crate。
 
 ---
 

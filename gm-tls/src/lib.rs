@@ -96,12 +96,6 @@ pub(crate) mod serialization;
 pub mod session_store;
 #[doc(hidden)]
 pub(crate) mod session_ticket;
-pub mod tlcp;
-#[allow(deprecated)]
-pub use tlcp::{
-    TlcpAcceptor, TlcpConnector, TlcpEcdheContext, accept_tlcp, accept_tlcp_with_context,
-    connect_tlcp, connect_tlcp_with_context,
-};
 
 #[cfg(feature = "grpc")]
 pub mod grpc;

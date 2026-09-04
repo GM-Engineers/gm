@@ -23,7 +23,7 @@ This project is a Rust workspace. Library crates can be added as dependencies to
 # Cryptographic primitives only (SM2/SM3/SM4)
 gm-crypto = { path = "gm-crypto" }
 
-# Use GM/TLS protocol
+# Use TLS 1.3 + SM algorithm (gm-tls)
 gm-tls = { path = "gm-tls" }
 
 # Use HTTPS client
@@ -71,9 +71,9 @@ Run:
 cargo run --example sm2_sign
 ```
 
-## Example 2: GM/TLS Client
+## Example 2: TLS 1.3 + SM Client (gm-tls)
 
-Connect to GM/TLS server and complete mutual authentication handshake.
+Connect to a TLS 1.3 + SM server (`gm-tls`) and complete mutual authentication handshake.
 
 ```toml
 [dependencies]
@@ -109,9 +109,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Example 3: GM/TLS Server
+## Example 3: TLS 1.3 + SM Server (gm-tls)
 
-Start a GM/TLS server with mTLS support.
+Start a TLS 1.3 + SM server with mTLS support.
 
 ```toml
 [dependencies]

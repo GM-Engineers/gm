@@ -25,7 +25,7 @@
 # 仅使用密码学原语（SM2/SM3/SM4）
 gm-crypto = { path = "gm-crypto" }
 
-# 使用 GM/TLS 协议
+# 使用 TLS 1.3 + SM 算法（gm-tls）
 gm-tls = { path = "gm-tls" }
 
 # 使用 HTTPS 客户端
@@ -76,9 +76,9 @@ fn main() {
 cargo run --example sm2_sign
 ```
 
-## 第二个例子：GM/TLS 客户端
+## 第二个例子：TLS 1.3 + SM 客户端（gm-tls）
 
-连接 GM/TLS 服务器，完成双向认证握手。
+连接 TLS 1.3 + SM 服务器（`gm-tls`），完成双向认证握手。
 
 
 ```toml
@@ -114,9 +114,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## 第三个例子：GM/TLS 服务器
+## 第三个例子：TLS 1.3 + SM 服务器（gm-tls）
 
-启动一个支持 mTLS 的 GM/TLS 服务器。
+启动一个支持 mTLS 的 TLS 1.3 + SM 服务器。
 
 
 ```toml

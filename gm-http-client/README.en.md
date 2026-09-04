@@ -1,12 +1,12 @@
 # gm-http-client
 
-HTTP Client with GM/TLS Support — Secure HTTP client based on gm-tls.
+HTTP Client with TLS 1.3 + SM Cipher Suite Support — Secure HTTP client based on gm-tls (`gm_tls::TlsAcceptor`).
 
 **[中文版](./README.md)**
 
 ## Features
 
-- **GM/TLS Encryption**: Secure communication using National Cryptography TLS protocol
+- **TLS 1.3 + SM Encryption**: Secure communication using standard TLS 1.3 (RFC 8446) with SM cipher suites (SM2/SM3/SM4)
 - **Simple API**: Convenient `get()` and `post()` methods
 - **Async Support**: Built on tokio async runtime
 - **SSRF Protection**: Blocks requests to private IPs, localhost, and other internal resources by default
@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Connection Pool
 
-Use `ConnectionPool` to reuse GM/TLS connections and reduce handshake overhead:
+Use `ConnectionPool` to reuse TLS 1.3 + SM connections and reduce handshake overhead:
 
 ```rust
 use gm_http_client::{GmHttpClient, TlsConfig, ConnectionPool, PooledHttpClient};

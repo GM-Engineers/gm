@@ -197,6 +197,68 @@ jobs:
         if: always()
         run: docker rm -f gmssl-server
 
+  gm-tlcp-gmssl-interop:
+    # TLCP interop: spawn a GmSSL tlcp_server in Docker, then drive it
+    # from gm-tlcp's `tests/gmssl_interop.rs` test (which is #[ignore]
+    # by default and self-skips when `gmssl` is not on PATH).
+    name: gm-tlcp × GmSSL TLCP Interop
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-tlcp-${{ hashFiles('**/Cargo.toml') }}
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-tlcp-${{ hashFiles('**/Cargo.toml') }}
+      - name: Build GmSSL Docker image
+        run: docker build -f docker/Dockerfile.gmssl -t gmssl-test .
+      - name: Generate TLCP sign + enc certs and chain
+        run: |
+          mkdir -p /tmp/gmssl-tlcp-test
+          docker run --rm --env LD_LIBRARY_PATH=/usr/local/gmssl/lib \
+            -v /tmp/gmssl-tlcp-test:/tmp/gmssl-tlcp-test gmssl-test sh -c "
+            cd /tmp/gmssl-tlcp-test && \
+            gmssl sm2keygen -pass P@ssw0rd -out sign.key && \
+            gmssl certgen -days 365 -key sign.key -pass P@ssw0rd \
+              -CN localhost -serial_len 16 -out sign.crt && \
+            gmssl sm2keygen -pass P@ssw0rd -out enc.key && \
+            gmssl certgen -days 365 -key enc.key -pass P@ssw0rd \
+              -CN localhost -serial_len 16 -out enc.crt && \
+            cat sign.crt enc.crt > chain.crt && \
+            ls -la"
+      - name: Build gm-tlcp
+        run: cargo build -p gm-tlcp --tests
+      - name: Install gmssl on host (so test runner finds it)
+        #: The integration test uses `gmssl sm2keygen` / `gmssl certgen`
+        #: from the host to generate fresh certs. Install via apt; if the
+        #: distro repo lacks it, we fall back to a copy of the binary from
+        #: the Docker image.
+        run: |
+          if ! command -v gmssl >/dev/null; then
+            docker create --name gmssl-extract gmssl-test:latest >/dev/null
+            docker cp gmssl-extract:/usr/local/gmssl/bin/gmssl /usr/local/bin/gmssl
+            docker rm -f gmssl-extract >/dev/null
+          fi
+          gmssl version || (echo "gmssl install failed"; exit 1)
+      - name: Run gm-tlcp × GmSSL TLCP interop tests
+        run: |
+          cd gm-tlcp
+          cargo test --test gmssl_interop -- --include-ignored --nocapture
+        timeout-minutes: 5
+      - name: GmSSL Docker logs (on failure)
+        if: failure()
+        run: |
+          # No long-lived server in this job (cert generation only);
+          # useful for catching gmssl-in-container failures.
+          docker run --rm gmssl-test:latest gmssl version
+
   doc:
     name: Doc Check
     runs-on: ubuntu-latest
@@ -226,3 +288,24 @@ jobs:
           name: sbom-cyclonedx
           path: '**/*.cdx.json'
           retention-days: 90
+
+  publish-guard:
+    # crates.io 发布闸门：运行 gm-tlcp/scripts/check-publish.sh，断言
+    # `cargo package --list --allow-dirty` 中不包含任何开发工具 / 构建
+    # 产物（interop/、scripts/、.github/、tests/、Tongsuo-* 等）。
+    # 配合 gm-tlcp/Cargo.toml 中明确声明的 `exclude` 字段，构成双重保护。
+    # 作业很快（< 1 min），不跑 Docker，也不构建 workspace。
+    name: gm-tlcp publish-guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry (gm-tlcp only)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-reg-publish-guard-${{ hashFiles('gm-tlcp/Cargo.toml') }}
+      - name: Run gm-tlcp publish self-check
+        working-directory: gm-tlcp
+        run: bash scripts/check-publish.sh
