@@ -24,7 +24,7 @@
 //!   actually using the session can leave a half-formed entry which
 //!   will be evicted by TTL or capacity.
 
-use super::TlcpKeyMaterial; // re-exported in `mod.rs`; later Phase C moves the impl to `key_material.rs`
+use super::TlcpKeyMaterial; // re-exported via `mod.rs`
 use super::cipher_suite::TlcpCipherSuite;
 use super::constants::{DEFAULT_SESSION_LIFETIME, MAX_CACHED_SESSIONS, MAX_SESSION_ID_LEN};
 use crate::error::TlcpError;

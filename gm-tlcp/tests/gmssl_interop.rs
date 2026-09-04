@@ -99,7 +99,7 @@ fn build_gmssl_compatible_connector(
     let client_sign_pem =
         std::fs::read_to_string(&certs.client_key_unenc).expect("read client.key.unenc.pem");
     // The client also needs its long-term encryption private key for
-    // the GB/T 32918-2017 §6.4.2 SM2 key agreement (TLCP ECDHE PMS).
+    // the GB/T 32918.3-2016 §6.4.2 SM2 key agreement (TLCP ECDHE PMS).
     // GmSSL master's `sm2_key_exchange` reads the static public from
     // the CLIENT's *encryption* cert (chain index 1) — see
     // `tlcp_recv_client_key_exchange` → `x509_certs_get_cert_by_index

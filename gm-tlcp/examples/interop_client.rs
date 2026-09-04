@@ -10,11 +10,11 @@
 //!
 //! The `GMSSL_COMPAT` / `GM_TLCP_GMSSL_COMPAT` flag is a deprecated alias
 //! kept for CLI compatibility. Historically it toggled a non-standard CBC
-//! padding scheme to interop with pre-fix GmSSL; as of gm-tlcp 0.2.0 the
+//! padding scheme to interop with pre-fix GmSSL; as of gm-tlcp 0.1.0 the
 //! flag is a no-op because the CBC framing always follows RFC 5246
-//! §6.2.3.2 / GB/T 38636-2020 §6.2.3, which is what current `gmssl
+//! §6.2.3.2 / GB/T 38636-2020 §6.2.3.2, which is what current `gmssl
 //! tlcp_server` (master, 3.3.0-dev.1183+) also follows. The flag will be
-//! removed entirely in 0.3.0.
+//! removed entirely in a future release.
 
 use gm_tlcp::tlcp::{
     TLS_ECC_SM4_CBC_SM3, TLS_ECC_SM4_GCM_SM3, TLS_ECDHE_SM4_CBC_SM3, TLS_ECDHE_SM4_GCM_SM3,

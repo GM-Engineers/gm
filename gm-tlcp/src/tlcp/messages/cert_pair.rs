@@ -5,9 +5,12 @@
 //! 1. A **signing** certificate (auth + CertificateVerify signature).
 //! 2. An **encryption** certificate (key encapsulation for ECC mode).
 //!
-//! In ECDHE mode, the encryption cert's public key is also used to
-//! derive the SM2 Z value when verifying the ServerKeyExchange
-//! signature, per GB/T 38636-2020 §6.4.1.5.
+//! In ECDHE mode, the encryption cert's public key is used together
+//! with the client's enc key + ephemeral to derive the SM2 ECDHE
+//! pre-master secret (see `tlcp::pms::compute_tlcp_ecdhe_pms`). The Z
+//! values used for the SKE signature verification are derived from
+//! the SIGN cert's public key (configured via
+//! [`crate::tlcp::TlcpConnector::with_server_sign_key`]).
 //!
 //! The wire format for the `Certificate` handshake message is the
 //! dual-cert list

@@ -3,14 +3,14 @@
 //! These are the TLCP protocol glue built on top of the generic SM2
 //! primitives in `gm_crypto::sm2_kex`:
 //!
-//! * `sm2_compute_z` — compute the SM2 Z value per GB/T 32918.3 §6.1
+//! * `sm2_compute_z` — compute the SM2 Z value per GB/T 32918.1-2016 §6.1
 //!   (used to verify the ServerKeyExchange SM2 signature and to feed
 //!   the ECDHE PMS KDF).
 //! * `scalar_from_x_hat` — apply the GmSSL-specific 128-bit x̂
 //!   transform `2^127 + (x mod 2^127)` to an ECDH shared point's
 //!   x-coordinate. Without this, our PMS diverges from GmSSL's.
 //! * `compute_tlcp_ecdhe_pms` — compute the TLCP Pre-Master Secret
-//!   via the GB/T 32918-2017 §6.4.2 key agreement.
+//!   via the GB/T 32918.3-2016 §6.4.2 key agreement.
 //!
 //! These functions were previously in `gm_crypto::sm2_kex` but were
 //! only ever used by `gm-tlcp`. They are TLCP-specific (the GmSSL
@@ -43,7 +43,7 @@ const SM2_Y_G_BYTES: [u8; 32] = [
     0xD0, 0xA9, 0x87, 0x7C, 0xC6, 0x2A, 0x47, 0x40, 0x02, 0xDF, 0x32, 0xE5, 0x21, 0x39, 0xF0, 0xA0,
 ];
 
-/// Compute the SM2 `Z` value per GB/T 32918.3-2016 §6.1.
+/// Compute the SM2 `Z` value per GB/T 32918.1-2016 §6.1.
 ///
 /// `Z = SM3(ENTL || ID || a || b || x_G || y_G || x_pubA || y_pubA)`.
 ///
@@ -72,7 +72,7 @@ pub fn sm2_compute_z(pub_xy: &[u8; 64], user_id: &[u8]) -> Result<[u8; 32], Tlcp
     Ok(out)
 }
 
-/// Compute the TLCP ECDHE Pre-Master Secret per GB/T 32918-2017 §6.4.2.
+/// Compute the TLCP ECDHE Pre-Master Secret per GB/T 32918.3-2016 §6.4.2.
 ///
 /// Both parties compute the same shared point `V` using their own
 /// static encryption key + ephemeral key and the peer's static
@@ -213,7 +213,7 @@ fn scalar_from_x_hat(x_bytes: &[u8; 32]) -> Result<Scalar, CryptoError> {
     Ok(scalar)
 }
 
-/// SM3-KDF per GB/T 32918.3-2017 §6.4.2.1: `KDF(Z, klen) = SM3(Z || ct(1)) ||
+/// SM3-KDF per GB/T 32918.3-2016 §6.4.2.1: `KDF(Z, klen) = SM3(Z || ct(1)) ||
 /// SM3(Z || ct(2)) || ...` where `ct(i)` is a 4-byte big-endian counter.
 /// Stops when the concatenation reaches `klen` bytes; the last block is
 /// truncated if necessary.
@@ -302,7 +302,7 @@ mod tests {
         .expect("A PMS");
 
         // B is the responder: same Z order (Z_A first, Z_B second)
-        // per GB/T 32918 §6.4 and GmSSL's sm2_key_exchange.
+        // per GB/T 32918.3-2016 §6.4 and GmSSL's sm2_key_exchange.
         let pms_b = compute_tlcp_ecdhe_pms(
             &pk_b_xy,
             &b_sk_bytes,

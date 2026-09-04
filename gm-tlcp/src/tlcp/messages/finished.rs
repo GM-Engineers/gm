@@ -19,7 +19,11 @@ use crate::tlcp::TlcpKeyMaterial;
 /// TLCP Finished message
 ///
 /// GB/T 38636-2020 §6.4.1.9
-/// verify_data = SM3(master_secret || SM3(handshake_messages))[0..12]
+///
+/// `verify_data = PRF(master_secret, finished_label, SM3(handshake_messages))[0..12]`
+/// where `finished_label` is `"client finished"` or `"server finished"`. The PRF
+/// is the SM3-based TLS 1.2 iterated expansion defined by [`TlcpKeyMaterial::prf_expand`]
+/// (RFC 5246 §5 P_hash adapted for SM3), **not** a single SM3 invocation.
 #[derive(Debug, Clone)]
 pub struct TlcpFinished {
     /// verify_data (12 bytes)

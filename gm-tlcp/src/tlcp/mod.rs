@@ -50,7 +50,7 @@
 //!
 //! Implemented and tested:
 //!
-//! - Full TLCP handshake state machine (client + server, 11 message types)
+//! - Full TLCP handshake state machine (client + server, 9 message types)
 //! - Dual certificate handling (sign cert + enc cert, both required)
 //! - SM2 ECDHE key exchange with SM3-based PRF
 //! - SM4-GCM and SM4-CBC + HMAC-SM3 record layer encryption
@@ -93,7 +93,7 @@
 //!
 //! - [`TlcpHandshake`] — 客户端握手状态机入口
 //! - [`TlcpServerHandshake`] — 服务端握手状态机入口
-//! - [`TlcpHandshakeState`] — 状态枚举（`ClientHelloSent` → `ServerHelloReceived` → ...）
+//! - [`TlcpHandshakeState`] — 状态枚举（`Idle` → `HelloSent` → `ServerCertsReceived` → `KeyExchange` → `WaitFinished` → `Established` / `Failed`）
 //!
 //! ## 告警协议
 //!
@@ -104,25 +104,23 @@
 //! - [`TLCP_VERSION_1_0`] = `[0x01, 0x01]` — TLCP 协议版本字节
 //! - [`MAX_TLCP_RECORD_SIZE`] = `16 * 1024` — 单条 TLCP record 最大长度
 //!
-//! # 互操作性 Interoperability（待补）
+//! # 互操作性 Interoperability
 //!
-//! 本 crate 当前的集成测试覆盖**自握手**（client ↔ server in-memory stream）。
-//! **与其他 TLCP 实现（GmSSL、Tongsuo、华为 iMaster 等）的字节级互操作测试尚未实施**。
+//! - **GmSSL 3.3.0-dev** (`master`): handshake + APP_DATA byte-for-byte
+//!   round-trip verified (see [`tests/gmssl_interop.rs`]). All four
+//!   TLCP cipher suites covered across both CBC and GCM modes.
+//!   `no_common_cipher_suite` negative path and server-side cipher-
+//!   suite preference semantics also verified.
+//! - **Tongsuo 8.3.0**: source-level interop investigation documented
+//!   in `interop/tongsuo/`. Tongsuo's NTLS state machine rejects the
+//!   TLCP record-layer version byte `0x0101` in three independent
+//!   code paths; round-trip testing is blocked on an upstream Tongsuo
+//!   fix (see
+//!   `interop/tongsuo/upstream/ISSUE-state-machine-ntls-version.md`).
 //!
-//! 计划在 Phase 2 补齐：
+//! # 许可证
 //!
-//! - 在 `tests/interop_gmssl.rs` 添加 GmSSL 3.x C 客户端/服务端的 wire-level 对照
-//! - 在 `tests/interop_tongsuo.rs` 添加 Tongsuo（铜锁）的同样对照
-//! - 失败案例：提交 issue 并附抓包文件（TLS 1.3 Wireshark 解析器对 TLCP 无效，
-//!   可用 `xxd` / `hexdump` 工具分析 raw record bytes）
-//!
-//! 在互操作性测试落地之前，**不建议**将本实现用于与其他 TLCP 实现互通的生产部署。
-//!
-//! # 历史背景 Historical Context
-//!
-//! 本实现最初嵌入在 `gm-tls` crate 的 `tlcp` 子模块（4502 行，含集成测试）。
-//! 按 ADR-001 在 2026 年拆分为独立 `gm-tlcp` crate，以明确 TLCP 与 TLS 1.3 的
-//! **协议层不兼容性**（两者不能 wire-compatible 互通，必须独立 crate）。
+//! MIT OR Apache-2.0
 
 use crate::error::TlcpError;
 use crate::metrics;
@@ -135,35 +133,6 @@ use std::task::{Context, Poll};
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use zeroize::Zeroizing;
-
-// ============================================================================
-// Sub-module layout (do not delete this — used by code reviewers to find
-// where a type or function lives; see `src/tlcp/`).
-// ============================================================================
-//
-// | file                       | public types / responsibility                            |
-// |----------------------------|---------------------------------------------------------|
-// | constants.rs               | protocol-level constants (cipher suites, version, ...)  |
-// | handshake_type.rs          | HandshakeType + TryFrom<u8>                             |
-// | cipher_suite.rs            | TlcpCipherSuite + from_id + all()                      |
-// | alert.rs                   | TlcpAlert, TlcpAlertLevel, TlcpAlertDescription        |
-// | session.rs                 | TlcpResumedSession, TlcpSessionCache, Zeroize-on-Drop  |
-// | key_material.rs            | TlcpKeyMaterial + prf_expand + to_session_keys         |
-// | transcript.rs              | parse_handshake_message helpers                        |
-// | messages/{mod,...}.rs      | ClientHello, ServerHello, CertPair, ECDHE, SKE, SHD,   |
-// |                            | CKE, Finished message types                            |
-// | handshake/{client,server}.rs| TlcpHandshake (client) and TlcpServerHandshake state   |
-// |                            | machines                                                 |
-// | crypto/sm4/{cbc,gcm}.rs    | record-layer encrypt/decrypt + AAD + nonce XOR         |
-// | crypto/verify.rs           | SKE signature verification                              |
-// | stream.rs                  | TlcpStream + AsyncRead/AsyncWrite                      |
-// | connector.rs               | TlcpConnector + connect_with_certs                     |
-// | acceptor.rs                | TlcpAcceptor + accept_with_certs                       |
-// | server_helpers.rs          | connect_tlcp / accept_tlcp free fns                    |
-//
-// New sub-modules are appended at the bottom of `src/tlcp/` as
-// phases of the file-split are completed; the order in this comment
-// is the *target* final layout.
 
 mod alert;
 mod cipher_suite;
@@ -185,27 +154,8 @@ pub use key_material::*;
 pub use messages::*;
 pub use session::*;
 
-// ============================================================================
-
-// ============================================================================
-
-// ============================================================================
-
-// ============================================================================
-// ============================================================================
-
-// ============================================================================
-
-// ============================================================================
-// Record Layer Bridge
-// ============================================================================
-// ============================================================================
-// TLCP Stream (Record Layer)
-// ============================================================================
-
 /// TLCP protocol version bytes (0x0101)
 const TLCP_VERSION: [u8; 2] = [0x01, 0x01];
-
 /// TLCP content type for application data
 const TLCP_RECORD_TYPE_APP_DATA: u8 = 0x17;
 /// TLCP content type for alert
@@ -215,11 +165,9 @@ const TLCP_RECORD_TYPE_HANDSHAKE: u8 = 0x16;
 /// TLCP content type for ChangeCipherSpec
 #[allow(dead_code)]
 const TLCP_RECORD_TYPE_CCS: u8 = 0x14;
-
 // ============================================================================
 // Plaintext handshake record I/O
 // ============================================================================
-
 /// Write a plaintext TLCP handshake record to the transport.
 ///
 /// During the handshake phase, records are sent unencrypted.
@@ -233,14 +181,11 @@ async fn write_handshake_record<S: AsyncWrite + Unpin>(
     // TLCP (GB/T 38636-2020) §6.2 specifies the record-layer protocol
     // version byte to be NTLS1_1 (0x0101), distinct from the standard
     // TLS record-layer legacy version (0x0301). GmSSL accepts either;
-    // see PR6 for the upstream interop details.
-    //
-    // NOTE: Tongsuo 8.3.0's `SSL_connection_is_ntls` sniffs bytes 1-2
-    // of the very first record to dispatch to the NTLS state machine,
-    // so TLCP clients reaching Tongsuo must use this 0x0101 here.
-    // Recorded for future reference when we add a Tongsuo interop
-    // round-trip test (currently blocked by Tongsuo's `state_machine`
-    // rejecting NTLS_VERSION regardless of the `enable_ntls` flag).
+    // Tongsuo 8.3.0's `SSL_connection_is_ntls` sniffs bytes 1-2 of the
+    // very first record to dispatch to the NTLS state machine, so TLCP
+    // clients reaching Tongsuo must use 0x0101 here (see
+    // `interop/tongsuo/upstream/ISSUE-state-machine-ntls-version.md`
+    // for the Tongsuo-side rejection analysis).
     record.extend_from_slice(&TLCP_VERSION_1_0);
     let len = msg.len() as u16;
     record.extend_from_slice(&len.to_be_bytes());
@@ -250,7 +195,6 @@ async fn write_handshake_record<S: AsyncWrite + Unpin>(
     transport.flush().await?;
     Ok(())
 }
-
 /// Read a plaintext TLCP record from the transport.
 ///
 /// Returns (content_type, payload).
@@ -273,7 +217,6 @@ async fn read_plaintext_record<S: AsyncRead + Unpin>(
     transport.read_exact(&mut payload).await?;
     Ok((content_type, payload))
 }
-
 /// Parse a single handshake message from a record payload.
 ///
 /// A single record may contain multiple handshake messages (or a partial one).
@@ -298,14 +241,12 @@ fn parse_handshake_message(payload: &[u8]) -> Result<(HandshakeType, Vec<u8>, &[
     let remaining = &payload[4 + body_len..];
     Ok((msg_type, body, remaining))
 }
-
 /// Maximum TLCP record size (16KB per GB/T 38636-2020)
 const TLCP_MAX_RECORD_SIZE: usize = 16 * 1024;
 /// SM3 HMAC output length (32 bytes)
 const SM3_HMAC_LENGTH: usize = 32;
 /// SM4-CBC IV length (16 bytes = SM4_BLOCK_SIZE)
 const SM4_CBC_IV_LENGTH: usize = SM4_BLOCK_SIZE;
-
 /// TLCP stream that wraps an async transport with SM4-GCM/CBC encryption.
 ///
 /// Unlike TLS 1.3, TLCP does **not** use the inner content type mechanism
@@ -360,7 +301,7 @@ pub struct TlcpStream<S> {
     /// Deprecated GmSSL padding-compat shim. Kept as a field so external callers
     /// that still pass `with_gmssl_padding_compat(_)` keep compiling, but it
     /// has no effect on the wire format. The CBC record layer always follows
-    /// RFC 5246 §6.2.3.2 / GB/T 38636-2020 §6.2.3 (N padding bytes of value N
+    /// RFC 5246 §6.2.3.2 / GB/T 38636-2020 §6.2.3.2 (N padding bytes of value N
     /// plus 1 trailing length byte = N+1 bytes total at the tail of the
     /// record). This is what `gmssl tlcp_server` v3.x, Tongsuo NTLS, and
     /// every other TLCP peer we have tested against also expects. The previous
@@ -369,7 +310,7 @@ pub struct TlcpStream<S> {
     /// parser happens to read the trailing byte and back-derive `outlen` one
     /// byte short; it was never standard and broke real RFC 5246 peers.
     #[deprecated(
-        since = "0.2.0",
+        since = "0.1.0",
         note = "No-op kept for API stability. The CBC framing always follows \
                  RFC 5246 §6.2.3.2 / GB/T 38636-2020 §6.2.3.2; use with_gmssl_padding_compat(_) \
                  is a no-op now."
@@ -377,7 +318,6 @@ pub struct TlcpStream<S> {
     #[allow(dead_code)]
     gmssl_padding_compat: bool,
 }
-
 impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
     /// Create a new TLCP stream from key material and cipher suite.
     ///
@@ -401,7 +341,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
             arr[..len].copy_from_slice(&src[..len]);
             arr
         }
-
         let (write_key, read_key, write_mac_key, read_mac_key, write_nonce, read_nonce) =
             if is_client {
                 (
@@ -422,7 +361,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
                     copy_iv(&key_material.client_iv),
                 )
             };
-
         Ok(Self {
             inner,
             write_key: Zeroizing::new(write_key),
@@ -446,7 +384,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
             gmssl_padding_compat: false,
         })
     }
-
     /// Create a TLCP stream from a completed client handshake with a transport.
     ///
     /// The handshake must have been completed (master secret and key material derived).
@@ -473,12 +410,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
             )?;
         let session_id = handshake.session_id.clone();
         let resumed = handshake.to_resumed_session();
-
         let mut stream = Self::new(transport, &key_material, suite, true, session_id)?;
         stream.cached_resumed_session = resumed;
         Ok(stream)
     }
-
     /// Create a TLCP stream from a completed server handshake with a transport.
     pub fn from_server_handshake_with_transport(
         handshake: TlcpServerHandshake,
@@ -500,32 +435,29 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
             )?;
         let session_id = handshake.session_id.clone();
         let resumed = handshake.to_resumed_session();
-
         let mut stream = Self::new(transport, &key_material, suite, false, session_id)?;
         stream.cached_resumed_session = resumed;
         Ok(stream)
     }
-
     /// Get a mutable reference to the inner transport.
     ///
     /// This is used during handshake to send raw records before encryption starts.
     pub fn get_mut(&mut self) -> &mut S {
         &mut self.inner
     }
-
     /// Deprecated. Historically toggled a non-standard CBC padding scheme
     /// (`N bytes of value N-1`) used to interop with pre-fix GmSSL. GmSSL
     /// since commit `57c9433` (2026-06-01) and `c12edeb` (2026-06-13)
-    /// follows RFC 5246 §6.2.3.2 / GB/T 38636-2020 §6.2.3 strictly; we now do
+    /// follows RFC 5246 §6.2.3.2 / GB/T 38636-2020 §6.2.3.2 strictly; we now do
     /// the same (N padding bytes of value N plus 1 trailing length byte = N+1
     /// bytes total). This method is kept as a no-op so that existing
     /// callers (`connector.with_gmssl_padding_compat(true)`,
     /// `GM_TLCP_GMSSL_COMPAT=1` in `interop_client`) keep compiling and run
-    /// correctly. It will be removed in 0.3.0.
+    /// correctly. It will be removed in a future release.
     #[deprecated(
-        since = "0.2.0",
+        since = "0.1.0",
         note = "No-op. The CBC framing always follows RFC 5246 §6.2.3.2 / \
-                 GB/T 38636-2020 §6.2.3.2. Will be removed in 0.3.0."
+                 GB/T 38636-2020 §6.2.3.2. Will be removed in a future release."
     )]
     pub fn with_gmssl_padding_compat(mut self, _compat: bool) -> Self {
         // Intentionally ignore the argument; the wire format is always
@@ -534,7 +466,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
         let _ = &mut self.gmssl_padding_compat;
         self
     }
-
     fn get_cipher_enc(&mut self) -> Result<&mut Sm4Cipher, TlcpError> {
         if self.cipher_enc.is_none() {
             let cipher = Sm4Cipher::new(&self.write_key)
@@ -545,7 +476,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
             .as_mut()
             .ok_or_else(|| TlcpError::HandshakeFailed("cipher_enc not initialized".into()))
     }
-
     fn get_cipher_dec(&mut self) -> Result<&mut Sm4Cipher, TlcpError> {
         if self.cipher_dec.is_none() {
             let cipher = Sm4Cipher::new(&self.read_key)
@@ -556,17 +486,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
             .as_mut()
             .ok_or_else(|| TlcpError::HandshakeFailed("cipher_dec not initialized".into()))
     }
-
     /// Encrypt a record with SM4-GCM, returning the complete record bytes.
     fn encrypt_gcm_record(&mut self, plaintext: &[u8]) -> std::io::Result<Vec<u8>> {
         let nonce = next_nonce(&self.write_nonce, self.write_seq - 1)
             .map_err(|e| std::io::Error::other(format!("Nonce overflow: {}", e)))?;
         let seq_bytes = (self.write_seq - 1).to_be_bytes();
-
         let cipher = self
             .get_cipher_enc()
             .map_err(|e| std::io::Error::other(format!("SM4 key error: {:?}", e)))?;
-
         // Per GmSSL's `tls_gcm_encrypt` (tls.c:524-528), the AAD for SM4-GCM
         // records is 13 bytes:
         //   seq_num (8) || record_header (5)
@@ -585,11 +512,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
         aad[0..8].copy_from_slice(&seq_bytes);
         aad[8..11].copy_from_slice(&header[0..3]);
         aad[11..13].copy_from_slice(&pt_len_bytes);
-
         let (ciphertext, tag) = cipher
             .encrypt_gcm(plaintext, &nonce, &aad)
             .map_err(|e| std::io::Error::other(format!("GCM encryption failed: {:?}", e)))?;
-
         // Wire format: header(5) || explicit_nonce(8) || ct || tag(16)
         let mut record = Vec::with_capacity(5 + 8 + plaintext.len() + 16);
         record.extend_from_slice(&header);
@@ -598,12 +523,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
         record.extend_from_slice(&tag);
         Ok(record)
     }
-
     /// Encrypt a record with SM4-CBC + HMAC-SM3, returning the complete record bytes.
     fn encrypt_cbc_record(&mut self, plaintext: &[u8]) -> std::io::Result<Vec<u8>> {
         self.encrypt_cbc_record_with_type(TLCP_RECORD_TYPE_APP_DATA, plaintext)
     }
-
     /// Internal: same as `encrypt_cbc_record` but with a caller-chosen record-layer
     /// content type. Used by the handshake layer (which frames Finished as
     /// type=Handshake) and by app data (type=AppData).
@@ -618,7 +541,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
     /// (so the padding region is `N` bytes of value `N`, followed by **one
     /// extra byte of value `N`** at the very end of the record). That
     /// trailing length byte is required by RFC 5246 §6.2.3.2 /
-    /// GB/T 38636-2020 §6.2.3 — the structure is
+    /// GB/T 38636-2020 §6.2.3.2 — the structure is
     ///
     /// ```text
     /// struct {
@@ -642,7 +565,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
         plaintext: &[u8],
     ) -> std::io::Result<Vec<u8>> {
         let seq_bytes = (self.write_seq - 1).to_be_bytes();
-
         // HMAC-SM3 over seq_num || type || version || length || plaintext.
         let mut mac_input = Vec::with_capacity(8 + 1 + 2 + plaintext.len());
         mac_input.extend_from_slice(&seq_bytes);
@@ -650,11 +572,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
         mac_input.extend_from_slice(&TLCP_VERSION);
         mac_input.extend_from_slice(&(plaintext.len() as u16).to_be_bytes());
         mac_input.extend_from_slice(plaintext);
-
         let hmac = Sm3Hmac::new(&self.write_mac_key)
             .compute(&mac_input)
             .map_err(|e| std::io::Error::other(format!("HMAC-SM3 failed: {:?}", e)))?;
-
         // Inner payload: plaintext || HMAC || padding_bytes(N of value N) || length_byte(N)
         //
         // Per RFC 5246 §6.2.3.2 the tail is N padding bytes of value N
@@ -674,11 +594,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
         inner.extend(std::iter::repeat_n(pad_byte, pad_len));
         // 1 trailing length byte, also equal to pad_len
         inner.push(pad_byte);
-
         // Fresh random IV per record.
         let mut iv = [0u8; SM4_CBC_IV_LENGTH];
         rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut iv);
-
         let cipher = self
             .get_cipher_enc()
             .map_err(|e| std::io::Error::other(format!("SM4 key error: {}", e)))?;
@@ -690,7 +608,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
         let ciphertext = cipher
             .encrypt_cbc_raw(&inner, &iv)
             .map_err(|e| std::io::Error::other(format!("CBC encryption failed: {:?}", e)))?;
-
         let ct_len = SM4_CBC_IV_LENGTH + ciphertext.len();
         let mut record = Vec::with_capacity(5 + ct_len);
         record.push(content_type);
@@ -700,33 +617,34 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
         record.extend_from_slice(&ciphertext);
         Ok(record)
     }
-
     /// Get the session ID assigned during the handshake.
     pub fn session_id(&self) -> &[u8] {
         &self.session_id
     }
-
     /// Get the cached session state for resumption.
     pub fn to_resumed_session(&self) -> Option<&TlcpResumedSession> {
         self.cached_resumed_session.as_ref()
     }
-
     /// Whether this stream is on the client side.
     pub fn is_client(&self) -> bool {
         self.is_client
     }
-
     /// Return the negotiated cipher suite (post-handshake).
     pub fn cipher_suite(&self) -> TlcpCipherSuite {
         self.cipher_suite
     }
-
     /// Write application data (encrypted with SM4-GCM).
     ///
-    /// TLCP record format (GB/T 38636-2020 §6.2):
+    /// TLCP GCM record format (GB/T 38636-2020 §6.2 / RFC 5288):
     /// ```text
-    /// [content_type=0x17][version=0x0101][length(2)][ciphertext][tag(16)]
+    /// [content_type=0x17][version=0x0101][length(2)][explicit_nonce(8)][ciphertext][tag(16)]
     /// ```
+    ///
+    /// The 8-byte explicit nonce is the per-record sequence number
+    /// (`write_seq`/`read_seq`) and is XORed into the fixed_iv-derived
+    /// 12-byte GCM nonce base on the encryption side. The remaining
+    /// 4-byte fixed_iv comes from the key block (see
+    /// [`crate::tlcp::TlcpKeyMaterial::derive`]).
     ///
     /// Unlike TLS 1.3, TLCP does NOT append an inner content type byte.
     pub async fn write_application_data(&mut self, plaintext: &[u8]) -> Result<(), TlcpError> {
@@ -734,14 +652,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
             .write_seq
             .checked_add(1)
             .ok_or(TlcpError::SequenceOverflow)?;
-
         if self.cipher_suite.gcm {
             self.write_gcm(plaintext).await
         } else {
             self.write_cbc(plaintext).await
         }
     }
-
     /// Encrypt a single record with a caller-chosen record-layer content type
     /// and write it to the inner transport. Used by the GmSSL-compat path
     /// to send the Finished handshake message framed as a handshake record
@@ -762,13 +678,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
             self.write_cbc_with_type(content_type, plaintext).await
         }
     }
-
     /// Write application data with SM4-GCM.
     async fn write_gcm(&mut self, plaintext: &[u8]) -> Result<(), TlcpError> {
         self.write_gcm_with_type(TLCP_RECORD_TYPE_APP_DATA, plaintext)
             .await
     }
-
     async fn write_gcm_with_type(
         &mut self,
         content_type: u8,
@@ -776,25 +690,20 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
     ) -> Result<(), TlcpError> {
         let nonce = next_nonce(&self.write_nonce, self.write_seq - 1)?;
         let seq_bytes = (self.write_seq - 1).to_be_bytes();
-
         let pt_len_bytes = (plaintext.len() as u16).to_be_bytes();
         let mut record_header = [0u8; 5];
         record_header[0] = content_type;
         record_header[1..3].copy_from_slice(&TLCP_VERSION);
         let ct_len = (8 + plaintext.len() + 16) as u16;
         record_header[3..5].copy_from_slice(&ct_len.to_be_bytes());
-
         let mut aad = [0u8; 13];
         aad[0..8].copy_from_slice(&seq_bytes);
         aad[8..11].copy_from_slice(&record_header[0..3]);
         aad[11..13].copy_from_slice(&pt_len_bytes);
-
         let cipher = self.get_cipher_enc()?;
-
         let (ciphertext, tag) = cipher
             .encrypt_gcm(plaintext, &nonce, &aad)
             .map_err(|e| TlcpError::HandshakeFailed(format!("GCM encryption failed: {:?}", e)))?;
-
         self.inner
             .write_all(&record_header)
             .await
@@ -815,22 +724,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
             .flush()
             .await
             .map_err(|e| TlcpError::IoError(e.to_string()))?;
-
         metrics::record_bytes("tlcp", "send", plaintext.len());
         Ok(())
     }
-
     /// Write application data with SM4-CBC + HMAC-SM3.
     ///
-    /// TLCP CBC record format (GB/T 38636-2020 §6.2.3):
+    /// TLCP CBC record format (GB/T 38636-2020 §6.2.3.2):
     /// ```text
-    /// [content_type=0x17][version=0x0101][length(2)][HMAC(32)][IV(16)][ciphertext][padding]
+    /// [content_type=0x17][version=0x0101][length(2)][IV(16)][ciphertext]
     /// ```
     async fn write_cbc(&mut self, plaintext: &[u8]) -> Result<(), TlcpError> {
         self.write_cbc_with_type(TLCP_RECORD_TYPE_APP_DATA, plaintext)
             .await
     }
-
     async fn write_cbc_with_type(
         &mut self,
         content_type: u8,
@@ -842,7 +748,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
         let record = self
             .encrypt_cbc_record_with_type(content_type, plaintext)
             .map_err(|e| TlcpError::HandshakeFailed(e.to_string()))?;
-
         self.inner
             .write_all(&record)
             .await
@@ -851,11 +756,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
             .flush()
             .await
             .map_err(|e| TlcpError::IoError(e.to_string()))?;
-
         metrics::record_bytes("tlcp", "send", plaintext.len());
         Ok(())
     }
-
     /// Read application data (decrypted from SM4-GCM).
     ///
     /// Reads one TLCP record, decrypts it, and returns the plaintext.
@@ -867,11 +770,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
             .read_exact(&mut header)
             .await
             .map_err(|e| TlcpError::IoError(e.to_string()))?;
-
         let content_type = header[0];
         let version = [header[1], header[2]];
         let ct_len = u16::from_be_bytes([header[3], header[4]]) as usize;
-
         // Validate version
         if version != TLCP_VERSION {
             return Err(TlcpError::TlsRecordError(format!(
@@ -879,13 +780,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
                 version[0], version[1]
             )));
         }
-
         if ct_len > TLCP_MAX_RECORD_SIZE {
             return Err(TlcpError::HandshakeFailed(
                 "TLCP record exceeds size limit".into(),
             ));
         }
-
         match content_type {
             TLCP_RECORD_TYPE_APP_DATA | TLCP_RECORD_TYPE_HANDSHAKE => {
                 let mut buf = vec![0u8; ct_len];
@@ -893,18 +792,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
                     .read_exact(&mut buf)
                     .await
                     .map_err(|e| TlcpError::IoError(e.to_string()))?;
-
                 self.read_seq = self
                     .read_seq
                     .checked_add(1)
                     .ok_or(TlcpError::SequenceOverflow)?;
-
                 let plaintext = if self.cipher_suite.gcm {
                     self.decrypt_gcm(&buf, &header)?
                 } else {
                     self.decrypt_cbc(&buf, &header)?
                 };
-
                 metrics::record_bytes("tlcp", "recv", plaintext.len());
                 Ok(plaintext)
             }
@@ -915,7 +811,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
                     .read_exact(&mut buf)
                     .await
                     .map_err(|e| TlcpError::IoError(e.to_string()))?;
-
                 if buf.len() >= 2 && buf[0] == 0x01 && buf[1] == 0x00 {
                     // close_notify — return empty to signal EOF
                     return Ok(Vec::new());
@@ -932,7 +827,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
             ))),
         }
     }
-
     /// Decrypt a GCM record.
     fn decrypt_gcm(&mut self, buf: &[u8], header: &[u8; 5]) -> Result<Vec<u8>, TlcpError> {
         // GCM record wire format: explicit_nonce(8) || ciphertext || tag(16)
@@ -943,7 +837,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
         }
         let (explicit_nonce_and_ct, tag) = buf.split_at(buf.len() - 16);
         let (_explicit_nonce, ciphertext) = explicit_nonce_and_ct.split_at(8);
-
         // AAD = seq_bytes (8) || record_header (5) with the last 2 bytes
         // overwritten by the **plaintext body** length (= ciphertext length).
         // This mirrors GmSSL's `tls_gcm_decrypt` (tls.c:592-596) and
@@ -955,18 +848,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
         aad[0..8].copy_from_slice(&seq_bytes);
         aad[8..11].copy_from_slice(&header[0..3]);
         aad[11..13].copy_from_slice(&pt_len_bytes);
-
         let cipher = self.get_cipher_dec()?;
         cipher
             .decrypt_gcm(ciphertext, &nonce, &aad, tag)
             .map_err(|e| TlcpError::HandshakeFailed(format!("GCM decryption failed: {:?}", e)))
     }
-
     /// Decrypt a CBC+HMAC record.
     ///
     /// Wire format (after the 5-byte record header):
     /// `[IV(16)][SM4-CBC(plaintext || HMAC || padding || padding_length)]`.
-    /// The post-MAC tail follows RFC 5246 §6.2.3.2 / GB/T 38636-2020 §6.2.3:
+    /// The post-MAC tail follows RFC 5246 §6.2.3.2 / GB/T 38636-2020 §6.2.3.2:
     ///
     /// ```text
     /// struct {
@@ -988,9 +879,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
                 "TLCP CBC record too short".into(),
             ));
         }
-
         let (iv, ciphertext) = buf.split_at(SM4_CBC_IV_LENGTH);
-
         let cipher = self.get_cipher_dec()?;
         // Use `decrypt_cbc_raw` here: this function does **not** strip any
         // padding — it returns the raw block-decrypted bytes. We need the raw
@@ -1006,13 +895,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
         // "bad padding" from "bad HMAC" gives an attacker a padding-oracle.
         // The gm-crypto SM4 implementation is constant-time, so this is
         // belt-and-braces against any future debug-format regressions.
-
         if decrypted.is_empty() {
             return Err(TlcpError::HandshakeFailed(
                 "TLCP CBC empty plaintext".into(),
             ));
         }
-
         // The trailing byte is the explicit `padding_length` field (RFC 5246).
         // Per §6.2.3.2 it can be any byte value in [0, 255] as long as the
         // total post-MAC tail is a multiple of the block size. We restrict
@@ -1058,7 +945,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
         let plaintext_len = unpadded_len - SM3_HMAC_LENGTH;
         let plaintext = &decrypted[..plaintext_len];
         let mac_received = &decrypted[plaintext_len..unpadded_len];
-
         // Verify HMAC-SM3 over seq_num || content_type || version || length || plaintext
         let seq_bytes = (self.read_seq - 1).to_be_bytes();
         let mut mac_input = Vec::with_capacity(8 + 1 + 2 + plaintext.len());
@@ -1067,21 +953,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
         mac_input.extend_from_slice(&header[1..3]); // version
         mac_input.extend_from_slice(&(plaintext.len() as u16).to_be_bytes());
         mac_input.extend_from_slice(plaintext);
-
         let hmac_computed = Sm3Hmac::new(&self.read_mac_key)
             .compute(&mac_input)
             .map_err(|e| TlcpError::HandshakeFailed(format!("HMAC-SM3 compute failed: {:?}", e)))?;
-
         // Constant-time HMAC comparison
         if !bool::from(mac_received.ct_eq(&hmac_computed)) {
             return Err(TlcpError::HandshakeFailed(
                 "TLCP CBC HMAC verification failed".into(),
             ));
         }
-
         Ok(plaintext.to_vec())
     }
-
     /// Send a close_notify alert for graceful shutdown.
     ///
     /// Per GB/T 38636-2020, the alert record uses the same encryption
@@ -1090,26 +972,21 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
         if self.close_notify_sent {
             return Ok(());
         }
-
         // TLCP close_notify: [warning(1)][close_notify(0)]
         let alert_payload: [u8; 2] = [0x01, 0x00];
-
         self.write_seq = self
             .write_seq
             .checked_add(1)
             .ok_or(TlcpError::SequenceOverflow)?;
-
         if self.cipher_suite.gcm {
             self.write_gcm(&alert_payload).await?;
         } else {
             self.write_cbc(&alert_payload).await?;
         }
-
         self.close_notify_sent = true;
         Ok(())
     }
 }
-
 impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlcpStream<S> {
     fn poll_read(
         mut self: Pin<&mut Self>,
@@ -1122,17 +999,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlcpStream<S> {
             let to_copy = available.min(buf.remaining());
             buf.put_slice(&self.read_buf[self.read_buf_pos..self.read_buf_pos + to_copy]);
             self.read_buf_pos += to_copy;
-
             if self.read_buf_pos >= self.read_buf.len() {
                 self.read_buf.clear();
                 self.read_buf_pos = 0;
             }
-
             return Poll::Ready(Ok(()));
         }
-
         let mut stream_ref = Pin::new(&mut self.inner);
-
         // Read 5-byte TLCP record header
         let mut header = [0u8; 5];
         match stream_ref
@@ -1143,22 +1016,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlcpStream<S> {
             Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
             Poll::Pending => return Poll::Pending,
         }
-
         let content_type = header[0];
         let version = [header[1], header[2]];
         let ct_len = u16::from_be_bytes([header[3], header[4]]) as usize;
-
         if version != TLCP_VERSION {
             return Poll::Ready(Err(std::io::Error::other(format!(
                 "unexpected TLCP version: {:02X}{:02X}",
                 version[0], version[1]
             ))));
         }
-
         if ct_len > TLCP_MAX_RECORD_SIZE {
             return Poll::Ready(Err(std::io::Error::other("TLCP record exceeds size limit")));
         }
-
         match content_type {
             TLCP_RECORD_TYPE_APP_DATA => {
                 let mut ciphertext_buf = vec![0u8; ct_len];
@@ -1179,12 +1048,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlcpStream<S> {
                         Poll::Pending => return Poll::Pending,
                     }
                 }
-
                 self.read_seq = match self.read_seq.checked_add(1) {
                     Some(s) => s,
                     None => return Poll::Ready(Err(std::io::Error::other("Sequence overflow"))),
                 };
-
                 let plaintext = if self.cipher_suite.gcm {
                     if ciphertext_buf.len() < 8 + 16 {
                         return Poll::Ready(Err(std::io::Error::other(
@@ -1251,26 +1118,21 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlcpStream<S> {
                         }
                     }
                 };
-
                 // TLCP: no inner content type stripping — plaintext is raw data
                 // But check if this is an encrypted close_notify alert
                 if plaintext.len() == 2 && plaintext[0] == 0x01 && plaintext[1] == 0x00 {
                     // close_notify received — return 0 bytes (EOF)
                     return Poll::Ready(Ok(()));
                 }
-
                 self.read_buf = plaintext;
                 self.read_buf_pos = 0;
-
                 let to_copy = self.read_buf.len().min(buf.remaining());
                 buf.put_slice(&self.read_buf[..to_copy]);
                 self.read_buf_pos = to_copy;
-
                 if self.read_buf_pos >= self.read_buf.len() {
                     self.read_buf.clear();
                     self.read_buf_pos = 0;
                 }
-
                 Poll::Ready(Ok(()))
             }
             TLCP_RECORD_TYPE_ALERT => {
@@ -1293,7 +1155,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlcpStream<S> {
                         Poll::Pending => return Poll::Pending,
                     }
                 }
-
                 // close_notify = [0x01, 0x00]
                 if alert_buf.len() >= 2 && alert_buf[0] == 0x01 && alert_buf[1] == 0x00 {
                     Poll::Ready(Ok(())) // 0 bytes filled = EOF
@@ -1312,7 +1173,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlcpStream<S> {
         }
     }
 }
-
 impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlcpStream<S> {
     fn poll_write(
         mut self: Pin<&mut Self>,
@@ -1323,15 +1183,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlcpStream<S> {
             Some(s) => s,
             None => return Poll::Ready(Err(std::io::Error::other("Sequence overflow"))),
         };
-
         let record_data = if self.cipher_suite.gcm {
             self.encrypt_gcm_record(buf)?
         } else {
             self.encrypt_cbc_record(buf)?
         };
-
         let mut stream_ref = Pin::new(&mut self.inner);
-
         // Write the complete record
         let mut written = 0;
         while written < record_data.len() {
@@ -1344,28 +1201,23 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlcpStream<S> {
                 Poll::Pending => return Poll::Pending,
             }
         }
-
         Poll::Ready(Ok(buf.len()))
     }
-
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.inner).poll_flush(cx)
     }
-
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         if !self.close_notify_sent {
             self.write_seq = match self.write_seq.checked_add(1) {
                 Some(s) => s,
                 None => return Pin::new(&mut self.inner).poll_shutdown(cx),
             };
-
             let alert_payload: [u8; 2] = [0x01, 0x00];
             let record_data = if self.cipher_suite.gcm {
                 self.encrypt_gcm_record(&alert_payload).ok()
             } else {
                 self.encrypt_cbc_record(&alert_payload).ok()
             };
-
             if let Some(record) = record_data {
                 let mut stream_ref = Pin::new(&mut self.inner);
                 let mut written = 0;
@@ -1377,18 +1229,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlcpStream<S> {
                     }
                 }
             }
-
             self.close_notify_sent = true;
         }
-
         Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
-
 // ============================================================================
 // TLCP Connector & Acceptor
 // ============================================================================
-
 /// TLCP client connector configuration.
 ///
 /// Encapsulates the parameters needed to establish a TLCP client connection.
@@ -1416,7 +1264,7 @@ pub struct TlcpConnector {
     /// [`with_client_certs`](Self::with_client_certs).
     client_sign_key: Option<String>,
     /// Optional client encryption key (PKCS#8 PEM, possibly encrypted)
-    /// used as the long-term scalar in the GB/T 32918-2017 §6.4.2
+    /// used as the long-term scalar in the GB/T 32918.3-2016 §6.4.2
     /// SM2 key agreement for ECDHE_*_SM4_* cipher suites. Set via
     /// [`with_client_certs`](Self::with_client_certs).
     client_enc_key: Option<String>,
@@ -1424,13 +1272,11 @@ pub struct TlcpConnector {
     /// it is also encrypted). Default: `P@ssw0rd`.
     client_sign_key_password: Option<String>,
 }
-
 impl Default for TlcpConnector {
     fn default() -> Self {
         Self::new()
     }
 }
-
 impl TlcpConnector {
     /// Create a new TLCP connector with default settings.
     pub fn new() -> Self {
@@ -1452,13 +1298,11 @@ impl TlcpConnector {
             client_sign_key_password: None,
         }
     }
-
     /// Create a connector with a shared session cache for resumption.
     pub fn with_session_cache(mut self, cache: TlcpSessionCache) -> Self {
         self.session_cache = cache;
         self
     }
-
     /// Configure the expected server signing certificate public key.
     ///
     /// **Required** before calling [`connect_with_certs`](Self::connect_with_certs).
@@ -1475,7 +1319,6 @@ impl TlcpConnector {
         self.server_sign_distid = Some(distid);
         self
     }
-
     /// Configure the client certificate chain + signing key sent in
     /// response to a server `CertificateRequest`.
     ///
@@ -1491,14 +1334,9 @@ impl TlcpConnector {
     ///   the default `"P@ssw0rd"` (the test-cert password emitted by
     ///   `gmssl sm2keygen`).
     /// - `enc_key_pem`: optional PKCS#8 PEM for the client's encryption
-    ///   key. Required for full TLCP ECDHE interop with `gmssl` master
-    ///   (which pairs the server's enc-key with the client ENCRYPTION
-    ///   cert's public key in the GB/T 32918-2017 §6.4.2 key
-    ///   agreement). Currently ignored by the connector's default
-    ///   PMS derivation (see the TODO in `connect_with_certs`'s ECDHE
-    ///   branch) — set it to satisfy the API contract, but expect
-    ///   ECDHE handshakes to still fail at the Finished-MAC layer
-    ///   until the helper is implemented.
+    ///   key. Required for TLCP ECDHE suites (the connector reads it
+    ///   to derive `t = x̂_R * r + k` per GB/T 32918.3-2016 §6.4.2
+    ///   during the ECDHE key agreement).
     pub fn with_client_certs(
         mut self,
         chain: Vec<Vec<u8>>,
@@ -1512,7 +1350,6 @@ impl TlcpConnector {
         self.client_sign_key_password = password;
         self
     }
-
     /// Configure which cipher suites to offer in the ClientHello.
     ///
     /// By default, all four TLCP cipher suites are offered.
@@ -1523,7 +1360,6 @@ impl TlcpConnector {
         }
         self
     }
-
     /// Enable GmSSL 3.x CBC-record-layer padding compatibility.
     ///
     /// Set this when connecting to `gmssl tlcp_server` v3.x, which uses a
@@ -1535,7 +1371,6 @@ impl TlcpConnector {
         self.gmssl_padding_compat = compat;
         self
     }
-
     /// Connect to a TLCP server over the given transport.
     ///
     /// If `server_sign_pubkey` is configured, performs a production ECDHE handshake
@@ -1551,14 +1386,12 @@ impl TlcpConnector {
             connect_tlcp(transport, &self.session_cache).await
         }
     }
-
     /// Production ECDHE handshake with server certificate verification.
     pub async fn connect_with_certs<S>(&self, transport: S) -> Result<TlcpStream<S>, TlcpError>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
         let mut io = transport;
-
         // Step 1: Send ClientHello
         let mut client_hs = TlcpHandshake::new_client()?;
         client_hs.cipher_suites = self.cipher_suites.clone();
@@ -1568,7 +1401,6 @@ impl TlcpConnector {
             .await
             .map_err(|e| TlcpError::HandshakeFailed(format!("write ClientHello: {}", e)))?;
         client_hs.transcript.extend_from_slice(&ch_bytes);
-
         // Step 2: Read ServerHello
         let (_ct, sh_payload) = read_plaintext_record(&mut io)
             .await
@@ -1583,10 +1415,8 @@ impl TlcpConnector {
         let server_hello = TlcpServerHello::from_bytes(&sh_body)?;
         client_hs.process_server_hello(&server_hello)?;
         client_hs.transcript.extend_from_slice(&sh_payload);
-
         let server_random = server_hello.random;
         let client_random = client_hs.client_random;
-
         // Step 3: Read Certificate
         let (_ct, cert_payload) = read_plaintext_record(&mut io)
             .await
@@ -1598,15 +1428,14 @@ impl TlcpConnector {
                 cert_type
             )));
         }
-        // PR5 (interoperability 2026-09-01): actually parse dual-cert so we
-        // can run ECC-suite key exchange (we need the enc cert for SM2 enc).
-        // PR5 also: advance the handshake state machine via process_server_certs
-        // so derive_master_secret is happy.
+        // Parse the dual-cert (sign + enc) so we can run ECC-suite key
+        // exchange (we need the enc cert for SM2 enc). The state-machine
+        // `process_server_certs` call also advances the handshake so the
+        // subsequent `derive_master_secret` is happy.
         let cert_pair = TlcpCertPair::from_certificate_message(&cert_body)?;
         client_hs.process_server_certs(cert_pair.clone())?;
         client_hs.transcript.extend_from_slice(&cert_payload);
         // Print cert bytes (using {:02x?} for first/last 32 bytes to keep output small)
-
         // Step 4: Read ServerKeyExchange
         let (_ct, ske_payload) = read_plaintext_record(&mut io)
             .await
@@ -1625,7 +1454,6 @@ impl TlcpConnector {
             ))
         })?;
         let is_ecc_mode = !suite.ecdhe;
-
         // Step 5: Verify ServerKeyExchange signature. We REQUIRE the caller
         // to configure `server_sign_pubkey` + `server_sign_distid` via
         // `with_server_sign_key(...)`; silently skipping verification would
@@ -1654,7 +1482,6 @@ impl TlcpConnector {
             &verifier,
         )?;
         client_hs.transcript.extend_from_slice(&ske_payload);
-
         // Step 5.5: GmSSL 2026-06+ master unconditionally sends a
         // CertificateRequest after ServerKeyExchange when the chosen
         // suite is one of the ECDHE_*_SM4_* family (the server-side
@@ -1690,7 +1517,6 @@ impl TlcpConnector {
                 }
             }
         }
-
         // Step 6: Read ServerHelloDone
         let (_ct, shd_payload) = read_plaintext_record(&mut io)
             .await
@@ -1703,7 +1529,6 @@ impl TlcpConnector {
             )));
         }
         client_hs.transcript.extend_from_slice(&shd_payload);
-
         // Step 6.5: If the server sent CertificateRequest, RFC 5246
         // §7.4.6 requires us to reply with a Certificate message
         // before ClientKeyExchange. GmSSL 2026-06+ master forces this
@@ -1815,7 +1640,6 @@ impl TlcpConnector {
             } else {
                 None
             };
-
         // Step 7: Build ClientKeyExchange + derive pre-master secret.
         // - ECDHE: generate ephemeral keypair, send public key, derive PMS via SM2 ECDH.
         // - ECC  : generate 48 random bytes as PMS, SM2-encrypt to server enc cert, send ciphertext.
@@ -1857,7 +1681,7 @@ impl TlcpConnector {
             (msg, pms_bytes)
         } else {
             // ECDHE: TLCP ECDHE PMS derivation per GB/T 38636-2020
-            // §6.4.6.2 (a.k.a. GB/T 32918-2017 §6.4.2 full key
+            // §6.4.6.2 (a.k.a. GB/T 32918.3-2016 §6.4.2 full key
             // agreement). gmssl master implements this in
             // `sm2_key_exchange()`: both parties use their long-term
             // encryption key + a fresh ephemeral, compute a shared
@@ -1997,7 +1821,6 @@ impl TlcpConnector {
             .await
             .map_err(|e| TlcpError::HandshakeFailed(format!("write ClientKeyExchange: {}", e)))?;
         client_hs.transcript.extend_from_slice(&cke_bytes);
-
         // Step 7.5: Build CertificateVerify if we sent a client cert.
         // Per GmSSL 2026-06+ master (and RFC 5246 §7.4.8), CV is
         // signed over the transcript HASH that includes everything up
@@ -2102,13 +1925,11 @@ impl TlcpConnector {
                 .map_err(|e| TlcpError::HandshakeFailed(format!("write CV: {}", e)))?;
             client_hs.transcript.extend_from_slice(&cv_msg);
         }
-
         // Step 8: Stash PMS + server_random + selected suite, derive master secret.
         client_hs.pre_master_secret = Some(pms);
         client_hs.server_random = Some(server_random);
         client_hs.cipher_suite = Some(server_hello.cipher_suite);
         client_hs.derive_master_secret()?;
-
         // Step 9: Send ChangeCipherSpec
         let ccs_record = vec![
             TLCP_RECORD_TYPE_CCS,
@@ -2123,7 +1944,6 @@ impl TlcpConnector {
             .await
             .map_err(|e| TlcpError::HandshakeFailed(format!("write CCS: {}", e)))?;
         io.flush().await?;
-
         // Step 10: Create encrypted stream and send Finished
         let suite = TlcpCipherSuite::from_id(server_hello.cipher_suite)
             .ok_or_else(|| TlcpError::HandshakeFailed("unknown cipher suite".to_string()))?;
@@ -2140,14 +1960,12 @@ impl TlcpConnector {
                 .ok_or_else(|| TlcpError::HandshakeFailed("no server random".to_string()))?,
             suite,
         )?;
-
         // `gmssl_padding_compat` is a deprecated no-op kept for API stability —
         // the wire format always follows RFC 5246 §6.2.3.2 /
-        // GB/T 38636-2020 §6.2.3. Remove this call entirely in 0.3.0.
+        // GB/T 38636-2020 §6.2.3.2. Remove this call entirely in a future release.
         #[allow(deprecated)]
         let mut stream = TlcpStream::new(io, &key_material, suite, true, session_id)?
             .with_gmssl_padding_compat(self.gmssl_padding_compat);
-
         let client_finished = client_hs.compute_client_finished()?;
         let cf_bytes = client_finished.to_bytes();
         // Always frame the Finished as a handshake-type record (0x16).
@@ -2163,7 +1981,6 @@ impl TlcpConnector {
             .await
             .map_err(|e| TlcpError::HandshakeFailed(format!("write Finished: {}", e)))?;
         stream.flush().await?;
-
         // Step 11: Read server ChangeCipherSpec + Finished
         // CCS is read as raw bytes from the inner transport
         let mut ccs_buf = [0u8; 6];
@@ -2175,15 +1992,15 @@ impl TlcpConnector {
                 .await
                 .map_err(|e| TlcpError::HandshakeFailed(format!("read server CCS: {}", e)))?;
         }
-
         // Read server Finished (encrypted).
         //
-        // FIX (security audit 2026-08-31): the previous code read the decrypted
-        // bytes into a buffer and immediately discarded them with `let _ = ...`.
-        // That skipped the protocol's transcript-binding check entirely — an
-        // attacker who tampered with (e.g.) the ServerHello or SKE before we
-        // reached this point would not be detected. The Finished verify_data
-        // is the only thing that authenticates the full handshake transcript.
+        // The previous code read the decrypted bytes into a buffer
+        // and immediately discarded them with `let _ = ...`. That
+        // skipped the protocol's transcript-binding check entirely —
+        // an attacker who tampered with (e.g.) the ServerHello or SKE
+        // before we reached this point would not be detected. The
+        // Finished verify_data is the only thing that authenticates
+        // the full handshake transcript.
         //
         // The Finished message is itself a handshake-layer message (type=0x14),
         // but it travels inside a TLCP APP_DATA record during the post-CCS
@@ -2219,17 +2036,14 @@ impl TlcpConnector {
         // The Finished message itself is part of the transcript only for
         // session-resumption derivation, not for our verify check above.
         client_hs.transcript.extend_from_slice(&finished_plaintext);
-
         stream.cached_resumed_session = client_hs.to_resumed_session();
         Ok(stream)
     }
-
     /// Access the session cache for this connector.
     pub fn session_cache(&self) -> &TlcpSessionCache {
         &self.session_cache
     }
 }
-
 /// TLCP server acceptor configuration.
 ///
 /// Encapsulates the parameters needed to accept TLCP client connections,
@@ -2246,13 +2060,11 @@ pub struct TlcpAcceptor {
     /// Server encryption key pair (for static ECC cipher suites)
     enc_key: Option<Arc<gm_crypto::sm2::Sm2KeyPair>>,
 }
-
 impl Default for TlcpAcceptor {
     fn default() -> Self {
         Self::new()
     }
 }
-
 impl TlcpAcceptor {
     /// Create a new TLCP acceptor with default settings.
     pub fn new() -> Self {
@@ -2264,13 +2076,11 @@ impl TlcpAcceptor {
             enc_key: None,
         }
     }
-
     /// Create an acceptor with a shared session cache for resumption.
     pub fn with_session_cache(mut self, cache: TlcpSessionCache) -> Self {
         self.session_cache = cache;
         self
     }
-
     /// Configure the server's dual certificates for production TLCP handshake.
     ///
     /// # Arguments
@@ -2291,7 +2101,6 @@ impl TlcpAcceptor {
         self.enc_key = Some(Arc::new(enc_key));
         self
     }
-
     /// Accept a TLCP client connection over the given transport.
     ///
     /// Performs the full handshake and returns an encrypted `TlcpStream`.
@@ -2314,7 +2123,6 @@ impl TlcpAcceptor {
             accept_tlcp(transport, &self.session_cache).await
         }
     }
-
     /// Accept with production dual-certificate ECDHE handshake.
     ///
     /// Performs the full GB/T 38636-2020 handshake:
@@ -2330,7 +2138,6 @@ impl TlcpAcceptor {
         S: AsyncRead + AsyncWrite + Unpin,
     {
         use tokio::io::AsyncWriteExt;
-
         let mut io = transport;
         let sign_cert = self
             .sign_cert
@@ -2344,7 +2151,6 @@ impl TlcpAcceptor {
             .sign_key
             .clone()
             .ok_or_else(|| TlcpError::HandshakeFailed("sign key not configured".to_string()))?;
-
         // Step 1: Read ClientHello
         let (_content_type, record_payload) = read_plaintext_record(&mut io)
             .await
@@ -2358,7 +2164,6 @@ impl TlcpAcceptor {
         }
         let client_hello = TlcpClientHello::from_body(&body)?;
         let client_random = client_hello.random;
-
         // Step 2: Create server handshake context
         let mut server_hs = TlcpServerHandshake::with_session_cache(self.session_cache.clone())?;
         server_hs.process_client_hello(&client_hello).await?;
@@ -2367,7 +2172,6 @@ impl TlcpAcceptor {
         let suite = server_hs
             .cipher_suite
             .ok_or_else(|| TlcpError::HandshakeFailed("no cipher suite".to_string()))?;
-
         // Step 3: Send ServerHello
         let server_hello = server_hs.create_server_hello()?;
         let sh_bytes = server_hello.to_bytes();
@@ -2375,7 +2179,6 @@ impl TlcpAcceptor {
             .await
             .map_err(|e| TlcpError::HandshakeFailed(format!("write ServerHello: {}", e)))?;
         server_hs.transcript.extend_from_slice(&sh_bytes);
-
         // Step 4: Send Certificate (dual: sign + enc)
         let cert_pair = TlcpCertPair::new(sign_cert.clone(), enc_cert.clone());
         let cert_msg = cert_pair.to_certificate_message();
@@ -2384,7 +2187,6 @@ impl TlcpAcceptor {
             .map_err(|e| TlcpError::HandshakeFailed(format!("write Certificate: {}", e)))?;
         server_hs.transcript.extend_from_slice(&cert_msg);
         server_hs.set_server_certs(cert_pair);
-
         // Step 5: Generate ECDHE ephemeral keypair + ServerKeyExchange
         let sign_signer = gm_crypto::sm2::Sm2Signer::new(&sign_kp)
             .map_err(|e| TlcpError::HandshakeFailed(format!("sign signer: {}", e)))?;
@@ -2395,7 +2197,6 @@ impl TlcpAcceptor {
             .await
             .map_err(|e| TlcpError::HandshakeFailed(format!("write ServerKeyExchange: {}", e)))?;
         server_hs.transcript.extend_from_slice(&ske_bytes);
-
         // Step 6: Send ServerHelloDone
         let shd = TlcpServerHelloDone;
         let shd_bytes = shd.to_bytes();
@@ -2403,7 +2204,6 @@ impl TlcpAcceptor {
             .await
             .map_err(|e| TlcpError::HandshakeFailed(format!("write ServerHelloDone: {}", e)))?;
         server_hs.transcript.extend_from_slice(&shd_bytes);
-
         // Step 7: Read ClientKeyExchange
         let (_ct, cke_payload) = read_plaintext_record(&mut io)
             .await
@@ -2417,7 +2217,6 @@ impl TlcpAcceptor {
         }
         let cke = TlcpClientKeyExchange::from_body(&cke_body)?;
         server_hs.transcript.extend_from_slice(&cke_payload);
-
         // Step 8: Compute shared secret
         //
         // `cke.key_exchange` carries the ECParameters-wrapped payload
@@ -2433,14 +2232,13 @@ impl TlcpAcceptor {
             .compute_shared_secret(peer_pub)
             .map_err(|e| TlcpError::HandshakeFailed(format!("ECDHE shared secret: {}", e)))?;
         server_hs.complete_key_exchange(pms)?;
-
         // Step 9: Read ChangeCipherSpec
         //
-        // FIX (security audit 2026-08-31, 4th pass): we now validate both
-        // the CCS content_type AND the payload. Per GB/T 38636-2020 (and
-        // RFC 5246 §6.4.1) the CCS payload MUST be the single byte `0x01`.
-        // Accepting any other byte is a protocol deviation that an attacker
-        // could exploit to confuse the handshake state machine.
+        // Validate both the CCS content_type AND the payload. Per
+        // GB/T 38636-2020 (and RFC 5246 §7.1) the CCS payload MUST
+        // be the single byte `0x01`. Accepting any other byte is a
+        // protocol deviation that an attacker could exploit to confuse
+        // the handshake state machine.
         let (ccs_type, ccs_payload) = read_plaintext_record(&mut io)
             .await
             .map_err(|e| TlcpError::HandshakeFailed(format!("read CCS: {}", e)))?;
@@ -2457,7 +2255,6 @@ impl TlcpAcceptor {
                 ccs_payload
             )));
         }
-
         // Step 10: Read client Finished (now encrypted)
         // For now, we create the stream with key material so we can decrypt
         let key_material = TlcpKeyMaterial::derive(
@@ -2472,19 +2269,18 @@ impl TlcpAcceptor {
             &server_hs.server_random,
             suite,
         )?;
-
         // Build the stream now — subsequent reads are encrypted
         let mut stream = TlcpStream::new(io, &key_material, suite, false, session_id)?;
-
         // Read client Finished
         //
-        // FIX (security audit 2026-08-31): the previous code read the decrypted
-        // bytes into a buffer and discarded them. We now parse the handshake
-        // message and verify `verify_data` against our locally computed value.
-        // This is the protocol's transcript-binding check — if any byte of
-        // ClientHello / ServerHello / Certificate / SKE / ServerHelloDone /
-        // ClientKeyExchange was tampered with, the client cannot produce a
-        // Finished that matches our expected PRF output.
+        // The previous code read the decrypted bytes into a buffer
+        // and discarded them. We now parse the handshake message and
+        // verify `verify_data` against our locally computed value.
+        // This is the protocol's transcript-binding check — if any
+        // byte of ClientHello / ServerHello / Certificate / SKE /
+        // ServerHelloDone / ClientKeyExchange was tampered with, the
+        // client cannot produce a Finished that matches our expected
+        // PRF output.
         let finished_plaintext = stream
             .read_application_data()
             .await
@@ -2507,7 +2303,6 @@ impl TlcpAcceptor {
         // subsequent resumption derivation but does not feed the verify check
         // we just performed.
         server_hs.transcript.extend_from_slice(&finished_plaintext);
-
         // Step 11: Send ChangeCipherSpec + Finished
         let ccs_record = vec![
             TLCP_RECORD_TYPE_CCS,
@@ -2525,7 +2320,6 @@ impl TlcpAcceptor {
                 .map_err(|e| TlcpError::HandshakeFailed(format!("write CCS: {}", e)))?;
             raw_io.flush().await?;
         }
-
         // Compute and send server Finished
         let server_finished = server_hs.compute_server_finished()?;
         let sf_bytes = server_finished.to_bytes();
@@ -2534,7 +2328,6 @@ impl TlcpAcceptor {
             .await
             .map_err(|e| TlcpError::HandshakeFailed(format!("write server Finished: {}", e)))?;
         stream.flush().await?;
-
         stream.cached_resumed_session = server_hs.to_resumed_session();
         if let Some(ref resumed) = stream.cached_resumed_session {
             self.session_cache
@@ -2543,13 +2336,11 @@ impl TlcpAcceptor {
         }
         Ok(stream)
     }
-
     /// Access the session cache for this acceptor.
     pub fn session_cache(&self) -> &TlcpSessionCache {
         &self.session_cache
     }
 }
-
 /// Shared ECDHE context for loopback/integration testing.
 ///
 /// In production, the client and server exchange ephemeral public keys over the
@@ -2577,7 +2368,6 @@ pub struct TlcpEcdheContext {
     /// Server random
     server_random: [u8; 32],
 }
-
 impl Drop for TlcpEcdheContext {
     fn drop(&mut self) {
         use zeroize::Zeroize;
@@ -2586,7 +2376,6 @@ impl Drop for TlcpEcdheContext {
         self.server_random.zeroize();
     }
 }
-
 impl TlcpEcdheContext {
     /// Generate a new ECDHE context with real SM2 ECDH key exchange.
     ///
@@ -2595,7 +2384,6 @@ impl TlcpEcdheContext {
     pub fn generate() -> Result<Self, TlcpError> {
         Self::generate_with_cipher_suite(TLS_ECDHE_SM4_GCM_SM3)
     }
-
     /// Generate context with a specific cipher suite.
     pub fn generate_with_cipher_suite(_cipher_suite: [u8; 2]) -> Result<Self, TlcpError> {
         let client_kp = gm_crypto::sm2::Sm2EcdhKeypair::generate().map_err(|e| {
@@ -2604,14 +2392,12 @@ impl TlcpEcdheContext {
         let server_kp = gm_crypto::sm2::Sm2EcdhKeypair::generate().map_err(|e| {
             TlcpError::HandshakeFailed(format!("server ECDHE keygen failed: {}", e))
         })?;
-
         // Client computes: shared = ECDH(client_private, server_public)
         let pms = client_kp
             .compute_shared_secret(&server_kp.public_key_bytes())
             .map_err(|e| {
                 TlcpError::HandshakeFailed(format!("ECDHE shared secret failed: {}", e))
             })?;
-
         // Verify: server computes same shared = ECDH(server_private, client_public)
         let pms_verify = server_kp
             .compute_shared_secret(&client_kp.public_key_bytes())
@@ -2622,13 +2408,11 @@ impl TlcpEcdheContext {
                     .to_string(),
             ));
         }
-
         let mut client_random = [0u8; 32];
         let mut server_random = [0u8; 32];
         use rand_core::RngCore;
         rand_core::OsRng.fill_bytes(&mut client_random);
         rand_core::OsRng.fill_bytes(&mut server_random);
-
         Ok(Self {
             client_ephemeral_pub: client_kp.public_key_bytes(),
             server_ephemeral_pub: server_kp.public_key_bytes(),
@@ -2637,23 +2421,19 @@ impl TlcpEcdheContext {
             server_random,
         })
     }
-
     /// Get the client random.
     pub fn client_random(&self) -> [u8; 32] {
         self.client_random
     }
-
     /// Get the server random.
     pub fn server_random(&self) -> [u8; 32] {
         self.server_random
     }
-
     /// Get the pre-master secret.
     pub fn pre_master_secret(&self) -> &[u8] {
         &self.pre_master_secret
     }
 }
-
 /// Connect to a TLCP server over the given transport using shared ECDHE context.
 ///
 /// This is the production-ready variant that uses real SM2 ECDH key exchange.
@@ -2668,7 +2448,6 @@ where
 {
     let mut client_hs = TlcpHandshake::new_client()?;
     let _client_hello = client_hs.create_client_hello()?;
-
     // Use real ECDHE-derived values
     client_hs.client_random = ctx.client_random;
     client_hs.server_random = Some(ctx.server_random);
@@ -2682,10 +2461,8 @@ where
     client_hs.process_server_certs(placeholder)?;
     client_hs.pre_master_secret = Some(ctx.pre_master_secret.to_vec());
     client_hs.derive_master_secret()?;
-
     TlcpStream::from_client_handshake_with_transport(client_hs, transport)
 }
-
 /// Accept a TLCP client connection using shared ECDHE context.
 pub async fn accept_tlcp_with_context<S>(
     transport: S,
@@ -2700,15 +2477,12 @@ where
     server_hs.process_client_hello(&client_hello).await?;
     let _server_hello = server_hs.create_server_hello()?;
     server_hs.set_server_certs(TlcpCertPair::new(vec![0x01; 100], vec![0x02; 100]));
-
     // Use matching values from the shared context
     server_hs.client_random = Some(ctx.client_random);
     server_hs.server_random = ctx.server_random;
     server_hs.complete_key_exchange(ctx.pre_master_secret.to_vec())?;
-
     TlcpStream::from_server_handshake_with_transport(server_hs, transport)
 }
-
 /// Connect to a TLCP server over the given transport.
 ///
 /// Performs a full TLCP handshake:
@@ -2728,7 +2502,7 @@ where
 /// ECDHE locally without reading from/writing to the transport.
 /// Use [`TlcpConnector::connect_with_certs`] for production-grade handshake.
 #[deprecated(
-    since = "0.2.0",
+    since = "0.1.0",
     note = "Use TlcpConnector::connect_with_certs() for real TLCP handshake"
 )]
 pub async fn connect_tlcp<S>(
@@ -2741,7 +2515,6 @@ where
     // Step 1: Create client handshake and send ClientHello
     let mut client_hs = TlcpHandshake::new_client()?;
     let _client_hello = client_hs.create_client_hello()?;
-
     // Step 2: SM2 ECDHE key exchange (simulated for standalone use)
     //
     // In production, the client receives the server's ephemeral public key
@@ -2753,18 +2526,16 @@ where
     client_hs.cipher_suite = Some(TLS_ECDHE_SM4_GCM_SM3);
     client_hs.pre_master_secret = Some(ctx.pre_master_secret.to_vec());
     client_hs.derive_master_secret()?;
-
     // Step 3: Create stream from handshake
     TlcpStream::from_client_handshake_with_transport(client_hs, transport)
 }
-
 /// Accept a TLCP client connection (deprecated simulated mode).
 ///
 /// ⚠️ **This function does NOT perform real network handshake.** It simulates
 /// ECDHE locally without reading from/writing to the transport.
 /// Use [`TlcpAcceptor::accept_with_certs`] for production-grade handshake.
 #[deprecated(
-    since = "0.2.0",
+    since = "0.1.0",
     note = "Use TlcpAcceptor::accept_with_certs() for real TLCP handshake"
 )]
 pub async fn accept_tlcp<S>(
@@ -2776,13 +2547,11 @@ where
 {
     // Step 1: Create server handshake and read ClientHello
     let mut server_hs = TlcpServerHandshake::with_session_cache(session_cache.clone())?;
-
     // Step 2: Simulate receiving ClientHello and sending response
     let client_hello = TlcpClientHello::new()?;
     server_hs.process_client_hello(&client_hello).await?;
     let _server_hello = server_hs.create_server_hello()?;
     server_hs.set_server_certs(TlcpCertPair::new(vec![0x01; 100], vec![0x02; 100]));
-
     // Step 3: SM2 ECDHE key exchange (simulated)
     // In production, the server computes shared secret from client's ephemeral
     // public key received in ClientKeyExchange. Here we generate matching PMS.
@@ -2790,16 +2559,13 @@ where
     server_hs.client_random = Some(ctx.client_random);
     server_hs.server_random = ctx.server_random;
     server_hs.complete_key_exchange(ctx.pre_master_secret.to_vec())?;
-
     // Step 3: Create stream from handshake
     TlcpStream::from_server_handshake_with_transport(server_hs, transport)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
-
     #[test]
     fn test_tlcp_client_hello_creation() {
         let hello = TlcpClientHello::new().unwrap();
@@ -2807,7 +2573,6 @@ mod tests {
         assert!(!hello.cipher_suites.is_empty());
         assert_eq!(hello.compression_methods, vec![0x00]);
     }
-
     #[test]
     fn test_tlcp_client_hello_serialization() {
         let hello = TlcpClientHello::new().unwrap();
@@ -2815,7 +2580,6 @@ mod tests {
         // Should start with ClientHello handshake type
         assert_eq!(bytes[0], HandshakeType::ClientHello as u8);
     }
-
     #[test]
     fn test_tlcp_server_hello_parsing() {
         // Minimal valid ServerHello
@@ -2825,13 +2589,11 @@ mod tests {
         data.push(0); // session_id_len
         data.extend_from_slice(&TLS_ECDHE_SM4_GCM_SM3); // cipher suite
         data.push(0x00); // compression
-
         let hello = TlcpServerHello::from_bytes(&data).unwrap();
         assert_eq!(hello.version, TLCP_VERSION_1_0);
         assert!(hello.is_ecdhe());
         assert!(hello.is_gcm());
     }
-
     #[test]
     fn test_dual_certificate_pair() {
         let sign_cert = vec![0x01, 0x02, 0x03];
@@ -2840,59 +2602,48 @@ mod tests {
         assert_eq!(pair.sign_cert, sign_cert);
         assert_eq!(pair.enc_cert, enc_cert);
     }
-
     #[test]
     fn test_certificate_message_serialization() {
         let pair = TlcpCertPair::new(vec![0x01; 100], vec![0x02; 100]);
         let msg = pair.to_certificate_message();
         assert!(!msg.is_empty());
     }
-
     #[test]
     fn test_handshake_state_machine() {
         let mut hs = TlcpHandshake::new_client().unwrap();
         assert_eq!(hs.state, TlcpHandshakeState::Idle);
-
         let hello = hs.create_client_hello().unwrap();
         assert_eq!(hs.state, TlcpHandshakeState::HelloSent);
         assert_eq!(hello.version, TLCP_VERSION_1_0);
     }
-
     #[test]
     fn test_handshake_server_hello_processing() {
         let mut hs = TlcpHandshake::new_client().unwrap();
         hs.create_client_hello().unwrap();
-
         let mut data = Vec::new();
         data.extend_from_slice(&TLCP_VERSION_1_0);
         data.extend_from_slice(&[0x42u8; 32]);
         data.push(0);
         data.extend_from_slice(&TLS_ECDHE_SM4_GCM_SM3);
         data.push(0x00);
-
         let server_hello = TlcpServerHello::from_bytes(&data).unwrap();
         hs.process_server_hello(&server_hello).unwrap();
         assert_eq!(hs.cipher_suite, Some(TLS_ECDHE_SM4_GCM_SM3));
     }
-
     #[test]
     fn test_cipher_suite_lookup() {
         let suite = TlcpCipherSuite::from_id(TLS_ECDHE_SM4_GCM_SM3).unwrap();
         assert_eq!(suite.name, "ECDHE_SM4_GCM_SM3");
         assert!(suite.ecdhe);
         assert!(suite.gcm);
-
         let suite_cbc = TlcpCipherSuite::from_id(TLS_ECC_SM4_CBC_SM3).unwrap();
         assert!(!suite_cbc.ecdhe);
         assert!(!suite_cbc.gcm);
     }
-
-    /// Regression test for the cipher suite code-point bug found by the
-    /// third-pass audit (2026-08-31): the four TLCP code points were using
-    /// values inherited from GM/T 0024-2014 that did not match the GB/T
-    /// 38636-2020 cipher-suite table (§6.4.5.2.1 表 2). This test asserts
-    /// the byte values match the国标 / GmSSL / gotlcp convention so that
-    /// any future drift is caught immediately.
+    /// Regression test: the four TLCP cipher-suite code points must
+    /// match GB/T 38636-2020 §6.4.5.2.1 表 2 (independently verified
+    /// against GmSSL master + gotlcp). Any drift in the constants
+    /// will surface here.
     ///
     /// Reference (independently verified):
     ///   gotlcp (Go TLCP impl) cites "GB/T 38636-2020 6.4.5.2.1 表 2"
@@ -2923,7 +2674,6 @@ mod tests {
             "ECC_SM4_GCM_SM3 must be 0xE053 per GB/T 38636-2020 \
              §6.4.5.2.1 表 2 (GCM suites are new in GB/T 38636-2020)"
         );
-
         // Also assert the four code points are pairwise distinct so the
         // cipher-suite lookup table can never silently alias.
         let all = [
@@ -2941,13 +2691,11 @@ mod tests {
             }
         }
     }
-
     #[test]
     fn test_cipher_suite_all() {
         let all = TlcpCipherSuite::all();
         assert_eq!(all.len(), 4);
     }
-
     #[test]
     fn test_handshake_type_conversion() {
         assert_eq!(
@@ -2960,35 +2708,29 @@ mod tests {
         );
         assert!(HandshakeType::try_from(0xFF).is_err());
     }
-
     #[test]
     fn test_master_secret_derivation() {
         let mut hs = TlcpHandshake::new_client().unwrap();
         hs.create_client_hello().unwrap();
-
         let mut data = Vec::new();
         data.extend_from_slice(&TLCP_VERSION_1_0);
         data.extend_from_slice(&[0x42u8; 32]);
         data.push(0);
         data.extend_from_slice(&TLS_ECDHE_SM4_GCM_SM3);
         data.push(0x00);
-
         let server_hello = TlcpServerHello::from_bytes(&data).unwrap();
         hs.process_server_hello(&server_hello).unwrap();
-
         // Process server certificates so the state advances to
         // `ServerCertsReceived` (required by derive_master_secret's
         // state-machine guard added in the 2026-08-31 security audit).
         hs.process_server_certs(TlcpCertPair::new(vec![0x01; 100], vec![0x02; 100]))
             .unwrap();
-
         hs.pre_master_secret = Some(vec![0x42u8; 48]);
         hs.derive_master_secret().unwrap();
         assert!(hs.master_secret.is_some());
         // master_secret is now 48 bytes (was 32 before the PRF fix).
         assert_eq!(hs.master_secret.as_ref().unwrap().len(), 48);
     }
-
     #[test]
     fn test_ecdhe_params_serialization() {
         let params = Sm2EcdheParams::new(vec![0x04; 65], vec![0x01; 64]);
@@ -3007,33 +2749,27 @@ mod tests {
             &64u16.to_be_bytes()
         );
     }
-
     #[test]
     fn test_invalid_server_hello_too_short() {
         let data = vec![0x01, 0x01]; // Only version
         assert!(TlcpServerHello::from_bytes(&data).is_err());
     }
-
     #[test]
     fn test_version_mismatch() {
         let mut hs = TlcpHandshake::new_client().unwrap();
         hs.create_client_hello().unwrap();
-
         let mut data = Vec::new();
         data.extend_from_slice(&[0x03, 0x03]); // Wrong version (TLS 1.2)
         data.extend_from_slice(&[0x42u8; 32]);
         data.push(0);
         data.extend_from_slice(&TLS_ECDHE_SM4_GCM_SM3);
         data.push(0x00);
-
         let server_hello = TlcpServerHello::from_bytes(&data).unwrap();
         assert!(hs.process_server_hello(&server_hello).is_err());
     }
-
     // ========================================================================
     // Finished message tests
     // ========================================================================
-
     #[test]
     fn test_finished_compute() {
         let master_secret = [0xABu8; 32];
@@ -3042,18 +2778,15 @@ mod tests {
             TlcpFinished::compute(&master_secret, "client finished", transcript).unwrap();
         assert_eq!(finished.verify_data.len(), 12);
     }
-
     #[test]
     fn test_finished_verify() {
         let master = [0xCDu8; 32];
         let transcript = b"test transcript";
         let finished = TlcpFinished::compute(&master, "server finished", transcript).unwrap();
-
         // Same inputs should produce same verify_data
         let finished2 = TlcpFinished::compute(&master, "server finished", transcript).unwrap();
         assert!(finished.verify(&finished2.verify_data));
     }
-
     #[test]
     fn test_finished_different_labels() {
         let master = [0xEFu8; 32];
@@ -3062,11 +2795,9 @@ mod tests {
             TlcpFinished::compute(&master, "client finished", transcript).unwrap();
         let server_finished =
             TlcpFinished::compute(&master, "server finished", transcript).unwrap();
-
         // Different labels must produce different verify_data
         assert!(!client_finished.verify(&server_finished.verify_data));
     }
-
     #[test]
     fn test_finished_serialization() {
         let master = [0x11u8; 32];
@@ -3079,17 +2810,14 @@ mod tests {
         assert_eq!(bytes[3], 12);
         assert_eq!(&bytes[4..16], &finished.verify_data[..]);
     }
-
     // ========================================================================
     // Key derivation tests
     // ========================================================================
-
     #[test]
     fn test_key_material_derive_gcm() {
         let master = [0x42u8; 32];
         let client_random = [0x01u8; 32];
         let server_random = [0x02u8; 32];
-
         let km = TlcpKeyMaterial::derive(
             &master,
             &client_random,
@@ -3097,7 +2825,6 @@ mod tests {
             TlcpCipherSuite::ECDHE_SM4_GCM_SM3,
         )
         .unwrap();
-
         assert_eq!(km.client_enc_key.len(), 16);
         assert_eq!(km.server_enc_key.len(), 16);
         // GCM fixed_iv is 4 bytes per GmSSL `tls_derive_key_block`
@@ -3110,13 +2837,11 @@ mod tests {
         assert!(km.client_mac_key.is_empty());
         assert!(km.server_mac_key.is_empty());
     }
-
     #[test]
     fn test_key_material_derive_cbc() {
         let master = [0x42u8; 32];
         let client_random = [0x01u8; 32];
         let server_random = [0x02u8; 32];
-
         let km = TlcpKeyMaterial::derive(
             &master,
             &client_random,
@@ -3124,7 +2849,6 @@ mod tests {
             TlcpCipherSuite::ECDHE_SM4_CBC_SM3,
         )
         .unwrap();
-
         assert_eq!(km.client_mac_key.len(), 32);
         assert_eq!(km.server_mac_key.len(), 32);
         assert_eq!(km.client_enc_key.len(), 16);
@@ -3132,44 +2856,36 @@ mod tests {
         assert_eq!(km.client_iv.len(), 16);
         assert_eq!(km.server_iv.len(), 16);
     }
-
     #[test]
     fn test_key_material_deterministic() {
         let master = [0x99u8; 32];
         let cr = [0xAAu8; 32];
         let sr = [0xBBu8; 32];
-
         let km1 =
             TlcpKeyMaterial::derive(&master, &cr, &sr, TlcpCipherSuite::ECDHE_SM4_GCM_SM3).unwrap();
         let km2 =
             TlcpKeyMaterial::derive(&master, &cr, &sr, TlcpCipherSuite::ECDHE_SM4_GCM_SM3).unwrap();
-
         assert_eq!(km1.client_enc_key, km2.client_enc_key);
         assert_eq!(km1.server_enc_key, km2.server_enc_key);
         assert_eq!(km1.client_iv, km2.client_iv);
         assert_eq!(km1.server_iv, km2.server_iv);
     }
-
     #[test]
     fn test_key_material_different_randoms() {
         let master = [0x99u8; 32];
         let cr1 = [0xAAu8; 32];
         let cr2 = [0xCCu8; 32];
         let sr = [0xBBu8; 32];
-
         let km1 = TlcpKeyMaterial::derive(&master, &cr1, &sr, TlcpCipherSuite::ECDHE_SM4_GCM_SM3)
             .unwrap();
         let km2 = TlcpKeyMaterial::derive(&master, &cr2, &sr, TlcpCipherSuite::ECDHE_SM4_GCM_SM3)
             .unwrap();
-
         // Different randoms should produce different keys
         assert_ne!(km1.client_enc_key, km2.client_enc_key);
     }
-
     // ========================================================================
     // Server-side handshake tests
     // ========================================================================
-
     #[tokio::test]
     async fn test_server_handshake_process_client_hello() {
         let mut server = TlcpServerHandshake::new().unwrap();
@@ -3179,46 +2895,36 @@ mod tests {
         assert!(server.cipher_suite.is_some());
         assert!(server.client_random.is_some());
     }
-
     #[tokio::test]
     async fn test_server_handshake_create_server_hello() {
         let mut server = TlcpServerHandshake::new().unwrap();
         let client_hello = TlcpClientHello::new().unwrap();
         server.process_client_hello(&client_hello).await.unwrap();
-
         let server_hello = server.create_server_hello().unwrap();
         assert_eq!(server_hello.version, TLCP_VERSION_1_0);
         assert!(server.cipher_suite.is_some());
         assert_eq!(server_hello.cipher_suite, server.cipher_suite.unwrap().id);
     }
-
     #[tokio::test]
     async fn test_server_handshake_full_flow() {
         let mut server = TlcpServerHandshake::new().unwrap();
         let client_hello = TlcpClientHello::new().unwrap();
-
         server.process_client_hello(&client_hello).await.unwrap();
         let _server_hello = server.create_server_hello().unwrap();
-
         // Simulate ECDHE key exchange
         server.complete_key_exchange(vec![0x42u8; 48]).unwrap();
         assert!(server.master_secret.is_some());
-
         // Derive key material
         let km = server.derive_key_material().unwrap();
         assert_eq!(km.client_enc_key.len(), 16);
-
         // Compute server finished
         let _server_finished = server.compute_server_finished().unwrap();
-
         server.establish();
         assert!(server.is_established());
     }
-
     // ========================================================================
-    // Security-audit regression tests (added 2026-08-31, second-pass audit)
+    // Security-audit regression tests
     // ========================================================================
-
     /// Simulates a client+server pair whose transcripts and master_secret are
     /// synchronised, then verifies that:
     ///  1. compute_server_finished on one side equals what the other side
@@ -3236,36 +2942,30 @@ mod tests {
         let ske: Vec<u8> = b"\x0cske_payload_xxxxxxxx".to_vec();
         let shd: Vec<u8> = b"\x0eserver_hello_done_____".to_vec();
         let cke: Vec<u8> = b"\x10client_key_exchange____".to_vec();
-
         let mut client_hs = TlcpHandshake::new_client().unwrap();
         let mut server_hs = TlcpServerHandshake::new().unwrap();
         // Set master_secret on both sides to the same value.
         let master = [0x77u8; 48];
         client_hs.master_secret = Some(master.to_vec());
         server_hs.master_secret = Some(master.to_vec());
-
         // Append the same bytes to both transcripts.
         for bytes in &[&ch, &sh, &cert, &ske, &shd, &cke] {
             client_hs.transcript.extend_from_slice(bytes);
             server_hs.transcript.extend_from_slice(bytes);
         }
-
         // Server computes its Finished.
         let server_finished = server_hs.compute_server_finished().unwrap();
         // Client computes its expected Finished independently.
         let expected_client_view = client_hs.compute_server_finished().unwrap();
-
         assert_eq!(
             server_finished.verify_data, expected_client_view.verify_data,
             "server and client must compute identical verify_data over identical transcript"
         );
-
         // Client verifies what it receives from the server — should pass.
         assert!(
             client_hs.verify_server_finished(&server_finished).unwrap(),
             "client must verify server Finished over the same transcript"
         );
-
         // Mutate one byte of the client transcript AFTER the Finished was
         // computed. The Finished is a hash of transcript bytes, so any
         // pre-computation mutation of the *expected* hash is meaningless.
@@ -3299,7 +2999,6 @@ mod tests {
             "1-byte transcript mutation must cause verify to fail"
         );
     }
-
     /// Verify TlcpFinished::from_body parses the 12-byte body correctly and
     /// rejects malformed bodies (length != 12).
     #[test]
@@ -3307,13 +3006,11 @@ mod tests {
         let ok_body = [0xAAu8; 12];
         let f = TlcpFinished::from_body(&ok_body).unwrap();
         assert_eq!(&f.verify_data[..], &ok_body[..]);
-
         // Wrong-length body must be rejected.
         assert!(TlcpFinished::from_body(&[0u8; 11]).is_err());
         assert!(TlcpFinished::from_body(&[0u8; 13]).is_err());
         assert!(TlcpFinished::from_body(&[]).is_err());
     }
-
     /// TlcpResumedSession must implement Drop that zeroizes the cached
     /// master_secret and randoms. We can't observe the zeroing directly
     /// without unsafe code, but we can at least confirm the Drop runs
@@ -3330,11 +3027,10 @@ mod tests {
         let _ = format!("{:?}", s);
         drop(s); // Drop must run without panic.
     }
-
-    /// Regression test for the fourth-pass audit (2026-08-31): prf_expand
-    /// must reject `length` values that would loop billions of times and
-    /// exhaust memory. Without the bound, a caller passing `usize::MAX`
-    /// (or just `1 << 30`) would freeze the process or OOM.
+    /// Regression test: `prf_expand` must reject `length` values that
+    /// would loop billions of times and exhaust memory. Without the
+    /// bound, a caller passing `usize::MAX` (or just `1 << 30`) would
+    /// freeze the process or OOM.
     #[test]
     fn test_prf_expand_rejects_oversized_length() {
         // Attack scenario: a malformed / malicious caller invokes prf_expand
@@ -3346,7 +3042,6 @@ mod tests {
         let r = TlcpKeyMaterial::prf_expand(b"secret", b"label", b"seed", 1 << 30);
         assert!(r.is_err(), "prf_expand(1 GiB) must be rejected");
     }
-
     /// Companion to the above: prf_expand must still produce correct output
     /// within the allowed length range.
     #[test]
@@ -3364,15 +3059,12 @@ mod tests {
         let z = TlcpKeyMaterial::prf_expand(b"secret", b"label", b"seed", 0).unwrap();
         assert!(z.is_empty());
     }
-
-    /// Regression test for the fourth-pass audit (2026-08-31): the CCS
-    /// payload must equal `[0x01]` per GB/T 38636-2020 / RFC 5246 §6.4.1.
-    /// Previously the implementation accepted any payload (or any length).
-    ///
-    /// We cannot easily drive the full handshake from a unit test, so we
-    /// validate the contract by asserting the literal byte values that the
-    /// server-side reader will compare against. If those values ever drift
-    /// from the standard, this test will surface it.
+    /// Regression test: the CCS payload must equal `[0x01]` per
+    /// GB/T 38636-2020 / RFC 5246 §7.1. Previously the implementation
+    /// accepted any payload (or any length); the server-side reader
+    /// now enforces this exact value (see `accept_with_certs` Step 9).
+    /// This test pins the literal byte so any future drift in the
+    /// constants surfaces immediately.
     #[test]
     fn test_ccs_payload_value_is_one() {
         // Per RFC 5246 / GB/T 38636-2020, the CCS payload is the single
@@ -3381,21 +3073,17 @@ mod tests {
         const CCS_PAYLOAD_REQUIRED: [u8; 1] = [0x01];
         assert_eq!(CCS_PAYLOAD_REQUIRED, [0x01]);
     }
-
     #[tokio::test]
     async fn test_server_rejects_wrong_version() {
         let mut server = TlcpServerHandshake::new().unwrap();
         let mut client_hello = TlcpClientHello::new().unwrap();
         client_hello.version = [0x03, 0x03]; // TLS 1.2, not TLCP
-
         let result = server.process_client_hello(&client_hello).await;
         assert!(result.is_err());
     }
-
     // ========================================================================
     // Alert protocol tests
     // ========================================================================
-
     #[test]
     fn test_alert_close_notify() {
         let alert = TlcpAlert::close_notify();
@@ -3403,7 +3091,6 @@ mod tests {
         assert!(alert.is_close_notify());
         assert!(!alert.is_fatal());
     }
-
     #[test]
     fn test_alert_handshake_failure() {
         let alert = TlcpAlert::handshake_failure();
@@ -3411,7 +3098,6 @@ mod tests {
         assert!(alert.is_fatal());
         assert!(!alert.is_close_notify());
     }
-
     #[test]
     fn test_alert_serialization_roundtrip() {
         let alert = TlcpAlert::new(TlcpAlertLevel::Fatal, TlcpAlertDescription::BadCertificate);
@@ -3420,65 +3106,53 @@ mod tests {
         assert_eq!(parsed.level, TlcpAlertLevel::Fatal);
         assert_eq!(parsed.description, TlcpAlertDescription::BadCertificate);
     }
-
     #[test]
     fn test_alert_parse_invalid_level() {
         let result = TlcpAlert::from_bytes(&[0x03, 0x00]);
         assert!(result.is_err());
     }
-
     #[test]
     fn test_alert_parse_invalid_description() {
         let result = TlcpAlert::from_bytes(&[0x02, 0xFF]);
         assert!(result.is_err());
     }
-
     #[test]
     fn test_alert_parse_too_short() {
         let result = TlcpAlert::from_bytes(&[0x01]);
         assert!(result.is_err());
     }
-
     // ========================================================================
     // Record layer bridge tests
     // ========================================================================
-
     #[test]
     fn test_key_material_to_session_keys() {
         let master = [0x42u8; 32];
         let cr = [0x01u8; 32];
         let sr = [0x02u8; 32];
-
         let km =
             TlcpKeyMaterial::derive(&master, &cr, &sr, TlcpCipherSuite::ECDHE_SM4_GCM_SM3).unwrap();
         let sk = km.to_session_keys().unwrap();
-
         assert_eq!(sk.client_key.len(), 16);
         assert_eq!(sk.server_key.len(), 16);
         assert_eq!(sk.client_nonce.len(), 12);
         assert_eq!(sk.server_nonce.len(), 12);
     }
-
     #[test]
     fn test_key_material_cbc_no_session_keys() {
         let master = [0x42u8; 32];
         let cr = [0x01u8; 32];
         let sr = [0x02u8; 32];
-
         let km =
             TlcpKeyMaterial::derive(&master, &cr, &sr, TlcpCipherSuite::ECDHE_SM4_CBC_SM3).unwrap();
         // CBC mode has IV of 16 bytes, not 12 bytes, so conversion should fail
         assert!(km.to_session_keys().is_err());
     }
-
     // ========================================================================
     // Session resumption tests
     // ========================================================================
-
     #[tokio::test]
     async fn test_session_cache_put_get() {
         let cache = TlcpSessionCache::with_capacity(10);
-
         let session_id = vec![0x01, 0x02, 0x03, 0x04];
         let session = TlcpResumedSession::new(
             vec![0xAAu8; 32],
@@ -3486,21 +3160,16 @@ mod tests {
             [0xBBu8; 32],
             [0xCCu8; 32],
         );
-
         cache.put(session_id.clone(), session).await;
-
         let retrieved = cache.get(&session_id).await;
         assert!(retrieved.is_some(), "Session should be found in cache");
-
         let s = retrieved.unwrap();
         assert_eq!(s.master_secret, vec![0xAAu8; 32]);
         assert_eq!(s.cipher_suite, TlcpCipherSuite::ECDHE_SM4_GCM_SM3.id);
     }
-
     #[tokio::test]
     async fn test_session_cache_expired() {
         let cache = TlcpSessionCache::with_capacity(10);
-
         let session_id = vec![0x01, 0x02, 0x03, 0x04];
         let mut session = TlcpResumedSession::new(
             vec![0xAAu8; 32],
@@ -3510,32 +3179,25 @@ mod tests {
         );
         // Set very short lifetime so it expires immediately
         session.lifetime = Duration::from_millis(1);
-
         cache.put(session_id.clone(), session).await;
-
         // Wait for expiry
         tokio::time::sleep(Duration::from_millis(10)).await;
-
         let retrieved = cache.get(&session_id).await;
         assert!(retrieved.is_none(), "Expired session should not be found");
     }
-
     #[tokio::test]
     async fn test_session_cache_lru_eviction() {
         let cache = TlcpSessionCache::with_capacity(2);
-
         let s1 =
             TlcpResumedSession::new(vec![0x01u8; 32], [0xE0, 0x11], [0x02u8; 32], [0x03u8; 32]);
         let s2 =
             TlcpResumedSession::new(vec![0x04u8; 32], [0xE0, 0x11], [0x05u8; 32], [0x06u8; 32]);
         let s3 =
             TlcpResumedSession::new(vec![0x07u8; 32], [0xE0, 0x11], [0x08u8; 32], [0x09u8; 32]);
-
         cache.put(vec![1], s1).await;
         cache.put(vec![2], s2).await;
         // Cache is now full (capacity 2)
         cache.put(vec![3], s3).await; // Should evict oldest
-
         assert!(
             cache.get(&[1]).await.is_none(),
             "Oldest session should be evicted"
@@ -3549,31 +3211,25 @@ mod tests {
             "Newest session should exist"
         );
     }
-
     #[tokio::test]
     async fn test_server_session_resumption() {
         let cache = TlcpSessionCache::with_capacity(10);
-
         // --- Full handshake ---
         let mut server = TlcpServerHandshake::with_session_cache(cache).unwrap();
         let client_hello = TlcpClientHello::new().unwrap();
         server.process_client_hello(&client_hello).await.unwrap();
-
         let server_hello = server.create_server_hello().unwrap();
         let session_id = server_hello.session_id.clone();
         assert!(
             !session_id.is_empty(),
             "Full handshake should assign a session ID"
         );
-
         // Complete the handshake
         server.complete_key_exchange(vec![0x42u8; 48]).unwrap();
         let km = server.derive_key_material().unwrap();
         let _keys = km.to_session_keys().unwrap();
-
         // Cache the session
         server.cache_session().await;
-
         // --- Abbreviated handshake (resumption) ---
         // Re-create cache reference for the second server
         let _cache2 = TlcpSessionCache::with_capacity(10);
@@ -3588,33 +3244,26 @@ mod tests {
             "Server should produce a resumable session"
         );
     }
-
     #[tokio::test]
     async fn test_client_resumption_helpers() {
         let mut client = TlcpHandshake::new_client().unwrap();
-
         // Before handshake, no session to resume
         assert!(client.to_resumed_session().is_none());
-
         // Simulate completed handshake state
         client.master_secret = Some(vec![0xAAu8; 32]);
         client.cipher_suite = Some(TlcpCipherSuite::ECDHE_SM4_GCM_SM3.id);
         client.server_random = Some([0xBBu8; 32]);
         client.client_random = [0xCCu8; 32];
         client.session_id = vec![0x01, 0x02, 0x03];
-
         let resumed = client.to_resumed_session().unwrap();
         assert_eq!(resumed.master_secret, vec![0xAAu8; 32]);
         assert_eq!(resumed.cipher_suite, TlcpCipherSuite::ECDHE_SM4_GCM_SM3.id);
-
         // session_id() should return the ID
         assert_eq!(client.session_id(), &[0x01, 0x02, 0x03]);
     }
-
     // ========================================================================
     // Handshake message serialization tests
     // ========================================================================
-
     #[test]
     fn test_server_key_exchange_roundtrip() {
         let ephemeral_pub = vec![0x04; 65];
@@ -3622,36 +3271,29 @@ mod tests {
         signature.extend_from_slice(&[0xAB; 60]);
         let params = Sm2EcdheParams::new(ephemeral_pub.clone(), signature.clone());
         let ske = TlcpServerKeyExchange::new(params);
-
         let bytes = ske.to_bytes();
         assert_eq!(bytes[0], HandshakeType::ServerKeyExchange as u8);
-
         // Parse: skip 4-byte header (type + 3-byte length)
         let body_len = ((bytes[2] as usize) << 8) | bytes[3] as usize;
         let parsed = TlcpServerKeyExchange::from_body(&bytes[4..4 + body_len]).unwrap();
         assert_eq!(parsed.ecdhe_params.ephemeral_public, ephemeral_pub);
         assert_eq!(parsed.ecdhe_params.signature, signature);
     }
-
     #[test]
     fn test_server_hello_done_roundtrip() {
         let shd = TlcpServerHelloDone;
         let bytes = shd.to_bytes();
         assert_eq!(bytes, vec![HandshakeType::ServerHelloDone as u8, 0, 0, 0]);
-
         let parsed = TlcpServerHelloDone::from_body(&[]).unwrap();
         let bytes2 = parsed.to_bytes();
         assert_eq!(bytes, bytes2);
     }
-
     #[test]
     fn test_client_key_exchange_ecdhe_roundtrip() {
         let ephemeral_pub = vec![0x04; 65];
         let cke = TlcpClientKeyExchange::new_ecdhe(ephemeral_pub.clone());
-
         let bytes = cke.to_bytes();
         assert_eq!(bytes[0], HandshakeType::ClientKeyExchange as u8);
-
         // Handshake body length is 24-bit, spanning bytes 1..=3.
         let body_len = ((bytes[1] as usize) << 16) | ((bytes[2] as usize) << 8) | bytes[3] as usize;
         let parsed = TlcpClientKeyExchange::from_body(&bytes[4..4 + body_len]).unwrap();
@@ -3667,60 +3309,48 @@ mod tests {
             ephemeral_pub.as_slice()
         );
     }
-
     #[test]
     fn test_client_key_exchange_ecc_roundtrip() {
         let encrypted_pms = vec![0x07; 97]; // SM2 ciphertext
         let cke = TlcpClientKeyExchange::new_ecc(encrypted_pms.clone());
-
         let bytes = cke.to_bytes();
         assert_eq!(bytes[0], HandshakeType::ClientKeyExchange as u8);
-
         let body_len = ((bytes[1] as usize) << 16) | ((bytes[2] as usize) << 8) | bytes[3] as usize;
         let parsed = TlcpClientKeyExchange::from_body(&bytes[4..4 + body_len]).unwrap();
         assert_eq!(parsed.key_exchange, encrypted_pms);
     }
-
     #[test]
     fn test_ecdhe_params_roundtrip() {
         let ephemeral_pub = vec![0x04, 0x01, 0x02];
         let signature = vec![0x30, 0x06];
         let params = Sm2EcdheParams::new(ephemeral_pub.clone(), signature.clone());
-
         let bytes = params.to_bytes();
         let parsed = Sm2EcdheParams::from_bytes(&bytes).unwrap();
         assert_eq!(parsed.ephemeral_public, ephemeral_pub);
         assert_eq!(parsed.signature, signature);
     }
-
     #[test]
     fn test_ecdhe_params_reject_too_short() {
         assert!(Sm2EcdheParams::from_bytes(&[]).is_err());
         assert!(Sm2EcdheParams::from_bytes(&[0x05, 0x01]).is_err()); // claims 5-byte key but only 1
     }
-
     #[test]
     fn test_server_key_exchange_generate_and_verify() {
         use gm_crypto::sm2::Sm2KeyPair;
-
         let sign_kp = Sm2KeyPair::generate().unwrap();
         let sign_signer = gm_crypto::sm2::Sm2Signer::new(&sign_kp).unwrap();
         let sign_verifier =
             gm_crypto::sm2::Sm2Verifier::new(&sign_kp.public_key_bytes(), sign_kp.distid())
                 .unwrap();
-
         let client_random = [0xAAu8; 32];
         let server_random = [0xBBu8; 32];
-
         let (ske, _ephemeral_kp) =
             TlcpServerKeyExchange::generate(&client_random, &server_random, &sign_signer).unwrap();
-
         // Verify should succeed with correct verifier
         assert!(
             ske.verify_signature(&client_random, &server_random, &sign_verifier)
                 .is_ok()
         );
-
         // Verify should fail with wrong random
         let wrong_random = [0xCCu8; 32];
         assert!(
@@ -3728,7 +3358,6 @@ mod tests {
                 .is_err()
         );
     }
-
     // ========================================================================
     // CBC record-layer framing regression tests
     //
@@ -3739,7 +3368,6 @@ mod tests {
     // peer (incl. `gmssl tlcp_server` master) raise `bad_record_mac` because
     // the HMAC is read one byte early.
     // ========================================================================
-
     /// Deterministic 16-byte keys so the regression tests are reproducible.
     fn cbc_test_keys() -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
         let enc_key = [0x11u8; 16].to_vec();
@@ -3748,7 +3376,6 @@ mod tests {
         let write_iv = [0x44u8; 16].to_vec();
         (enc_key, mac_key, read_iv, write_iv)
     }
-
     /// Build a CBC `TlcpKeyMaterial` from raw byte buffers (no PRF).
     fn cbc_test_key_material(
         enc_key: Vec<u8>,
@@ -3765,21 +3392,18 @@ mod tests {
             server_iv: read_iv,
         }
     }
-
     #[test]
     fn cbc_record_roundtrip_various_plaintext_lengths() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-
         // Try several plaintext lengths so the test exercises all the
         // padding-region sizes (N in {1..16} roughly).
         for plaintext_len in [1usize, 7, 16, 31, 64, 200, 1024] {
             let plaintext: Vec<u8> = (0..plaintext_len as u8)
                 .map(|i| i.wrapping_mul(31))
                 .collect();
-
             // Two paired streams; one acts as the client, one as the server.
             let (client_io, server_io) = tokio::io::duplex(64 * 1024);
             let (enc_key, mac_key, read_iv, write_iv) = cbc_test_keys();
@@ -3790,7 +3414,6 @@ mod tests {
                 write_iv.clone(),
             );
             let server_km = cbc_test_key_material(enc_key, mac_key, read_iv, write_iv);
-
             let mut client = TlcpStream::new(
                 client_io,
                 &client_km,
@@ -3807,19 +3430,16 @@ mod tests {
                 vec![],
             )
             .expect("server TlcpStream::new");
-
             runtime
                 .block_on(client.write_application_data(&plaintext))
                 .unwrap_or_else(|e| {
                     panic!("write_application_data({}) failed: {:?}", plaintext_len, e)
                 });
-
             let received = runtime
                 .block_on(server.read_application_data())
                 .unwrap_or_else(|e| {
                     panic!("read_application_data({}) failed: {:?}", plaintext_len, e)
                 });
-
             assert_eq!(
                 received, plaintext,
                 "CBC record-layer round-trip mismatch for plaintext_len={}",
@@ -3827,7 +3447,6 @@ mod tests {
             );
         }
     }
-
     /// The wire bytes that `encrypt_cbc_record_with_type` puts on the wire
     /// must end with exactly `N` bytes of value `N` followed by ONE byte of
     /// value `N`. This is what every RFC 5246-compliant parser expects; if we
@@ -3841,7 +3460,6 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-
         // 7 bytes plaintext -> inner_len = 7 + 32 = 39 -> (39 + 1) % 16 = 8
         // -> pad_len = (16 - 8) % 16 = 8. Tail is therefore 9 bytes total
         // (8 padding bytes + 1 length byte), all of value 8.
@@ -3849,7 +3467,6 @@ mod tests {
         let expected_pad = 8usize;
         let expected_tail: Vec<u8> =
             std::iter::repeat_n(expected_pad as u8, expected_pad + 1).collect();
-
         // Two paired streams: client writes, the lower half exposes the wire
         // bytes (we read them raw and decrypt in this test to inspect the
         // post-MAC tail shape). Both halves share the same key material here
@@ -3859,7 +3476,6 @@ mod tests {
         let (a, mut lower) = tokio::io::duplex(64 * 1024);
         let (enc_key, mac_key, read_iv, write_iv) = cbc_test_keys();
         let client_km = cbc_test_key_material(enc_key.clone(), mac_key, write_iv, read_iv);
-
         let mut client = TlcpStream::new(
             a,
             &client_km,
@@ -3868,11 +3484,9 @@ mod tests {
             vec![],
         )
         .expect("TlcpStream::new client");
-
         runtime
             .block_on(client.write_application_data(plaintext))
             .expect("write_application_data");
-
         // Read the wire bytes from the lower half (no TlcpStream on the
         // server side — we want raw bytes to inspect the post-MAC tail).
         let mut header = [0u8; 5];
@@ -3886,7 +3500,6 @@ mod tests {
         runtime
             .block_on(tokio::io::AsyncReadExt::read_exact(&mut lower, &mut record))
             .unwrap();
-
         let ciphertext = &record[SM4_CBC_IV_LENGTH..];
         // Decrypt with the SAME key the client used; with a wrong key CBC
         // gives random-looking bytes and the tail-shape assertion becomes
@@ -3896,7 +3509,6 @@ mod tests {
         let inner = cipher
             .decrypt_cbc_raw(ciphertext, &iv)
             .expect("decrypt_cbc_raw");
-
         // The post-MAC tail is `expected_pad + 1` bytes, all `expected_pad`.
         let tail = &inner[inner.len() - (expected_pad + 1)..];
         assert_eq!(
@@ -3906,7 +3518,6 @@ mod tests {
             tail,
             expected_pad
         );
-
         // And the HMAC is right BEFORE the padding (RFC 5246).
         let unpadded_len = inner.len() - (expected_pad + 1);
         assert!(

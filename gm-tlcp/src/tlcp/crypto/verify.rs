@@ -1,11 +1,9 @@
 //! Signature verification helpers for the TLCP handshake.
 //!
-//! Currently houses the `verify_ske_signature` free function that
-//! handles both the ECDHE and the ECC ServerKeyExchange signature
-//! paths. Future phases will move the SM4-CBC / SM4-GCM record-layer
-//! encrypt/decrypt functions out of `stream.rs` into
-//! `crypto::sm4::cbc` / `crypto::sm4::gcm` (see Phase E follow-up
-//! notes in the top-of-tree `mod.rs` sub-module layout comment).
+//! Houses the [`verify_ske_signature`] free function that handles both
+//! the ECDHE and the ECC ServerKeyExchange signature paths, plus
+//! [`extract_sm2_pubkey_from_cert_der`] for pulling the SM2 pubkey out
+//! of an X.509 cert's SubjectPublicKeyInfo.
 
 use crate::error::TlcpError;
 use crate::tlcp::constants::TLCP_ECH_PARAMS_PREFIX;

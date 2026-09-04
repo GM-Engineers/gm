@@ -56,9 +56,9 @@ pub struct TlcpKeyMaterial {
     pub client_enc_key: Vec<u8>,
     /// Server write encryption key (SM4, 16 bytes)
     pub server_enc_key: Vec<u8>,
-    /// Client write IV (16 bytes for GCM nonce base)
+    /// Client write IV — 16 bytes for CBC explicit IV, 4 bytes for GCM fixed salt.
     pub client_iv: Vec<u8>,
-    /// Server write IV (16 bytes for GCM nonce base)
+    /// Server write IV — 16 bytes for CBC explicit IV, 4 bytes for GCM fixed salt.
     pub server_iv: Vec<u8>,
 }
 

@@ -50,13 +50,18 @@ pub const MAX_TLCP_RECORD_SIZE: usize = 16 * 1024;
 ///
 /// Used in TLCP/GB/T 38636-2020 ECDHE ServerKeyExchange and
 /// ClientKeyExchange to identify the curve. The only TLCP-defined
-/// curve is `sm2p256v1` (a.k.a. prime256v1 in NIST terms), so this
-/// constant is the only `curve_type` value we ever emit or accept.
+/// curve is `sm2p256v1` (GB/T 32918.5-2016 §5); it is **not** the
+/// same as NIST P-256 / `prime256v1` / `secp256r1` — same field size
+/// but different curve parameters, generator, and order. TLCP only
+/// supports this curve, so this constant is the only `curve_type`
+/// value we ever emit or accept.
 pub const TLCP_EC_CURVE_TYPE_NAMED_CURVE: u8 = 0x03;
 
-/// RFC 4492 / GB/T 38636-2020 named curve OID-equivalent code for
-/// SM2P256V1 (a.k.a. `sm2p256v1`). GmSSL 2026-06+ master encodes it
-/// as the 16-bit value `0x0029`; TLCP only supports this curve.
+/// RFC 4492 / GB/T 38636-2020 named-curve code for SM2P256V1
+/// (`sm2p256v1`, GB/T 32918.5-2016 §5). Note this is **distinct**
+/// from NIST P-256 / `prime256v1` / `secp256r1` (RFC 8422 §5.1.1).
+/// GmSSL 2026-06+ master encodes it as the 16-bit value `0x0029`; TLCP
+/// only supports this curve.
 pub const TLCP_NAMED_CURVE_SM2P256V1: [u8; 2] = [0x00, 0x29];
 
 /// Wire-format prefix bytes that precede an ECDHE ECPoint (the

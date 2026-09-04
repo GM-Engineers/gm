@@ -199,10 +199,10 @@ impl TlcpHandshake {
     /// After derivation, the pre-master secret is zeroized as it is no
     /// longer needed.
     pub fn derive_master_secret(&mut self) -> Result<(), TlcpError> {
-        // FIX (security audit 2026-08-31): state-machine guard. Master secret
-        // can only be derived after ServerHello + ServerCerts have been
-        // processed; calling it earlier would silently produce keys from
-        // incomplete transcript state.
+        // State-machine guard: master secret can only be derived after
+        // ServerHello + ServerCerts have been processed; calling it
+        // earlier would silently produce keys from incomplete transcript
+        // state.
         if !matches!(
             self.state,
             TlcpHandshakeState::ServerCertsReceived | TlcpHandshakeState::KeyExchange
@@ -280,8 +280,9 @@ impl TlcpHandshake {
 
     /// Compute the client Finished message
     ///
-    /// verify_data = SM3(master_secret || SM3(handshake_messages))[0..12]
-    /// with label "client finished"
+    /// `verify_data = PRF(master_secret, "client finished", SM3(handshake_messages))[0..12]`
+    /// where the PRF is the SM3-based TLS 1.2 iterated expansion
+    /// ([`TlcpKeyMaterial::prf_expand`]), not a single SM3 invocation.
     pub fn compute_client_finished(&self) -> Result<TlcpFinished, TlcpError> {
         let master = self
             .master_secret

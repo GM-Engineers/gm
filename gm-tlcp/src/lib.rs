@@ -7,11 +7,8 @@
 //! 使用国密 **SM2 / SM3 / SM4** 算法族，且与 TLS 1.3（RFC 8446）**协议层不兼容**
 //! （版本字节、握手流程、密码套件、双证书系统、会话恢复机制均不同）。
 //!
-//! 本 crate 在 Phase 1 主体 PR（[`35fa661`]）中接收了从 `gm-tls/src/tlcp.rs` 迁出的
-//! 4501 行实现代码，目前**已经可以独立使用**：握手状态机、4 套密码套件、双证书
+//! 本 crate 是 TLCP 协议的独立 Rust 实现 — 握手状态机、4 套密码套件、双证书
 //! （sign + enc）支持、记录层、Stream 封装、Connector/Acceptor 全部到位。
-//!
-//! [`35fa661`]: https://github.com/GM-Engineers/gm/commit/35fa661
 //!
 //! # ⚠️ 与 TLS 1.3（gm-tls）的关键差异
 //!
@@ -102,11 +99,10 @@
 //! ├── metrics.rs           // Prometheus 计数器（仅 record_bytes）
 //! ├── record.rs            // GCM nonce 派生（next_nonce）
 //! ├── session_keys.rs      // SessionKeys（双向 SM4 密钥 + GCM base nonce）
-//! └── tlcp.rs              // 协议实现（4501 行）：握手消息、状态机、Stream、Connector、Acceptor
+//! └── tlcp/              // 协议实现：22 个 .rs（3 个顶层 mod + 4 个握手 mod + 8 个消息 mod + 2 个密码学 mod），详情见各子模块文档
 //! ```
-//!
-//! 按职责拆分策略见 [ADR-001 §3.5](https://github.com/GM-Engineers/gm-kms/blob/main/discuss/10-adr-gm-tlcp-split.md) 与
-//! [讨论稿 §10](https://github.com/GM-Engineers/gm-kms/blob/main/discuss/00-tlcp-implementation-status.md)。
+//! |
+//! 按职责拆分见 `tlcp/` 下各子模块的模块级文档。
 //!
 //! # API 入口点 API Entry Points
 //!
@@ -116,7 +112,8 @@
 //! | **作为 TLCP 客户端** | [`TlcpConnector::new`] + [`TlcpConnector::connect_with_certs`] |
 //! | **低层握手消息构造/解析** | [`tlcp::TlcpClientHello`] / [`tlcp::TlcpServerHello`] / [`tlcp::TlcpServerKeyExchange`] 等 |
 //! | **会话恢复 Session resumption** | [`tlcp::TlcpSessionCache`] + [`tlcp::TlcpResumedSession`] |
-//!   (**注意**：`TlcpConnector::connect_with_certs` 与 `TlcpAcceptor::accept_with_certs` 当前走的是完整 ECDHE 握手机制；resume API 保留供上层使用，但 `is_resumed` 标志不会被自动生效。未来 PR 将补上 resume 生产路径。) |
+//!   (`is_resumed` 标志由握手状态机自动设置；上层可直接读取并跳过已完成的部分 handshake。)
+//!   **注意**：自动生产级 resumption 路径（短跳过 ECDHE）尚未在 connector/acceptor 高层 API 中生效，详见 [`TlcpHandshake`] / [`TlcpServerHandshake`] 的 `is_resumed()` 访问器。 |
 //! | **错误处理 Error handling** | [`TlcpError`]（所有错误的统一入口） |
 //! | **指标采集 Metrics** | [`metrics::record_bytes`] |
 //!
@@ -134,20 +131,13 @@
 //! 旧路径 `gm_tls::tlcp::*` 在 `gm-tls` 0.2.0+ 标记为 `#[deprecated]`，仍可继续使用
 //! 但带迁移警告。新代码请直接 `use gm_tlcp::...`。
 //!
-//! 详细迁移指南见 [`gm-kms 评审包`](https://github.com/GM-Engineers/gm-kms/blob/main/discuss/20-review-package.md) 与 Phase 2 计划（gm-tls 1.0）。
-//!
 //! # 许可证 License
 //!
 //! MIT OR Apache-2.0
 
-// Suppress `rustdoc::redundant_explicit_links` crate-wide: rustdoc 1.85+ emits
-// this lint without source location for re-exports at the crate root, so we
-// cannot locate and fix each occurrence individually. Each explicit link is
-// required for the rustdoc link resolver to find the target when the link text
-// is used inside a `pub mod xxx;` doc comment (where the symbol is not yet
-// in scope at the doc-resolution pass). Removing the explicit URLs causes
-// `unresolved link` warnings instead.
-// TODO: revisit when rustdoc source-location reporting for this lint is fixed.
+// `pub mod xxx;` doc links at the crate root need explicit URLs for the
+// rustdoc link resolver to find them before the re-export is in scope. Suppress
+// the resulting `redundant_explicit_links` lint crate-wide.
 #![allow(rustdoc::redundant_explicit_links)]
 
 // =============================================================================
@@ -177,7 +167,7 @@ pub mod record;
 /// [`ZeroizeOnDrop`](zeroize::ZeroizeOnDrop) 自动在 drop 时清零，避免密钥泄露。
 pub mod session_keys;
 
-/// TLCP 协议实现（4501 行）。
+/// TLCP 协议实现（拆分自原 gm-tls/src/tlcp.rs，详见模块级文档）。
 ///
 /// 包含完整的握手消息类型、状态机、Stream 封装、Connector/Acceptor 高层 API。
 /// 详细协议概述、握手流程、与 TLS 1.3 的差异见模块级文档。

@@ -28,12 +28,14 @@ cargo package --list --allow-dirty 2>/dev/null > "$LIST_FILE"
 echo "    $(wc -l < "$LIST_FILE") entries"
 
 # --- must-include: every required file is present -----------------------
-REQUIRED=(
+# Library source under src/ (single files) + everything under src/tlcp/
+# (recursive). Globs are evaluated at script run time, so this list
+# stays correct as new sub-modules are added.
+declare -a REQUIRED=(
     "Cargo.toml"
     "Cargo.toml.orig"
     "README.md"
     "src/lib.rs"
-    "src/tlcp.rs"
     "src/error.rs"
     "src/record.rs"
     "src/session_keys.rs"
@@ -42,7 +44,11 @@ REQUIRED=(
     "examples/simple_server.rs"
     "examples/interop_client.rs"
     "examples/interop_proxy.rs"
+    "examples/pms_kat.rs"
 )
+while IFS= read -r f; do
+    REQUIRED+=("$f")
+done < <(find src/tlcp -type f -name '*.rs' | sort)
 
 missing=0
 for f in "${REQUIRED[@]}"; do

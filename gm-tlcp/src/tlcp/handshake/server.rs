@@ -197,10 +197,10 @@ impl TlcpServerHandshake {
     ///                          client_random || server_random)
     /// ```
     ///
-    /// FIX (security audit 2026-08-31): previous code used a single
+    /// Previous code used a single
     /// `SM3(...)` hash which truncated the 112-byte input to 32 bytes.
     pub fn complete_key_exchange(&mut self, pre_master_secret: Vec<u8>) -> Result<(), TlcpError> {
-        // FIX (security audit 2026-08-31): state-machine guard. Server-side
+        // State-machine guard: server-side
         // master_secret derivation requires ClientHello to have been
         // processed first.
         if !matches!(

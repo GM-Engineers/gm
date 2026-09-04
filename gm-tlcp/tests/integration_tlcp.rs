@@ -9,19 +9,6 @@
 //! 6. Finished message computation and verification
 //! 7. TlcpStream creation with TLCP key material
 //! 8. Application data exchange over encrypted channel
-//!
-//! ## Migration note
-//!
-//! Previously this file lived at `gm-tls/tests/tlcp_integration_tests.rs`
-//! under the `gm_tls::tlcp::*` re-export shim. With the gm-tls → gm-tlcp
-//! split complete (ADR-001 Phase 2), TLCP is now an independent crate and
-//! the tests live here against the canonical API.
-//!
-//! The handful of `GmTlsStream::with_version(..., TLCP_VERSION_1_0)` tests
-//! have been rewritten to use `TlcpStream::new` directly — the gm-tls
-//! `GmTlsStream` had a "version" knob that was TLCP-aware, but it was the
-//! only reason the shim needed to exist; TLCP has its own native stream
-//! now and that bridge is gone.
 
 use gm_tlcp::tlcp::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

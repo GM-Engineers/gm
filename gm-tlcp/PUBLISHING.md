@@ -6,7 +6,7 @@ that adds a new top-level directory or tooling script.**
 
 ## TL;DR
 
-Only library code, the four `examples/*.rs` files, and the standard
+Only library code, the five `examples/*.rs` files, and the standard
 Cargo metadata are shipped. **Everything else** (interop scripts,
 build artifacts, integration tests, CI workflow) is excluded.
 
@@ -20,25 +20,38 @@ The exclusion is enforced by **two independent mechanisms**:
 
 A contributor who adds a new directory MUST update **both** of these.
 
-## What ships (current contents, 16 files)
+## What ships
+
+Library source:
 
 ```
-.cargo_vcs_info.json
-.gitignore
-Cargo.lock
-Cargo.toml
-Cargo.toml.orig
-README.md
-examples/interop_client.rs
-examples/interop_proxy.rs
-examples/simple_client.rs
-examples/simple_server.rs
 src/error.rs
 src/lib.rs
 src/metrics.rs
 src/record.rs
 src/session_keys.rs
-src/tlcp.rs
+src/tlcp/{alert,cipher_suite,constants,handshake_type,key_material,mod,pms,session}.rs
+src/tlcp/crypto/{mod,verify}.rs
+src/tlcp/handshake/{client,mod,server,state}.rs
+src/tlcp/messages/{cert_pair,client_hello,client_key_exchange,ecdhe,finished,mod,server_hello,server_hello_done}.rs
+```
+
+Examples:
+
+```
+examples/interop_client.rs
+examples/interop_proxy.rs
+examples/pms_kat.rs
+examples/simple_client.rs
+examples/simple_server.rs
+```
+
+Cargo metadata:
+
+```
+Cargo.toml
+Cargo.toml.orig
+README.md
 ```
 
 (`Cargo.lock` is published despite the workspace-level `.gitignore`
@@ -68,7 +81,7 @@ Expected output:
 
 ```
 ==> cargo package --list --allow-dirty (gm-tlcp)
-          16 entries
+          N entries
     package staging area: ?
 
 OK: gm-tlcp publish list is clean.
@@ -85,8 +98,8 @@ cargo package --allow-dirty --no-verify
 tar tzf ../target/package/gm-tlcp-0.1.0.crate | sort
 ```
 
-The exact file list above should be returned (with a `gm-tlcp-0.1.0/`
-prefix).
+The file list under "What ships" above should appear (with a
+`gm-tlcp-0.1.0/` prefix).
 
 ## CI guard
 
@@ -117,28 +130,27 @@ gm-tlcp follows SemVer 2.0:
 The current version is `0.1.0`. We will not push to 1.0 until:
 
 1. All four TLCP cipher suites are interop-tested against at least
-   two independent implementations (GmSSL ✅, Tongsuo in progress).
-2. `cargo fuzz` covers the record-layer + PRF + Finished paths.
-3. A third-party code review (not by the original authors) has been
+   two independent implementations (GmSSL ✅, Tongsuo blocked on
+   upstream NTLS state-machine fix).
+2. A third-party code review (not by the original authors) has been
    integrated.
 
 ## Releasing
 
 ```sh
 # 1. Update version in Cargo.toml (SemVer per the rules above).
-# 2. Update CHANGELOG.md with the same version header.
-# 3. Bump the gm-crypto dep if it changed in a SemVer-incompatible way.
-# 4. Run the publish-guard script locally.
+# 2. Bump the gm-crypto dep if it changed in a SemVer-incompatible way.
+# 3. Run the publish-guard script locally.
 cd gm-tlcp && ./scripts/check-publish.sh
 
-# 5. Dry-run publish to make sure crates.io accepts the metadata.
+# 4. Dry-run publish to make sure crates.io accepts the metadata.
 cargo publish --dry-run --allow-dirty
 
-# 6. Tag the release.
+# 5. Tag the release.
 git tag -s gm-tlcp-vX.Y.Z -m "gm-tlcp vX.Y.Z"
 git push origin gm-tlcp-vX.Y.Z
 
-# 7. Publish.
+# 6. Publish.
 cargo publish
 ```
 

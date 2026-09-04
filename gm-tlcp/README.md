@@ -1,28 +1,6 @@
 # gm-tlcp
 
-TLCP（GB/T 38636-2020）纯 Rust 实现 — 国密 SM2/SM3/SM4 算法。
-
-**[English Version](./README.en.md)** (待补)
-
-## ⚠️ 当前状态：骨架（Phase 1 第一批）
-
-本 crate 正在从 [`gm-tls`](../gm-tls) 的 `tlcp` 子模块拆分中。
-**完整 TLCP 实现（4502 行 + 1592 行集成测试）目前仍在 `gm-tls/src/tlcp.rs`**，
-本 crate 暂为空骨架。
-
-### 拆分计划
-
-| 阶段 | 内容 | 状态 |
-|------|------|------|
-| Phase 1 第一批 | 本骨架（workspace 注册 + 空 crate） | **进行中** |
-| Phase 1 主体 | 搬 4502 行 tlcp.rs + 1592 行测试 + ~565 行工具代码 | 待 |
-| Phase 1 收尾 | gm-tls 旧路径加 `#[deprecated]` re-export | 待 |
-| Phase 2 | 硬切换：gm-tls 移除 TLCP、major bump、写 MIGRATION.md | 待 |
-
-详见：
-- [讨论稿 §5.2 / §10 / §11](../../gm-kms/discuss/00-tlcp-implementation-status.md)
-- [ADR-001](../../gm-kms/discuss/10-adr-gm-tlcp-split.md)
-- [战略决策](../../gm-kms/discuss/02-tlcp-strategy.md)
+TLCP (GB/T 38636-2020) core library in pure Rust — 国密 SM2/SM3/SM4 算法.
 
 ## 协议简介
 
@@ -36,18 +14,31 @@ TLCP（Transport Layer Cryptographic Protocol，传输层密码协议）是 GB/T
 
 ### 4 套密码套件
 
-| ID | 名称 |
-|----|------|
-| `0xE011` | ECDHE + SM4-GCM + SM3 |
-| `0xE013` | ECDHE + SM4-CBC + SM3 |
-| `0xE001` | ECC + SM4-GCM + SM3（无 ECDHE） |
-| `0xE003` | ECC + SM4-CBC + SM3（无 ECDHE） |
+| ID | 名称 | 说明 |
+|----|------|------|
+| `0xE051` | `TLS_ECDHE_SM4_GCM_SM3` | ECDHE + SM4-GCM + SM3 — **首选**，生产推荐 |
+| `0xE011` | `TLS_ECDHE_SM4_CBC_SM3` | ECDHE + SM4-CBC + HMAC-SM3 |
+| `0xE053` | `TLS_ECC_SM4_GCM_SM3` | 静态密钥 + SM4-GCM + SM3 — 无 ECDHE，性能优化场景 |
+| `0xE013` | `TLS_ECC_SM4_CBC_SM3` | 静态密钥 + SM4-CBC + HMAC-SM3 — 无 ECDHE |
+
+## 实现状态
+
+- ✅ 完整 TLCP 握手状态机（client + server，9 个 handshake 消息类型）
+- ✅ 双证书处理（sign cert + enc cert）
+- ✅ SM2 ECDHE 密钥交换 + SM3-based PRF
+- ✅ SM4-GCM 和 SM4-CBC + HMAC-SM3 record-layer 加密
+- ✅ Session resumption via session IDs (`TlcpSessionCache`)
+- ✅ Alert 协议（`TlcpAlert` / `TlcpAlertDescription`）
+- ✅ 全部 4 个密码套件
+- ✅ 58 unit tests + 4 gmssl interop integration tests
+- ✅ GmSSL 3.3.0-dev (`master`) handshake + APP_DATA byte-for-byte 互操作验证
+- ❌ Tongsuo 8.3.0 round-trip — Tongsuo-side NTLS state-machine 拒绝 `0x0101`，调查见 `interop/tongsuo/upstream/`
 
 ## 文档
 
-- 协议架构文档（待补）
-- 实现状态：[gm-kms/discuss/00-tlcp-implementation-status.md](../../gm-kms/discuss/00-tlcp-implementation-status.md)
-- 拆分 ADR：[gm-kms/discuss/10-adr-gm-tlcp-split.md](../../gm-kms/discuss/10-adr-gm-tlcp-split.md)
+- 模块 API 索引：`src/tlcp/mod.rs` 顶部 `//!` doc
+- 发布/打包清单：`PUBLISHING.md`
+- Tongsuo 互操作调查：`interop/tongsuo/upstream/`
 
 ## 许可证
 
