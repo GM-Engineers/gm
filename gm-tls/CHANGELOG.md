@@ -15,7 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   TLCP_VERSION_1_0)` bridge were both **removed outright** (no deprecation
   cycle — the entire TLCP path moved out under the same major version).
   Consumers of TLCP must `use gm_tlcp::*` directly and depend on the
-  `gm-tlcp` crate. The split is documented in ADR-001 / gm-kms/discuss/10.
+  `gm-tlcp` crate. The split is documented in the `Relationship with gm-tls`
+  section of [`gm-tlcp`'s crate-level docs](https://docs.rs/gm-tlcp/latest/gm_tlcp/) (or
+  the symmetric `Relationship with gm-tlcp` section in [`gm-tls`'s handshake module](https://docs.rs/gm-tls/latest/gm_tls/handshake/index.html)),
+  and the original extraction commit `28fbca1` in this repository.
 
   Code-level changes:
   - `gm-tls/src/tlcp.rs` deleted.
