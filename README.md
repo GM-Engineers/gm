@@ -1,6 +1,6 @@
-# Chinese National Cryptography (GM) Algorithms & GM/TLS (TLCP)
+# GM (国密) Cryptographic Algorithms & Protocol Stacks
 
-Pure Rust implementation of Chinese national cryptography (GM/T) algorithms and the GM/TLS (TLCP) protocol stack, with full SM2/SM3/SM4 support.
+Pure Rust implementation of Chinese national cryptography (GM/T) algorithms, the TLS 1.3 + SM stack, and the TLCP (GB/T 38636-2020) protocol, with full SM2/SM3/SM4 support.
 
 **[中文版](./README.zh-CN.md)**
 
@@ -8,22 +8,24 @@ Pure Rust implementation of Chinese national cryptography (GM/T) algorithms and 
 
 | Document | Contents |
 |----------|----------|
-| [Getting Started](./docs/getting-started.md) | Prerequisites, adding dependencies, first working example |
-| [gm-crypto Guide](./docs/gm-crypto.md) | Complete API reference for SM2/SM3/SM4 |
-| [gm-tls Guide](./docs/gm-tls.md) | GM/TLS client/server development, session stores |
-| [gm-ca Guide](./docs/gm-ca.md) | CA service deployment, gRPC API usage |
-| [gm-http-client Guide](./docs/gm-http-client.md) | HTTPS client, connection pooling, SSRF protection |
-| [Certificate Guide](./docs/certificate-howto.md) | Certificate generation, format, OpenSSL/GmSSL integration |
-| [Deployment Guide](./docs/deployment.md) | docker-compose production deployment, operations |
+| [Getting Started](./docs/getting-started.en.md) | Prerequisites, adding dependencies, first working example |
+| [gm-crypto Guide](./docs/gm-crypto.en.md) | Complete API reference for SM2/SM3/SM4 |
+| [gm-tls Guide](./docs/gm-tls.en.md) | TLS 1.3 + SM client/server development, session stores |
+| [gm-tlcp Guide](./docs/gm-tlcp.en.md) | TLCP (GB/T 38636-2020) protocol, dual-certificate PKI, GmSSL interop |
+| [gm-ca Guide](./docs/gm-ca.en.md) | CA service deployment, gRPC API usage |
+| [gm-http-client Guide](./docs/gm-http-client.en.md) | HTTPS client, connection pooling, SSRF protection |
+| [Certificate Guide](./docs/certificate-howto.en.md) | Certificate generation, format, OpenSSL/GmSSL integration |
+| [Deployment Guide](./docs/deployment.en.md) | docker-compose production deployment, operations |
 
 ## Overview
 
 ```
 gm/                          # Workspace root
 ├── gm-crypto/               # Cryptographic primitives (SM2/SM3/SM4)
-├── gm-tls/                  # GM/TLS protocol implementation
+├── gm-tls/                  # TLS 1.3 + SM algorithms (TLCP has moved to gm-tlcp)
+├── gm-tlcp/                 # TLCP (GB/T 38636-2020) protocol stack — standalone crate
 ├── gm-ca/                   # gRPC CA service (issue/revoke/query)
-├── gm-sm9-rs/                  # SM9 identity-based cryptography (sign/encrypt)
+├── gm-sm9-rs/               # SM9 identity-based cryptography (sign/encrypt)
 ├── gm-der/                  # DER/ASN.1 encoding/decoding (shared utility)
 ├── gm-http-client/          # HTTPS client
 ├── docs/                    # Detailed usage guides (this directory)
@@ -34,8 +36,9 @@ gm/                          # Workspace root
 
 | Crate | Type | Description |
 |-------|------|-------------|
-| `gm-crypto` | Library | Cryptographic primitives, no binaries |
-| `gm-tls` | Library | GM/TLS protocol; optional `grpc` feature for gRPC over GM/TLS |
+| `gm-crypto` | Library | Cryptographic primitives (SM2/SM3/SM4), no binaries. v0.2+ |
+| `gm-tls` | Library | TLS 1.3 + SM algorithms only. TLCP moved to standalone `gm-tlcp`. Optional `grpc` feature for gRPC over TLS 1.3 + SM |
+| `gm-tlcp` | Library | TLCP (GB/T 38636-2020) protocol — standalone, depends on `gm-crypto >= 0.2` |
 | `gm-ca` | Library + Service | Provides `gm-ca-server` binary, gRPC interface |
 | `gm-sm9-rs` | Library | SM9 identity-based sign/encrypt; dual backend (pure Rust + GmSSL FFI) |
 | `gm-der` | Library | Shared DER/ASN.1 encoding/decoding utilities |
@@ -45,7 +48,8 @@ gm/                          # Workspace root
 
 ```toml
 [dependencies]
-gm-crypto = "0.1"
+gm-crypto = "0.2"
+gm-tlcp   = "0.1"
 gm-sm9-rs = "0.1"
 ```
 
@@ -53,7 +57,8 @@ gm-sm9-rs = "0.1"
 use gm_crypto::sm2::{Sm2KeyPair, Sm2Signer};
 use gm_crypto::sm3::Sm3Hasher;
 use gm_crypto::sm4::Sm4Cipher;
-use gm_sm9_rs::{SignMasterKey, Signer, Verifier, EncMasterKey, Encryptor, Decryptor};
+use gm_sm9_rs::{SignMasterKey, Signer, Verifier};
+use gm_tlcp::{TlcpAcceptor, TlcpConnector, TlcpCipherSuite};
 
 // SM2/SM3/SM4 (SM2 includes key exchange)
 let key_pair = Sm2KeyPair::generate().unwrap();
@@ -73,14 +78,41 @@ let signer = Signer::new(user_key);
 let sig = signer.sign(b"message")?;
 let verifier = Verifier::new(b"alice@example.com", &master.ppubs);
 assert!(verifier.verify(b"message", &sig)?);
+
+// TLCP handshake (server side — see gm-tlcp docs for full example)
+// let acceptor = TlcpAcceptor::new()
+//     .with_dual_certs(sign_cert_der, enc_cert_der, sign_pub_65)
+//     .with_cipher_suites(vec![TlcpCipherSuite::TLS_ECDHE_SM4_GCM_SM3]);
 ```
 
 ## Third-Party Components
 
-This project wraps existing community implementations and ports external code:
+This project wraps community implementations and ports external code where
+appropriate, but also includes substantial original code:
 
-- **SM2 / SM3 / SM4** (`gm-crypto`) are thin wrappers around the community Rust crates [`sm2`](https://crates.io/crates/sm2), [`sm3`](https://crates.io/crates/sm3), and [`sm4`](https://crates.io/crates/sm4) — not independent reimplementations.
-- **SM9** (`gm-sm9-rs`) is a Rust port derived from [GmSSL](https://github.com/guanzhi/GmSSL) (Apache-2.0). See [NOTICE](./NOTICE) for attribution and license details.
+- **SM2** (`gm-crypto/src/sm2.rs`) wraps the community crate
+  [`sm2`](https://crates.io/crates/sm2) and adds a higher-level
+  `Sm2Signer` / `Sm2Verifier` / `Sm2Encryptor` API on top.
+- **SM3** (`gm-crypto/src/sm3.rs`) wraps [`sm3`](https://crates.io/crates/sm3).
+- **SM4** (`gm-crypto/src/sm4.rs`) wraps [`sm4`](https://crates.io/crates/sm4)
+  **and** adds hand-rolled raw-CBC primitives
+  (`Sm4Cipher::encrypt_cbc_raw` / `decrypt_cbc_raw`) for MAC-then-Encrypt
+  protocols (TLCP, TLS 1.1 CBC) where the protocol layer manages
+  padding itself and the standard PKCS#7-padded `encrypt_cbc` would
+  corrupt the wire format.
+- **X.509 SM2 public-key extraction**
+  (`gm-crypto/src/x509.rs::extract_sm2_pubkey_from_der`) is a from-scratch
+  implementation, not a wrapper. It exists to work around a quirk in
+  GmSSL-emitted SPKI BIT STRINGs that have a non-zero unused-bits
+  count; off-the-shelf `x509-parser` doesn't strip those, which
+  causes downstream SM2 encryption/verifier constructors to reject the
+  key.
+- **SM9** (`gm-sm9-rs`) is a Rust port derived from
+  [GmSSL](https://github.com/guanzhi/GmSSL) (Apache-2.0). See
+  [NOTICE](./NOTICE) for attribution and license details.
+- **TLCP** (`gm-tlcp`) is a from-scratch Rust implementation of
+  GB/T 38636-2020. The protocol layer is original work; cryptographic
+  primitives delegate to `gm-crypto`.
 
 ## License
 
