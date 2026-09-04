@@ -194,12 +194,11 @@ pub use session_keys::SessionKeys;
 // compatibility during migration); suppress the self-deprecation warning.
 #[allow(deprecated)]
 pub use tlcp::{
-    accept_tlcp, accept_tlcp_with_context, connect_tlcp, connect_tlcp_with_context,
-    TlcpAcceptor, TlcpAlert, TlcpAlertDescription, TlcpAlertLevel, TlcpCertPair,
-    TlcpCipherSuite, TlcpClientHello, TlcpClientKeyExchange, TlcpConnector,
-    TlcpEcdheContext, TlcpFinished, TlcpHandshake, TlcpHandshakeState, TlcpKeyMaterial,
-    TlcpResumeResult, TlcpResumedSession, TlcpServerHandshake, TlcpServerHello,
-    TlcpServerHelloDone, TlcpServerKeyExchange, TlcpSessionCache, TlcpStream,
-    TLS_ECC_SM4_CBC_SM3, TLS_ECC_SM4_GCM_SM3, TLS_ECDHE_SM4_CBC_SM3,
-    TLS_ECDHE_SM4_GCM_SM3, TLCP_VERSION_1_0, MAX_TLCP_RECORD_SIZE,
+    MAX_TLCP_RECORD_SIZE, TLCP_VERSION_1_0, TLS_ECC_SM4_CBC_SM3, TLS_ECC_SM4_GCM_SM3,
+    TLS_ECDHE_SM4_CBC_SM3, TLS_ECDHE_SM4_GCM_SM3, TlcpAcceptor, TlcpAlert, TlcpAlertDescription,
+    TlcpAlertLevel, TlcpCertPair, TlcpCipherSuite, TlcpClientHello, TlcpClientKeyExchange,
+    TlcpConnector, TlcpEcdheContext, TlcpFinished, TlcpHandshake, TlcpHandshakeState,
+    TlcpKeyMaterial, TlcpResumeResult, TlcpResumedSession, TlcpServerHandshake, TlcpServerHello,
+    TlcpServerHelloDone, TlcpServerKeyExchange, TlcpSessionCache, TlcpStream, accept_tlcp,
+    accept_tlcp_with_context, connect_tlcp, connect_tlcp_with_context,
 };

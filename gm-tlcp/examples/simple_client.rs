@@ -50,7 +50,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut tls = connector.connect_with_certs(tcp).await?;
     println!("TLCP handshake completed");
     println!("  Protocol version: 0x0101 (TLCP)");
-    println!("  Role: {}", if tls.is_client() { "client" } else { "server" });
+    println!(
+        "  Role: {}",
+        if tls.is_client() { "client" } else { "server" }
+    );
     println!("  Session ID: {} bytes", tls.session_id().len());
 
     // 4. Send application data (HTTP request)
@@ -61,10 +64,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // 5. Read echo response
     let response = tls.read_application_data().await?;
     println!("Received response: {} bytes", response.len());
-    println!(
-        "Response body:\n{}",
-        String::from_utf8_lossy(&response)
-    );
+    println!("Response body:\n{}", String::from_utf8_lossy(&response));
 
     // 6. Graceful shutdown (sends TLCP close_notify alert)
     tls.close().await?;

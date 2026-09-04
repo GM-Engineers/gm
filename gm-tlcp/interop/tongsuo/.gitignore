@@ -1,0 +1,8 @@
+# Build artifacts (regenerate with build_tongsuo.sh).
+tongsuo-bin/
+# Unused upstream tarball (cached at /tmp/ instead — see build_tongsuo.sh).
+Tongsuo-*.tar.gz
+# Unpacked source tree from the build.
+Tongsuo-*/
+# Per-run cert dumps and capture logs.
+run/

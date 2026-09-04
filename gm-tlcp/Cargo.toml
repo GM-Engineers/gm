@@ -12,6 +12,38 @@ rust-version = "1.85"
 readme = "README.md"
 
 # ---------------------------------------------------------------------------
+# crates.io 发布清单控制
+# ---------------------------------------------------------------------------
+# 明确列出 crates.io **不**包含的路径，避免开发期工具/构建产物被打包：
+#   - `interop/`: Tongsuo 互测脚本与构建产物（仅在 GitHub 仓库可见）
+#   - `target/`: cargo 默认会排除，这里冗余声明做自检断言
+#   - `.github/`: CI workflow，不属于 crate
+#
+# 任何 PR 引入 `cargo package --list --allow-dirty` 中可见的新增目录前，
+# 请同时更新本表与 `scripts/check-publish.sh` 中的反断言列表，并在 CI
+# 通过 check-publish 后再合并。
+# ---------------------------------------------------------------------------
+exclude = [
+    # Tongsuo interop dev tooling (Docker scripts + build artifacts).
+    "interop/**",
+    # Internal publish/release self-check scripts (kept in the GitHub
+    # repo, not on crates.io).
+    "scripts/**",
+    "PUBLISHING.md",
+    # CI workflows — not part of the published crate.
+    ".github/**",
+    # Integration tests are repo-only: they require the GmSSL binary
+    # on PATH (see tests/gmssl_interop.rs) and `tests/support/` has
+    # GmSSL-specific PEM/PBKDF2 helpers that aren't useful to
+    # downstream users. Unit tests live inline in src/ via
+    # `#[cfg(test)]` and DO get exercised by every `cargo test`.
+    "tests/**",
+    # Cargo defaults — kept for explicit self-check assertions.
+    "/target",
+    "*.log",
+]
+
+# ---------------------------------------------------------------------------
 # 依赖说明（按 GB/T 38636-2020 TLCP 拆分规划）
 # ---------------------------------------------------------------------------
 # 当前阶段：本 crate 是空骨架（Phase 1 第一批），以下依赖按"完整 TLCP
@@ -21,6 +53,12 @@ readme = "README.md"
 [dependencies]
 # 国密算法原语（SM2/SM3/SM4/SM9）
 gm-crypto = { path = "../gm-crypto", version = "0.1.0" }
+
+# Underlying EC primitive for the TLCP PMS KDF (x_hat transform,
+# ProjectivePoint arithmetic). We re-export gm-crypto's transitive
+# dep here to keep the pms module self-contained.
+elliptic-curve = "0.13"
+sm2 = { version = "0.13", features = ["arithmetic"] }
 
 # 异步运行时（handshake / 流 I/O）
 tokio = { version = "1", features = ["io-util", "net", "sync"] }
@@ -54,6 +92,12 @@ default = []
 # 集成测试用
 tokio = { version = "1", features = ["full"] }
 tokio-test = "0.4"
+
+# PEM 解码（提取 server 公钥给 with_server_sign_key 用）
+base64 = "0.22"
+
+# 调试代理 hex 输出
+hex = "0.4"
 
 # 注：以下依赖**不**进本 crate（避免污染 TLCP 边界 / 未直接使用）：
 #   - metrics/audit：emit 端直接用 tracing；落库/告警由应用层负责

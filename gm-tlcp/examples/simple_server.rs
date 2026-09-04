@@ -85,7 +85,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             loop {
                 match tls.read_application_data().await {
                     Ok(data) if data.is_empty() => {
-                        println!("[{}] Received zero-length APP_DATA record; ending echo loop", peer_addr);
+                        println!(
+                            "[{}] Received zero-length APP_DATA record; ending echo loop",
+                            peer_addr
+                        );
                         break;
                     }
                     Ok(data) => {
