@@ -251,13 +251,13 @@ jobs:
           set -e
           if ! command -v gmssl >/dev/null 2>&1; then
             sudo tee /usr/local/bin/gmssl > /dev/null <<'WRAPPER'
-#!/bin/sh
-exec docker run --rm \
-  -e LD_LIBRARY_PATH=/usr/local/gmssl/lib \
-  -v /tmp:/tmp \
-  gmssl-test:latest \
-  /usr/local/gmssl/bin/gmssl "$@"
-WRAPPER
+              #!/bin/sh
+              exec docker run --rm \
+                -e LD_LIBRARY_PATH=/usr/local/gmssl/lib \
+                -v /tmp:/tmp \
+                gmssl-test:latest \
+                /usr/local/gmssl/bin/gmssl "$@"
+              WRAPPER
             sudo chmod +x /usr/local/bin/gmssl
           fi
           gmssl version
