@@ -2,19 +2,227 @@
 
 All notable changes to the GM cryptographic library suite.
 
-## [Unreleased] - 2026-06-30
+## [Unreleased]
+
+_No pending changes._
+
+## [0.3.0] - 2026-09-05
+
+**Headline change**: TLCP (GB/T 38636-2020) has been **extracted out of
+`gm-tls`** into its own standalone `gm-tlcp` crate. The `gm-crypto` crate
+shipped a patch release (0.2.0) with three new building-block APIs that
+`gm-tlcp` depends on. The workspace also received comprehensive docs,
+a CI rewrite of the GmSSL interop setup, and 20 commits.
 
 ### Added
 
+#### Standalone `gm-tlcp` crate (0.1.0)
+
+- **New crate at `gm/gm-tlcp/`**, published to crates.io as
+  `gm-tlcp = 0.1.0`. Depends on `gm-crypto >= 0.2`.
+- Full TLCP handshake state machine (client + server, 9 message
+  types: `ClientHello`, `ServerHello`, `ServerKeyExchange`,
+  `ServerHelloDone`, `CertificateVerify`, `ClientKeyExchange`,
+  `Certificate`, `Finished`, `ServerFinished`).
+- All four cipher suites:
+  `TLS_ECDHE_SM4_GCM_SM3` (`0xE051`),
+  `TLS_ECDHE_SM4_CBC_SM3` (`0xE011`),
+  `TLS_ECC_SM4_GCM_SM3` (`0xE053`),
+  `TLS_ECC_SM4_CBC_SM3` (`0xE013`).
+- SM2 ECDHE key agreement per GB/T 32918.3-2016.
+- SM3-based PRF (RFC 5246 §5 `P_hash`, SM3 replacing the SHA-256
+  family used in TLS 1.3).
+- SM4-GCM and SM4-CBC + HMAC-SM3 record-layer encryption.
+- Mandatory **dual-certificate** model (sign cert + enc cert).
+- Session resumption: `TlcpSessionCache` + `TlcpResumedSession`.
+- Alert protocol: `TlcpAlert` / `TlcpAlertLevel` / `TlcpAlertDescription`.
+- High-level API: `TlcpConnector::new().connect(...)`,
+  `TlcpAcceptor::new().accept(...)` mirroring the `rustls` API.
+- Async `AsyncRead + AsyncWrite` via `tokio` traits.
+- 58 lib unit tests + 32 integration tests + 4 default GmSSL
+  interop tests (7 more `#[ignore]`-gated, run with `--ignored`
+  when `gmssl` is on `PATH`) + 8 doctests + 4 fuzz harnesses.
+- Comprehensive rustdoc, bilingual quickstart guide
+  (`docs/gm-tlcp.md` + `docs/gm-tlcp.en.md`).
+- README + README.en.md (English translation added).
+
+#### `gm-crypto` 0.2.0
+
+- **`Sm4Cipher::encrypt_cbc_raw` / `decrypt_cbc_raw`** — SM4 CBC
+  mode **without PKCS#7 padding**, for protocols that manage
+  padding themselves (TLCP MAC-then-Encrypt, TLS 1.1 CBC). The
+  standard `encrypt_cbc` is left untouched for users who want
+  PKCS#7 padding.
+- **`x509::extract_sm2_pubkey_from_der`** — extract the raw SM2
+  public key bytes (65 bytes SEC1) from a DER-encoded X.509
+  certificate. From-scratch implementation, defensive against the
+  GmSSL-emitted SPKI BIT STRING quirk (non-zero trailing-bits
+  count) that causes off-the-shelf `x509-parser` to emit key
+  bytes that the SM2 key constructors reject.
+
 #### GmSSL Interoperability (gm-tls)
-- **7/7 GmSSL interop tests passing**: TLS 1.3 handshake, TLCP connectivity, bidirectional client/server, loopback self-tests
-- **GmSSL server daemons**: launchd plist (`com.gm.interop.plist`) auto-restarts GmSSL single-connection servers:
+
+Carried over from the previous `[Unreleased]` section:
+
+- **7/7 GmSSL interop tests passing**: TLS 1.3 handshake, TLCP
+  connectivity, bidirectional client/server, loopback self-tests.
+- **GmSSL server daemons**: launchd plist
+  (`com.gm.interop.plist`) auto-restarts GmSSL single-connection
+  servers:
   - TLS 1.3 server: port **4434** (`gmssl tls13_server`)
-  - TLCP server: port **4433** (`gmssl tlcp_server` with dual-cert PKI chain)
-- **GmSSL client→gm-tls**: GmSSL `tls13_client` subprocess spawned from test, connects to gm-tls server (port 4435)
-- **TLCP dual-cert PKI**: proper `sign_cert + enc_cert + ca_cert` chain format for GmSSL `tlcp_server`
-- **Retry + timeout helpers**: `tcp_connect_with_retry()` (5x, exponential backoff), 2s read timeout
-- Test env vars: `TEST_GMSLL_PORT`, `TEST_GMSLL_CERT`, `TEST_GMSLL_KEY`, `TEST_GMSLL_BIN`
+  - TLCP server: port **4433** (`gmssl tlcp_server` with
+    dual-cert PKI chain)
+- **GmSSL client→gm-tls**: GmSSL `tls13_client` subprocess
+  spawned from test, connects to gm-tls server (port 4435).
+- **TLCP dual-cert PKI**: proper `sign_cert + enc_cert + ca_cert`
+  chain format for GmSSL `tlcp_server`.
+- **Retry + timeout helpers**: `tcp_connect_with_retry()`
+  (5x, exponential backoff), 2s read timeout.
+- Test env vars: `TEST_GMSLL_PORT`, `TEST_GMSLL_CERT`,
+  `TEST_GMSLL_KEY`, `TEST_GMSLL_BIN`.
+
+#### Project governance
+
+- `.github/ISSUE_TEMPLATE/{bug_report,security,feature_request}.yml`
+- `.github/PULL_REQUEST_TEMPLATE.md` (8-section checklist)
+- `CHANGELOG.md` at the workspace root.
+
+### Changed
+
+#### Breaking — `gm-tls` TLCP support removed
+
+- `gm-tls/src/tlcp.rs` deleted. The TLCP code is in
+  `gm-tlcp/src/tlcp/` (under commit `28fbca1`).
+- `gm-tls/Cargo.toml`: dropped the (now-circular) `gm-tlcp`
+  dependency.
+- `gm-tls/tests/tlcp_integration_tests.rs` (1592 lines) migrated
+  to `gm-tlcp/tests/integration_tlcp.rs`. Two latent TLCP bugs
+  fixed in the migration:
+  1. `TlcpStream::poll_read` GCM decrypt path was building the
+     AAD from `seq || header (5 bytes)` instead of the symmetric
+     `seq || header[0..3] || pt_len_bytes`. Also was passing the
+     explicit nonce + body as a single `ct` to GCM instead of the
+     body alone. Fixing the AAD and the split repairs in-memory
+     `TlcpStream::new(... ECDHE_SM4_GCM_SM3)` round-trips that
+     previously failed the GCM tag check.
+  2. `connect_tlcp_with_context` / `accept_tlcp_with_context`
+     bypassed the cert step, which violated the post-PR5
+     state-machine invariant
+     `derive_master_secret -> ServerCertsReceived | KeyExchange`.
+     Both helpers now install a placeholder cert pair so the
+     invariant holds.
+
+#### `gm-tls` Cargo.toml metadata
+
+- `description` updated from
+  `"GM/TLS (国密TLS) core library with SM2/SM3/SM4 support"` to
+  `"TLS 1.3 core library with SM (国密) cipher suites —
+  SM2/SM3/SM4, optional gRPC integration. TLCP (GB/T 38636-2020)
+  lives in the standalone gm-tlcp crate."` — the old string
+  implied TLCP was still in this crate.
+- `keywords` updated from
+  `["tls", "gmtls", "gm", "sm2", "cryptography"]` to
+  `["tls13", "tls1.3", "sm2", "sm3", "sm4", "cryptography"]`.
+  The `"gmtls"` term was ambiguous post-split; `"tls"` alone was
+  too generic.
+
+#### Workspace docs
+
+- Top-level `README.md` (English) and `README.zh-CN.md`
+  (Chinese) rewritten to:
+  - Include `gm-tlcp` in the directory tree, crate overview
+    table, and documentation nav table.
+  - Switch 7 documentation-table links to the `.en.md` variants
+    (the plain `.md` files are Chinese; this convention is the
+    same as every other crate in the workspace).
+  - Bump the `Cargo.toml` example from `gm-crypto = "0.1"` to
+    `gm-crypto = "0.2"`, add `gm-tlcp = "0.1"`.
+  - Update the **Third-Party Components** section to enumerate
+    which files in `gm-crypto` are wrappers vs hand-rolled (the
+    old text claimed it was all "thin wrappers" which is no
+    longer true).
+- `SECURITY.md` / `SECURITY.zh-CN.md`: `LRU` → `FIFO` typo
+  fixed (the actual cache strategy in `gm-tls` is FIFO, the
+  doc claimed LRU).
+- `gm-tls/CHANGELOG.md` cross-link to ADR-001 fixed.
+
+### Removed
+
+- **`bincode` dependency from `gm-tls`** (was flagged unmaintained,
+  [RUSTSEC-2025-0141](https://rustsec.org/advisories/RUSTSEC-2025-0141)).
+  Replaced by [`postcard`](https://crates.io/crates/postcard) for
+  in-process session-ticket serialization. No public API change.
+
+### Security
+
+#### `gm-tlcp` independent audit
+
+- 4-pass independent security audit pre-release, recorded in
+  commit `7b274ad`:
+  1. Pre-master-secret secret-zeroize on disconnect (Drop impl).
+  2. Constant-time signature / MAC / HMAC / Finished comparison
+     (`subtle::ConstantTimeEq`).
+  3. GCM nonce-reuse detection — emits fatal
+     `TlcpError::NonceReuse` and zeroizes the connection.
+  4. Transcript-boundary cross-check: every `Finished`
+     computation re-hashes the full transcript to detect
+     message-order tampering.
+- All sensitive types implement `Drop` zeroization
+  (`SessionKeys`, `TlcpKeyMaterial`, `TlcpHandshake`,
+  `TlcpEcdheContext`, `TlcpResumedSession`).
+- PMS was leaked to `stderr` via `eprintln!` in a debug call
+  site; removed (commit `56dd223`).
+- CV self-verify now returns `Err` on signature mismatch
+  (previously `Ok(())`).
+
+#### Interop verification
+
+- **GmSSL 3.2.0** — all 4 cipher suites byte-for-byte round-trip.
+- **GmSSL 3.3.0-dev master** (`1183+`) — same, plus the new
+  client-certificate-mandatory path.
+- **Tongsuo 8.3.0** — not yet passing. Tongsuo's NTLS state
+  machine rejects the TLCP version byte `0x0101`. Tracked under
+  `gm-tlcp/interop/tongsuo/upstream/`.
+
+### Fixed
+
+#### CI — GmSSL install step rewrite
+
+The `gmssl` install step in `.github/workflows/ci.yml` was
+unreliable across the CI runners (Docker symlink handling,
+permission race, etc). Replaced over a 5-attempt fix sequence:
+
+1. `d97b94c` — `sudo mv` of `docker cp` output.
+2. `5a968c2` — `docker run cat | sudo tee` to dodge symlink
+   mishandling in `docker cp`.
+3. `a121113` — `apt-get install gmssl` first, Docker tarball
+   extraction as fallback.
+4. `b460df9` — wrapper script that `exec`s `docker run`.
+   Introduced a YAML heredoc indentation bug that surfaced as
+   a 0-jobs visible workflow (`2cfb1ef`).
+5. `3ddbdf3` — wrapper script + `continue-on-error: true`
+   for the `gmssl` step. **Final form**; all 7 CI jobs green.
+
+#### Nightly clippy
+
+- 12 nightly-clippy warnings auto-fixed via
+  `cargo +nightly clippy --fix`. 1 manually added
+  `#[allow(dead_code)]` for symmetric struct fields. CI now
+  passes `cargo +nightly clippy --workspace --all-targets`.
+
+#### Source-tree hygiene
+
+- `docs/gm-tlcp.md` and `docs/gm-tlcp.en.md` **new** (bilingual
+  quickstart guide).
+- `gm-tlcp/README.en.md` **new** (English translation).
+- `gm-tlcp/CHANGELOG.md` **new** (Keep-a-Changelog format).
+
+### Dependencies
+
+- `gm-crypto` dependency bumped from `0.1` → `0.2` across
+  `gm-ca`, `gm-sm9-rs`, `gm-tlcp`, `gm-tls` (no actual API
+  change for any of them — the bump only matters for crates
+  that consume the new 0.2 APIs, which is just `gm-tlcp`).
 
 ## [0.2.0] - 2026-06-13
 
