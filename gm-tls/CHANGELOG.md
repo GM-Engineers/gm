@@ -7,7 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No pending changes._
+
+## [0.2.0] - 2026-09-05
+
+**Headline change**: TLCP (GB/T 38636-2020) has been **extracted out of
+`gm-tls`** into the standalone `gm-tlcp` crate. This is a **BREAKING
+CHANGE** for any consumer that used `gm_tls::tlcp::*` or
+`GmTlsStream::with_version(_, TLCP_VERSION_1_0)`. Under SemVer 0.x,
+breaking changes bump the minor position, hence `0.1.0` → `0.2.0`.
+
+Consumers of TLCP must now depend on the `gm-tlcp` crate directly:
+```toml
+[dependencies]
+gm-tls = "0.2"
+gm-tlcp = "0.1"
+```
+
 ### Removed
+
+- **BREAKING: TLCP support extracted out of `gm-tls`** into the
+  standalone `gm-tlcp` crate (commit `28fbca1`). The TLCP protocol
+  stack (handshake, record layer, dual-cert handling, session
+  resumption, alert protocol) is no longer part in this crate. Code
+  removals:
+  - `gm-tls/src/tlcp.rs` deleted (~1600 LOC of pre-extraction TLCP
+    code).
+  - `gm-tls/Cargo.toml`: dropped the (now-circular) `gm-tlcp`
+    dependency.
+  - `gm-tls/tests/tlcp_integration_tests.rs` (1592 lines, the only
+    in-workspace file that still imported `gm_tls::tlcp::*` and the
+    broken `gm_tls::gm::GmTlsStream` bridge) migrated to
+    `gm-tlcp/tests/integration_tlcp.rs`.
+  - `gm_tls::tlcp::*` re-export shim removed outright (no deprecation
+    cycle — the entire TLCP path moved out under the same major
+    version).
+  - `GmTlsStream::with_version(_, TLCP_VERSION_1_0)` bridge removed.
+
+  Two **latent** TLCP bugs were exposed by the migration and fixed in
+  the same commit:
+  1. `TlcpStream::poll_read` GCM decrypt path was building the AAD
+     from `seq || header (5 bytes)` instead of of the symmetric
+     `seq || header[0..3] || pt_len_bytes` that the encrypt side
+     produces, AND was passing the explicit-nonce + body as a
+     single `ct` to GCM (instead of the body alone, after stripping
+     the 8-byte explicit nonce). Fixing the AAD and the split
+     repairs in-memory `TlcpStream::new(... ECDHE_SM4_GCM_SM3)`
+     round-trips that previously failed the GCM tag check.
+  2. `connect_tlcp_with_context` / `accept_tlcp_with_context` (the
+     simulated-helper paths the in-memory tests rely on) bypass
+     the cert step, which now violates the post-PR5 state-machine
+     invariant `derive_master_secret -> ServerCertsReceived |
+     KeyExchange`. Both helpers install a placeholder cert pair
+     so the invariant holds.
+
+  **Note on inert surface**: two non-functional references to
+  TLCP remain in `gm-tls/src/der.rs`:
+  - `pub const VERSION_TLCP_1_0: [u8; 2] = [0x01, 0x01];`
+  - `pub enum ProtocolVersion { ..., TLCP1_0 }`
+  These are **inert type declarations** with no protocol code
+  behind them. They are intentionally retained for protocol
+  detection use cases (network monitoring, log analysis) that
+  need to distinguish TLS 1.3 records from TLCP records without
+  depending on the full TLCP stack. Removing them would be an
+  additional breaking change for those users, with no functional
+  benefit.
 
 - **`bincode` dependency** (was flagged unmaintained, see
   [RUSTSEC-2025-0141](https://rustsec.org/advisories/RUSTSEC-2025-0141)).
@@ -17,47 +81,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **BREAKING**: TLCP support has been removed from `gm-tls` and now lives
-  exclusively in the standalone `gm-tlcp` crate. The previous
-  `gm_tls::tlcp::*` re-export shim and the `GmTlsStream::with_version(...,
-  TLCP_VERSION_1_0)` bridge were both **removed outright** (no deprecation
-  cycle — the entire TLCP path moved out under the same major version).
-  Consumers of TLCP must `use gm_tlcp::*` directly and depend on the
-  `gm-tlcp` crate. The split is documented in the `Relationship with gm-tls`
-  section of [`gm-tlcp`'s crate-level docs](https://docs.rs/gm-tlcp/latest/gm_tlcp/) (or
-  the symmetric `Relationship with gm-tlcp` section in [`gm-tls`'s handshake module](https://docs.rs/gm-tls/latest/gm_tls/handshake/index.html)),
-  and the original extraction commit `28fbca1` in this repository.
+- **Cargo.toml `description`**: updated from
+  `"GM/TLS (国密TLS) core library with SM2/SM3/SM4 support"` to
+  `"TLS 1.3 core library with SM (国密) cipher suites — SM2/SM3/SM4,
+  optional gRPC integration. TLCP (GB/T 38636-2020) lives in the
+  standalone gm-tlcp crate."`. The old string implied TLCP was
+  still in this crate.
+- **Cargo.toml `keywords`**: updated from
+  `["tls", "gmtls", "gm", "sm2", "cryptography"]` to
+  `["tls13", "sm2", "sm3", "sm4", "cryptography"]`
+  (5 entries, the crates.io maximum). The `"gmtls"` term was
+  ambiguous post-split; `"tls"` alone was too generic; `"tls13"`
+  and `"tls1.3"` were redundant (kept the more-searchable
+  `"tls13"`).
+- **Dependency requirement**: `gm-crypto` bumped from `0.1` → `0.2`
+  in `gm-tls/Cargo.toml`. gm-crypto 0.2.0 is fully
+  backwards-compatible per SemVer, so this is not a breaking
+  change.
 
-  Code-level changes:
-  - `gm-tls/src/tlcp.rs` deleted.
-  - `gm-tls/Cargo.toml`: dropped the `gm-tlcp` dependency.
-  - `gm-tls/tests/tlcp_integration_tests.rs` (1592 lines, the only
-    in-workspace file that still imported `gm_tls::tlcp::*` and the
-    broken `gm_tls::gm::GmTlsStream` bridge) migrated to
-    `gm-tlcp/tests/integration_tlcp.rs`. The migration exposed two
-    latent TLCP bugs that this commit also fixes:
-    1. `TlcpStream::poll_read` GCM decrypt path was building the AAD
-       from `seq || header (5 bytes)` instead of the symmetric
-       `seq || header[0..3] || pt_len_bytes` that the encrypt side
-       produces, AND was passing the explicit-nonce + body as a
-       single `ct` to GCM (instead of the body alone, after stripping
-       the 8-byte explicit nonce). Fixing the AAD and the split
-       repairs in-memory `TlcpStream::new(... ECDHE_SM4_GCM_SM3)`
-       round-trips that previously failed the GCM tag check.
-    2. `connect_tlcp_with_context` / `accept_tlcp_with_context` (the
-       simulated-helper paths the in-memory tests rely on) bypass
-       the cert step, which now violates the post-PR5 state-machine
-       invariant `derive_master_secret -> ServerCertsReceived | KeyExchange`.
-       Both helpers install a placeholder cert pair so the invariant
-       holds.
+### Dependencies
 
-  Test-status after migration:
-    - `gm-tlcp/tests/integration_tlcp.rs`: 32 pass / 5 ignored (the 5
-      ignored ones were carrying pre-existing X.509 wiring bugs from
-      the gm-tls copy; they need a real CA fixture to enable).
-    - `gm-tlcp/tests/gmssl_interop.rs`: 4 pass / 7 ignored (unchanged).
-    - `gm-tls` no longer has any TLCP-flavored integration test.
-      Workspace-wide `cargo test --workspace` is green.
+- `gm-ca` and `gm-http-client` (workspace members that depend on
+  this crate) have had their `gm-tls = "..."` version requirement
+  bumped from `"0.1.0"` to `"0.2.0"` in their local Cargo.toml.
+  No published version of `gm-ca` or `gm-http-client` is being
+  released alongside this — only the workspace-local source is
+  updated, so they will pick up gm-tls 0.2.0 on their next
+  release.
+
+### Test status (gm-tls 0.2.0)
+
+- 14 lib unit tests pass
+- 6 integration test files: 159 pass / 12 ignored (sqlite + property
+  fixtures require running infrastructure)
+- 5 doctests pass / 3 ignored
+- Total: **175 pass / 0 fail / 15 ignored**
+- `cargo +nightly clippy --all-targets`: clean (no warnings)
+- `cargo build --release`: clean
+- `cargo doc --no-deps`: clean
 
 ## [0.1.0] - 2026-04-14
 
