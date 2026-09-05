@@ -1,23 +1,25 @@
 # gm-tls
 
-国密 TLS (GM/TLS) 核心库 - 纯 Rust 实现，支持 SM2/SM3/SM4 算法。
+国密 TLS 1.3 核心库 —— 纯 Rust 实现，支持 SM2/SM3/SM4 密码套件。TLCP（GB/T 38636-2020）已拆分到独立的 [`gm-tlcp`](https://crates.io/crates/gm-tlcp) crate。
 
 **[English Version](./README.en.md)**
 
 ## 概述
 
-gm-tls 是一个用于 GM/TLS 协议实现的 Rust 库，提供了：
+gm-tls 是一个用于 TLS 1.3 + SM 密码套件 实现的 Rust 库，提供了：
 
 - **SM2** 椭圆曲线密钥生成、签名、验签
 - **SM3** 哈希算法和 KDF 密钥派生
 - **SM4-GCM** 对称加密（带认证）
 - **mTLS** 双向认证握手流程
 
+**注意**：本 crate 仅实现 **TLS 1.3 + SM 密码套件**。TLCP（GB/T 38636-2020 国密传输层密码协议）是**独立的协议**，已提取到独立的 [`gm-tlcp`](https://crates.io/crates/gm-tlcp) crate，依赖与 API 均独立。
+
 ## 文档
 
-- [快速开始指南](./README.md)（本文档）
 - [架构文档](./ARCHITECTURE.md) - 组件结构和设计
 - [安全指南](./SECURITY.md) - 安全最佳实践
+- TLCP 协议：[`gm-tlcp` 文档](https://docs.rs/gm-tlcp) 或仓库 [docs/gm-tlcp.md](../docs/gm-tlcp.md)
 
 ### 测试覆盖率
 
@@ -87,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 本库遵循语义化版本控制，API 在主要版本间保持稳定。
 
-当前版本：v0.1.0
+当前版本：v0.2.0
 
 ### 稳定 API
 

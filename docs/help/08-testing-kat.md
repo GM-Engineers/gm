@@ -114,10 +114,16 @@ proptest! {
 | `test_gmssl_tls13_server_reachable` | TCP 连接到 GmSSL TLS 1.3 server（端口 4434）/ TCP connect to GmSSL TLS 1.3 server (port 4434) | ✅ |
 | `test_gmssl_tls13_handshake` | gm-tls TLS 1.3 客户端 → GmSSL TLS 1.3 server 握手 / gm-tls TLS 1.3 client → GmSSL TLS 1.3 server handshake | ✅ |
 | `test_gmssl_tls13_client_connects_to_gmtls_server` | GmSSL `tls13_client` 子进程 → gm-tls server（端口 4435）/ GmSSL `tls13_client` subprocess → gm-tls server (port 4435) | ✅ |
-| `test_gmssl_tlcp_handshake` | TCP 连接到 GmSSL TLCP server（端口 4433）/ TCP connect to GmSSL TLCP server (port 4433) | ✅ |
 | `test_loopback_handshake` | TLS 1.3 自握手（无需外部服务）/ TLS 1.3 self-handshake (no external service) | ✅ |
 | `test_loopback_mutual_auth` | TLS 1.3 双向认证自测 / TLS 1.3 mutual auth self-test | ✅ |
 | `test_loopback_echo_large_data` | TLS 1.3 大消息往返测试 / TLS 1.3 large message roundtrip | ✅ |
+
+> **TLCP interop tests moved**: As of gm-tls 0.2.0, TLCP support lives in
+> the standalone [`gm-tlcp`](../../gm-tlcp/README.md) crate. The
+> `test_gmssl_tlcp_handshake` test (TCP connect to GmSSL TLCP server
+> on port 4433) now lives in `gm-tlcp/tests/gmssl_interop.rs`. See
+> the [`gm-tlcp` test docs](../../gm-tlcp/tests/) for the current
+> TLCP interop test status.
 
 **GmSSL 服务器前提条件 / GmSSL server prerequisites:**
 - GmSSL 服务器通过 `launchd` plist 自动守护运行于后台（单连接模式）

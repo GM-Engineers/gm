@@ -100,6 +100,15 @@ The default SM2 ID ("1234567812345678") is used for signing. For production, ens
 
 ## TLCP Protocol
 
+> **Scope note (gm-tls 0.2.0+)**: TLCP support has been extracted into
+> the standalone [`gm-tlcp`](https://github.com/GM-Engineers/gm/tree/main/gm/gm-tlcp)
+> crate. As of `gm-tls v0.2.0`, this crate implements **TLS 1.3 + SM
+> cipher suites only** and does not handle TLCP directly. The
+> information below is retained as a reference for users who depended
+> on the pre-0.2.0 `gm_tls::tlcp::*` shim. For current TLCP
+> security guidance, see the [`gm-tlcp` SECURITY guidance](../gm-tlcp/README.md)
+> and its own release notes.
+
 ### Dual-Certificate System
 
 TLCP (GB/T 38636-2020) uses a dual-certificate system:
@@ -175,10 +184,15 @@ The following are in scope for our security program:
 - **gm-crypto**: SM2/SM3/SM4 cryptographic implementations, KAT self-tests
 - **gm-sm9-rs**: SM9 identity-based cryptography — signatures, encryption,
   key exchange (pure-Rust + GmSSL FFI dual backend)
-- **gm-tls**: TLS handshake protocol, record layer, session ticket handling,
-  certificate verification, CRL checking
+- **gm-tls**: TLS 1.3 + SM cipher suites (RFC 8446 + GM/T 0024). Handshake,
+  record layer, session ticket handling, certificate verification, CRL
+  checking. **TLCP (GB/T 38636-2020) is NOT in scope of this crate** —
+  see `gm-tlcp` below.
+- **gm-tlcp**: TLCP (GB/T 38636-2020) protocol implementation — handshake
+  state machine, dual-certificate handling, SM2 ECDHE, SM4-GCM/CBC record
+  layer, session resumption, alert protocol
 - **gm-ca**: Certificate authority operations
-- **gm-http-client**: HTTP client with GM/TLS support
+- **gm-http-client**: HTTP client with TLS 1.3 + SM cipher suites
 
 ### Out of Scope
 
@@ -197,6 +211,10 @@ prefer to remain anonymous). We do not currently offer a bug bounty program.
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.1.x   | :white_check_mark: |
+| 0.2.x   | :white_check_mark: |
+| 0.1.x   | :warning:          |
 
-Only the latest release receives security patches.
+Only the latest release receives security patches. `0.1.x` is
+no longer maintained (the TLCP support it shipped has been
+extracted into the standalone `gm-tlcp` crate; please migrate to
+`gm-tls` 0.2.0+ and depend on `gm-tlcp` 0.1.0+ directly).

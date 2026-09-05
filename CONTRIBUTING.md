@@ -1,8 +1,9 @@
 # Contributing to gm
 
 Thank you for your interest in contributing to **gm** — a Rust workspace implementing
-Chinese national cryptography (国密: SM2 / SM3 / SM4 / SM9), TLS 1.3 with the
-TLCP profile, a minimal CA, an HTTP client, and ASN.1 DER tooling.
+Chinese national cryptography (国密: SM2 / SM3 / SM4 / SM9), TLS 1.3 with SM
+cipher suites, the TLCP profile (GB/T 38636-2020) in a separate `gm-tlcp`
+crate, a minimal CA, an HTTP client, and ASN.1 DER tooling.
 
 This document is the bilingual (中文 / English) contribution guide.
 
@@ -37,7 +38,8 @@ By participating, you agree to uphold it.
 | `gm-der` | ASN.1 DER encode/decode for certs & keys |
 | `gm-crypto` | SM2 / SM3 / SM4 implementations + KAT self-tests |
 | `gm-sm9-rs` | SM9 IBE: signatures, encryption, key exchange (pure-Rust + GmSSL FFI). Field & pairing arithmetic live in its internal `arith` / `pairing` modules |
-| `gm-tls` | TLS 1.3 with TLCP; `gm-tls/fuzz` holds cargo-fuzz targets |
+| `gm-tls` | TLS 1.3 + SM cipher suites (RFC 8446 + GM/T 0024). TLCP support lives in `gm-tlcp`. Optional `grpc` feature. `gm-tls/fuzz` holds cargo-fuzz targets. |
+| `gm-tlcp` | TLCP (GB/T 38636-2020) standalone implementation; depends on `gm-crypto >= 0.2` |
 | `gm-ca` | Minimal certificate authority |
 | `gm-http-client` | HTTP client built on `gm-tls` |
 

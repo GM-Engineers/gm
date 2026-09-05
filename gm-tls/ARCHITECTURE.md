@@ -1,27 +1,40 @@
 # gm-tls 架构文档
 
+> **当前范围（gm-tls 0.2.0+）**：本 crate 仅实现 **TLS 1.3 + SM 密码套件**。
+> TLCP（GB/T 38636-2020）已提取到独立的
+> [`gm-tlcp`](../gm-tlcp/README.md) crate。本架构文档仅描述
+> gm-tls 的内部结构。
+
 ## 组件结构
 
 ```
 gm-tls/
-├── src/
-│   ├── lib.rs              # 库入口，公开 API
-│   ├── gm.rs               # 核心握手和消息处理 (~550 行)
-│   ├── record_layer.rs     # TLS 记录层，SM4-GCM 加密/解密
-│   ├── handshake.rs        # 握手状态机和选项
-│   ├── session_ticket.rs   # RFC 5077 会话票证
-│   ├── session_store.rs    # 会话存储抽象 (多后端)
-│   ├── cert_verify.rs      # 证书链验证 + CRL
-│   ├── kdf.rs              # HKDF-SM3 密钥派生
-│   ├── crypto_traits.rs    # 密码学抽象 trait
-│   ├── metrics.rs          # Prometheus 指标
-│   ├── error.rs            # 错误类型定义
-│   └── serialization.rs    # ASN.1 DER 序列化（TLS 1.3 RFC 8446 与 TLCP GB/T 38636-2020 共用）
-├── tests/                  # 测试套件
-│   ├── gm_tls_tests.rs         # 单元测试 (61)
-│   ├── property_tests.rs        # 属性测试 (17)
-│   └── session_store_tests.rs   # 会话存储测试 (23，含 SQLite/PostgreSQL/Redis)
-└── fuzz/                   # 模糊测试
+├── src/                       # TLS 1.3 + SM 实现
+│   ├── lib.rs                  # 库入口，公开 API
+│   ├── gm.rs                   # 核心握手和消息处理 (TLS 1.3 路径)
+│   ├── handshake.rs            # TLS 1.3 握手状态机和选项 (RFC 8446)
+│   ├── record_layer.rs         # TLS 记录层，SM4-GCM 加密/解密 (TLS 1.3)
+│   ├── session_ticket.rs       # RFC 5077 会话票证
+│   ├── session_store.rs        # 会话存储抽象 (多后端)
+│   ├── cert_verify.rs          # 证书链验证 + CRL
+│   ├── kdf.rs                  # HKDF-SM3 密钥派生
+│   ├── crypto_traits.rs        # 密码学抽象 trait
+│   ├── key_update.rs           # TLS 1.3 KeyUpdate (RFC 8446 §5.5)
+│   ├── metrics.rs              # Prometheus 指标
+│   ├── error.rs                # 错误类型定义
+│   ├── der.rs                  # ASN.1 DER 与协议版本常量
+│   ├── audit.rs                # 安全审计事件
+│   ├── grpc.rs                 # 可选 gRPC 服务集成 (`grpc` feature)
+│   └── serialization.rs        # 内部序列化辅助
+├── tests/                     # 集成测试
+│   ├── gm_tls_tests.rs              # 握手 + 记录层主测试套
+│   ├── error_injection_tests.rs     # 错误注入 / 故障注入
+│   ├── key_update_tests.rs          # KeyUpdate 路径
+│   ├── property_tests.rs            # proptest 属性测试
+│   ├── session_store_tests.rs       # In-memory + SQLite session store
+│   ├── gmssl_interop_tests.rs       # 与 GmSSL tls13_server 互操作
+│   └── (集成 + 单元合计约 175 个测试)
+└── fuzz/                      # 模糊测试
     └── fuzz_targets/
         ├── tls_record_parse.rs    # TLS 记录解析
         ├── cert_parse.rs          # 证书解析

@@ -101,6 +101,13 @@ let signer = Sm2Signer::new(&keypair)?;
 
 ## TLCP 协议
 
+> **范围说明（gm-tls 0.2.0+）**：TLCP 支持已提取到独立的
+> [`gm-tlcp`](https://github.com/GM-Engineers/gm/tree/main/gm/gm-tlcp)
+> crate。从 `gm-tls v0.2.0` 开始，本 crate 仅实现 **TLS 1.3 + SM 密码套件**，
+> 不再直接处理 TLCP。下面信息保留供仍依赖 pre-0.2.0 `gm_tls::tlcp::*`
+> shim 的用户参考。当前 TLCP 安全指引见
+> [`gm-tlcp` README](../gm-tlcp/README.md) 及其发布说明。
+
 ### 双证书体系
 
 TLCP（GB/T 38636-2020）采用双证书体系：
@@ -169,9 +176,10 @@ TLCP 会话恢复使用会话 ID（而非 TLS 1.3 中的会话票据）。会话
 - **gm-der**：证书与密钥的 ASN.1 DER 编解码
 - **gm-crypto**：SM2/SM3/SM4 密码学实现、KAT 自检测试
 - **gm-sm9-rs**：SM9 标识密码算法——签名、加密、密钥交换（纯 Rust + GmSSL FFI 双后端）
-- **gm-tls**：TLS 握手协议、记录层、会话票据处理、证书验证、CRL 检查
+- **gm-tls**：TLS 1.3 + SM 密码套件（RFC 8446 + GM/T 0024），含握手、记录层、会话票据处理、证书验证、CRL 检查。**TLCP（GB/T 38636-2020）不属于本 crate 范围**——见下方 `gm-tlcp`。
+- **gm-tlcp**：TLCP（GB/T 38636-2020）协议实现——握手状态机、双证书处理、SM2 ECDHE、SM4-GCM/CBC 记录层、会话恢复、Alert 协议
 - **gm-ca**：证书颁发机构操作
-- **gm-http-client**：支持 GM/TLS 的 HTTP 客户端
+- **gm-http-client**：支持 TLS 1.3 + SM 密码套件的 HTTP 客户端
 
 ### 不在范围内
 
@@ -188,6 +196,7 @@ TLCP 会话恢复使用会话 ID（而非 TLS 1.3 中的会话票据）。会话
 
 | 版本 | 是否支持 |
 |------|---------|
-| 0.1.x | :white_check_mark: |
+| 0.2.x | :white_check_mark: |
+| 0.1.x | :warning: |
 
-仅最新发布版本接收安全补丁。
+仅最新发布版本接收安全补丁。`0.1.x` 已不再维护（其内置的 TLCP 支持已提取到独立的 `gm-tlcp` crate；请迁移到 `gm-tls` 0.2.0+ 并直接依赖 `gm-tlcp` 0.1.0+）。

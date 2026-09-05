@@ -1,23 +1,25 @@
 # gm-tls
 
-GM/TLS Core Library — Pure Rust implementation supporting SM2/SM3/SM4 algorithms.
+TLS 1.3 core library with SM (国密) cipher suites — pure Rust implementation supporting SM2/SM3/SM4 algorithms. TLCP (GB/T 38636-2020) has been extracted into the standalone [`gm-tlcp`](https://crates.io/crates/gm-tlcp) crate.
 
 **[中文版](./README.md)**
 
 ## Overview
 
-gm-tls is a Rust library for GM/TLS protocol implementation, providing:
+gm-tls is a Rust library for **TLS 1.3 + SM cipher suites** implementation, providing:
 
 - **SM2** elliptic curve key generation, signing, and verification
 - **SM3** hash algorithm and KDF key derivation
 - **SM4-GCM** symmetric encryption (with authentication)
 - **mTLS** mutual authentication handshake flow
 
+**Note**: This crate implements **TLS 1.3 + SM cipher suites only**. TLCP (GB/T 38636-2020, the Chinese national standard for transport-layer cryptographic protocol) is a **separate protocol** that has been extracted into the standalone [`gm-tlcp`](https://crates.io/crates/gm-tlcp) crate with independent dependencies and API surface.
+
 ## Documentation
 
-- [Quick Start Guide](./README.md) (this file)
 - [Architecture Documentation](./ARCHITECTURE.md) - Component structure and design
 - [Security Guide](./SECURITY.md) - Security best practices
+- TLCP protocol: [`gm-tlcp` documentation](https://docs.rs/gm-tlcp) or repo [docs/gm-tlcp.en.md](../docs/gm-tlcp.en.md)
 
 ### Test Coverage
 
@@ -87,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 This library follows semantic versioning, with API stability maintained between major versions.
 
-Current version: v0.1.0
+Current version: v0.2.0
 
 ### Stable API
 
