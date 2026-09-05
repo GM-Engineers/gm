@@ -4,7 +4,19 @@ All notable changes to the GM cryptographic library suite.
 
 ## [Unreleased]
 
-_No pending changes._
+### Changed
+
+- **Dependabot (`ci(dependabot): ignore major bumps`)** — added
+  `ignore:` entries in `.github/dependabot.yml` for `redis >= 0.27`,
+  `deadpool-redis >= 0.18`, and `rand_core >= 0.7`. The bumps cross
+  more than one minor and touch either cryptographic RNG paths
+  (`rand_core`, used in `gm-crypto` / `gm-tls` / `gm-tlcp` for
+  handshake random, SM2 ephemeral keygen, IVs / nonces, PMS) or the
+  `redis-rs` API surface (`redis` 0.27 was a major break). Each is
+  bumped manually in a dedicated PR with KAT / interop regression
+  evidence. PRs #24 / #25 / #26 (the weekly Dependabot bumps that
+  failed CI for these reasons) are auto-closed by Dependabot when
+  this change reaches `main`.
 
 ## [0.3.0] - 2026-09-05
 
