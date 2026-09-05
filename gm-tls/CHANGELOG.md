@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **`bincode` dependency** (was flagged unmaintained, see
+  [RUSTSEC-2025-0141](https://rustsec.org/advisories/RUSTSEC-2025-0141)).
+  Replaced by [`postcard`](https://crates.io/crates/postcard) for
+  in-process session-ticket serialization. No public API change;
+  the swap is transparent to consumers.
+
 ### Changed
 
 - **BREAKING**: TLCP support has been removed from `gm-tls` and now lives
