@@ -165,11 +165,35 @@ updates:
           - "patch"
     # Temporarily ignore versions known to require SemVer-major-style code
     # adaptation. Re-evaluate when upstream stabilises.
+    #
+    # The entries below are intentionally coarse: dependabot's job is to flag
+    # upstream releases, but upgrades that cross more than one minor (or that
+    # touch cryptographic RNG / network-protocol surface) need a dedicated PR
+    # with KAT/interop regression evidence, not a one-line Cargo.toml bump.
+    # Re-evaluate each entry when the upstream API stabilises or when the
+    # affected call sites are refactored.
     ignore:
       - dependency-name: "redis"
-        # 0.26 → 1.x is a major break; redis-rs API was rewritten.
+        # 0.26 → 0.27 was a major API break (ConnectionLike / AsyncCommands
+        # rewritten). 0.27 → 0.32 accumulated further changes. Bump manually
+        # together with deadpool-redis in a focused gm-tls PR.
         versions:
+          - ">=0.27.0, <1.0.0"
           - ">=1.0.0, <2.0.0"
+      - dependency-name: "deadpool-redis"
+        # Tracks the redis-rs API; bumps land in lockstep with redis itself.
+        # Touches only gm-tls (gRPC session-cache backend). Bump manually.
+        versions:
+          - ">=0.18.0"
+      - dependency-name: "rand_core"
+        # 0.6 → 0.10 spans four minors (0.7 / 0.8 / 0.9 / 0.10), each with
+        # breaking changes to RngCore (notably 0.9's switch to fallible
+        # try_fill_bytes and the deprecation of the infallible fill_bytes path).
+        # Used across gm-crypto / gm-tls / gm-tlcp on security-critical RNG
+        # paths (handshake random, SM2 ephemeral keygen, IVs/nonces, PMS).
+        # Bump manually with KAT regression.
+        versions:
+          - ">=0.7.0"
       - dependency-name: "tokio"
         # Avoid surprise MSRV bumps; bump manually.
         versions:
