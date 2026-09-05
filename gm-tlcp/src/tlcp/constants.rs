@@ -15,6 +15,33 @@
 //! | `MAX_TLCP_RECORD_SIZE` | wire protocol limit (TLCP record fragment cap) |
 //! | `TLCP_EC_CURVE_TYPE_NAMED_CURVE`, `TLCP_NAMED_CURVE_SM2P256V1`, `TLCP_ECH_PARAMS_PREFIX`, `SM2_UNCOMPRESSED_PUBLIC_KEY_LENGTH` | ECDHE parameter encoding (RFC 4492 §5.4) |
 //! | `MAX_SESSION_ID_LEN`, `DEFAULT_SESSION_LIFETIME`, `MAX_CACHED_SESSIONS` | session-cache tuning; could live with [`crate::tlcp::session`] but kept here to centralize tunable values |
+//!
+//! ## Naming convention
+//!
+//! Three prefix styles appear in this file — intentional, not a slip:
+//!
+//! - **`TLS_*`** — cipher-suite code points (`0xE011`, `0xE013`,
+//!   `0xE051`, `0xE053`). These names were first defined by
+//!   **GM/T 0024-2014《SSL VPN 技术规范》** (which predates TLCP),
+//!   following the TLS 1.0/1.1-era `TLS_*_WITH_*` naming habit
+//!   (cf. IANA TLS cipher-suite registry). GB/T 38636-2020 §6.4.5.2.1
+//!   表 2 inherits the code points unchanged; GmSSL and Tongsuo use
+//!   the same names. The `TLS_` prefix is preserved so wire-format
+//!   IDs stay visually aligned with peer implementations during
+//!   interop testing — renaming would not change a single byte on
+//!   the wire, but would make diff-with-peer trace logs harder to
+//!   read.
+//!
+//! - **`TLCP_*`** — values defined by TLCP itself: the protocol
+//!   version, record-size cap, EC curve type / named-curve code,
+//!   and the ECParameters header prefix.
+//!
+//! - **No prefix** (or `MAX_*` / `DEFAULT_*`) — non-wire tunables:
+//!   session-cache limits and lifetimes, SM2 public-key length.
+//!
+//! The per-constant doc comments on `TLS_ECDHE_SM4_CBC_SM3` and
+//! `TLS_ECC_SM4_CBC_SM3` already carry the explicit
+//! "Inherited unchanged from GM/T 0024-2014" note.
 
 use std::time::Duration;
 
