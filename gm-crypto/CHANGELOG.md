@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-07
+
+### Added
+
+- **`Sm2EcdhKeypair::private_key_bytes()`** —
+  ([`src/sm2.rs`](src/sm2.rs)).
+  Returns the 32-byte big-endian scalar of the raw ECDH keypair's
+  private key as `Vec<u8>`. This is the input that the SM2 Key
+  Agreement Protocol (GB/T 32918.3-2016 §6.1 B4 / GM/T 0003.3-2012 §6.1)
+  needs when computing the per-ephemeral `k_A` (initiator) /
+  `k_B` (responder) term in the `V = k_A · R_B` step. The new method
+  exposes the scalar without dragging in any of the internal `Scalar`
+  machinery, keeping the public API stable for callers that just need
+  the bytes to feed into a KAP call.
+
+  Required by the `tlcp-strict` server-side ECDHE PMS fix in
+  `gm-tlcp 0.2.2` (audit C-3, originally landed in `gm-tlcp 0.2.1`
+  but only now consumable from crates.io because of the matching
+  `gm-crypto` version bump).
+
+### Compatibility
+
+This release adds new APIs only; no existing API has been changed or
+removed. Fully backwards-compatible with the 0.2.x series.
+
 ## [0.2.0] - 2026-09-04
 
 ### Added
@@ -53,4 +78,5 @@ removed. The crate's public surface is fully backwards-compatible with
 the 0.1.x series.
 
 [Unreleased]: https://github.com/GM-Engineers/gm/compare/main...HEAD
+[0.3.0]: https://github.com/GM-Engineers/gm/compare/gm-crypto-v0.2.0...gm-crypto-v0.3.0
 [0.2.0]: https://github.com/GM-Engineers/gm/releases/tag/gm-crypto-v0.2.0

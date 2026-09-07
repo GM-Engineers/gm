@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-09-07
+
+### Changed
+
+- **Dependency bump**: \`gm-crypto\` requirement relaxed from
+  \`0.2.0\` to \`0.3\` (caret range). Required so that the
+  \`tlcp-strict\` ECDHE PMS code path can access the new
+  \`Sm2EcdhKeypair::private_key_bytes()\` method that landed in
+  \`gm-crypto 0.3.0\`. No public API change in this crate. Fully
+  backwards-compatible: the default-mode wire path still works
+  against \`gm-crypto 0.2.x\` if a downstream user pins to it,
+  because \`compute_tlcp_ecdhe_pms\` is only reachable from the
+  \`tlcp-strict\` feature flag which compiles fine on either
+  version.
+
+  Build/runtime effect for crates.io consumers:
+    - Old: \`gm-tlcp 0.2.1\` pulled in \`gm-crypto 0.2.0\`; strict
+      mode would compile but \`private_key_bytes()\` was missing
+      from the published \`gm-crypto 0.2.0\`, so strict mode was
+      effectively broken for crates.io consumers.
+    - New: \`gm-tlcp 0.2.2\` pulls in \`gm-crypto >= 0.3\`, and
+      \`gm-crypto 0.3.0\` provides \`private_key_bytes()\`. Strict
+      mode now works end-to-end from crates.io.
+
 ## [0.2.1] - 2026-09-07
 
 ### Fixed
@@ -74,6 +98,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accidentally pushed to a public mirror.
 
 [Unreleased]: https://github.com/GM-Engineers/gm/compare/main...HEAD
+[0.2.2]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.2.1...gm-tlcp-v0.2.2
 [0.2.1]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.2.0...gm-tlcp-v0.2.1
 [0.2.0]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.1.0...gm-tlcp-v0.2.0
 [0.1.0]: https://github.com/GM-Engineers/gm/releases/tag/gm-tlcp-v0.1.0
