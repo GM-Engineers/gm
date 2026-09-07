@@ -1549,9 +1549,9 @@ impl TlcpConnector {
 
         let ske_body: Vec<u8> = if need_ske {
             // Step 4: Read ServerKeyExchange
-            let (_ct, ske_payload) = read_plaintext_record(&mut io)
-                .await
-                .map_err(|e| TlcpError::HandshakeFailed(format!("read ServerKeyExchange: {}", e)))?;
+            let (_ct, ske_payload) = read_plaintext_record(&mut io).await.map_err(|e| {
+                TlcpError::HandshakeFailed(format!("read ServerKeyExchange: {}", e))
+            })?;
             let (ske_type, body, _rem) = parse_handshake_message(&ske_payload)?;
             if ske_type != HandshakeType::ServerKeyExchange {
                 return Err(TlcpError::HandshakeFailed(format!(
@@ -1638,9 +1638,9 @@ impl TlcpConnector {
         #[cfg(feature = "tlcp-strict")]
         {
             if !shd_already_consumed {
-                let (_ct, shd_payload) = read_plaintext_record(&mut io)
-                    .await
-                    .map_err(|e| TlcpError::HandshakeFailed(format!("read ServerHelloDone: {}", e)))?;
+                let (_ct, shd_payload) = read_plaintext_record(&mut io).await.map_err(|e| {
+                    TlcpError::HandshakeFailed(format!("read ServerHelloDone: {}", e))
+                })?;
                 let (shd_type, _shd_body, _rem) = parse_handshake_message(&shd_payload)?;
                 if shd_type != HandshakeType::ServerHelloDone {
                     return Err(TlcpError::HandshakeFailed(format!(
@@ -2017,11 +2017,9 @@ impl TlcpConnector {
                 .client_sign_distid
                 .as_deref()
                 .unwrap_or(gm_crypto::sm2::GM_TLS_DEFAULT_ID);
-            let client_signer = gm_crypto::sm2::Sm2Signer::new_with_distid(
-                &client_kp,
-                client_sign_distid,
-            )
-            .map_err(|e| TlcpError::HandshakeFailed(format!("client signer: {:?}", e)))?;
+            let client_signer =
+                gm_crypto::sm2::Sm2Signer::new_with_distid(&client_kp, client_sign_distid)
+                    .map_err(|e| TlcpError::HandshakeFailed(format!("client signer: {:?}", e)))?;
             let signature: [u8; 64] = client_signer
                 .sign(&client_hs.transcript)
                 .map_err(|e| TlcpError::HandshakeFailed(format!("CV sign: {:?}", e)))?
@@ -2344,8 +2342,29 @@ impl TlcpAcceptor {
         // at step 8 (see below). A future PR will add the SM2-decrypt path.
         // In default mode we keep emitting SKE for ALL suites to preserve
         // GmSSL/Tongsuo interop, even though that's a deviation from spec.
-        let server_ephemeral_kp_opt: Option<gm_crypto::sm2::Sm2EcdhKeypair> =
-            if suite.ecdhe {
+        let server_ephemeral_kp_opt: Option<gm_crypto::sm2::Sm2EcdhKeypair> = if suite.ecdhe {
+            let sign_signer = gm_crypto::sm2::Sm2Signer::new(&sign_kp)
+                .map_err(|e| TlcpError::HandshakeFailed(format!("sign signer: {}", e)))?;
+            let (ske, kp) =
+                TlcpServerKeyExchange::generate(&client_random, &server_random, &sign_signer)?;
+            let ske_bytes = ske.to_bytes();
+            write_handshake_record(&mut io, &ske_bytes)
+                .await
+                .map_err(|e| {
+                    TlcpError::HandshakeFailed(format!("write ServerKeyExchange: {}", e))
+                })?;
+            server_hs.transcript.extend_from_slice(&ske_bytes);
+            Some(kp)
+        } else {
+            #[cfg(feature = "tlcp-strict")]
+            {
+                // Strict mode + static-ECC: no SKE per RFC 5246 §7.4.3.
+                None
+            }
+            #[cfg(not(feature = "tlcp-strict"))]
+            {
+                // Default mode + static-ECC: emit SKE for GmSSL interop
+                // (GmSSL master does the same and accepts it).
                 let sign_signer = gm_crypto::sm2::Sm2Signer::new(&sign_kp)
                     .map_err(|e| TlcpError::HandshakeFailed(format!("sign signer: {}", e)))?;
                 let (ske, kp) =
@@ -2353,31 +2372,13 @@ impl TlcpAcceptor {
                 let ske_bytes = ske.to_bytes();
                 write_handshake_record(&mut io, &ske_bytes)
                     .await
-                    .map_err(|e| TlcpError::HandshakeFailed(format!("write ServerKeyExchange: {}", e)))?;
+                    .map_err(|e| {
+                        TlcpError::HandshakeFailed(format!("write ServerKeyExchange: {}", e))
+                    })?;
                 server_hs.transcript.extend_from_slice(&ske_bytes);
                 Some(kp)
-            } else {
-                #[cfg(feature = "tlcp-strict")]
-                {
-                    // Strict mode + static-ECC: no SKE per RFC 5246 §7.4.3.
-                    None
-                }
-                #[cfg(not(feature = "tlcp-strict"))]
-                {
-                    // Default mode + static-ECC: emit SKE for GmSSL interop
-                    // (GmSSL master does the same and accepts it).
-                    let sign_signer = gm_crypto::sm2::Sm2Signer::new(&sign_kp)
-                        .map_err(|e| TlcpError::HandshakeFailed(format!("sign signer: {}", e)))?;
-                    let (ske, kp) =
-                        TlcpServerKeyExchange::generate(&client_random, &server_random, &sign_signer)?;
-                    let ske_bytes = ske.to_bytes();
-                    write_handshake_record(&mut io, &ske_bytes)
-                        .await
-                        .map_err(|e| TlcpError::HandshakeFailed(format!("write ServerKeyExchange: {}", e)))?;
-                    server_hs.transcript.extend_from_slice(&ske_bytes);
-                    Some(kp)
-                }
-            };
+            }
+        };
         // Step 6: Send ServerHelloDone
         let shd = TlcpServerHelloDone;
         let shd_bytes = shd.to_bytes();
@@ -2416,9 +2417,9 @@ impl TlcpAcceptor {
             )
         })?;
         let pms = match server_ephemeral_kp_opt {
-            Some(kp) => kp.compute_shared_secret(peer_pub).map_err(|e| {
-                TlcpError::HandshakeFailed(format!("ECDHE shared secret: {}", e))
-            })?,
+            Some(kp) => kp
+                .compute_shared_secret(peer_pub)
+                .map_err(|e| TlcpError::HandshakeFailed(format!("ECDHE shared secret: {}", e)))?,
             None => {
                 #[cfg(feature = "tlcp-strict")]
                 {

@@ -177,8 +177,8 @@ mod tests {
             data.push(0);
             data.extend_from_slice(&suite);
             data.push(0x00);
-            let parsed =
-                TlcpServerHello::from_bytes(&data).unwrap_or_else(|e| panic!("suite {:?}: {}", suite, e));
+            let parsed = TlcpServerHello::from_bytes(&data)
+                .unwrap_or_else(|e| panic!("suite {:?}: {}", suite, e));
             assert_eq!(parsed.cipher_suite, suite);
         }
     }
