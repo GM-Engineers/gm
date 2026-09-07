@@ -57,8 +57,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client_sign_key_pem_path = args.get(7).cloned();
     let client_enc_key_pem_path = args.get(8).cloned();
     let has_client_certs = matches!(
-        (client_sign_der.as_ref(), client_enc_der.as_ref(),
-         client_sign_key_pem_path.as_ref(), client_enc_key_pem_path.as_ref()),
+        (
+            client_sign_der.as_ref(),
+            client_enc_der.as_ref(),
+            client_sign_key_pem_path.as_ref(),
+            client_enc_key_pem_path.as_ref()
+        ),
         (Some(_), Some(_), Some(_), Some(_))
     );
 
@@ -97,18 +101,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let enc_der_path = client_enc_der.expect("checked above");
         let sign_key_path = client_sign_key_pem_path.expect("checked above");
         let enc_key_path = client_enc_key_pem_path.expect("checked above");
-        let sign_der = std::fs::read(&sign_der_path).map_err(|e| {
-            format!("read client sign cert DER {}: {}", sign_der_path, e)
-        })?;
-        let enc_der = std::fs::read(&enc_der_path).map_err(|e| {
-            format!("read client enc cert DER {}: {}", enc_der_path, e)
-        })?;
-        let sign_key_pem = std::fs::read_to_string(&sign_key_path).map_err(|e| {
-            format!("read client sign key PEM {}: {}", sign_key_path, e)
-        })?;
-        let enc_key_pem = std::fs::read_to_string(&enc_key_path).map_err(|e| {
-            format!("read client enc key PEM {}: {}", enc_key_path, e)
-        })?;
+        let sign_der = std::fs::read(&sign_der_path)
+            .map_err(|e| format!("read client sign cert DER {}: {}", sign_der_path, e))?;
+        let enc_der = std::fs::read(&enc_der_path)
+            .map_err(|e| format!("read client enc cert DER {}: {}", enc_der_path, e))?;
+        let sign_key_pem = std::fs::read_to_string(&sign_key_path)
+            .map_err(|e| format!("read client sign key PEM {}: {}", sign_key_path, e))?;
+        let enc_key_pem = std::fs::read_to_string(&enc_key_path)
+            .map_err(|e| format!("read client enc key PEM {}: {}", enc_key_path, e))?;
         eprintln!(
             "[client] client certs: sign {}B, enc {}B; sign+enc keys loaded",
             sign_der.len(),

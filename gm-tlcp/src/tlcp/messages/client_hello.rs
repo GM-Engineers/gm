@@ -232,7 +232,13 @@ mod tests {
         let delta = now.abs_diff(bytes);
         // Allow 1 hour of clock skew; covers leap-second hiccups and
         // test-runners with stale clocks.
-        assert!(delta <= 3600, "random[0..4] = {} differs from now = {} by {}", bytes, now, delta);
+        assert!(
+            delta <= 3600,
+            "random[0..4] = {} differs from now = {} by {}",
+            bytes,
+            now,
+            delta
+        );
     }
 
     // m-4: compression_methods must contain only 0x00.

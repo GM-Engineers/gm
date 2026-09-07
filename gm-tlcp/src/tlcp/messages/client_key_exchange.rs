@@ -214,9 +214,7 @@ mod tests {
         // HS header: 4 bytes. After that: uint16 payload_len = 69.
         assert_eq!(bytes.len(), 4 + 2 + ECDHE_BODY_LEN);
         assert_eq!(bytes[0], HandshakeType::ClientKeyExchange as u8);
-        let hs_len = ((bytes[1] as usize) << 16)
-            | ((bytes[2] as usize) << 8)
-            | (bytes[3] as usize);
+        let hs_len = ((bytes[1] as usize) << 16) | ((bytes[2] as usize) << 8) | (bytes[3] as usize);
         assert_eq!(hs_len, 2 + ECDHE_BODY_LEN, "HS length covers uint16 + body");
         // uint16 prefix
         assert_eq!(&bytes[4..6], &(ECDHE_BODY_LEN as u16).to_be_bytes());
@@ -257,9 +255,7 @@ mod tests {
         // Total: 4-byte HS header + body (no 2-byte prefix).
         assert_eq!(bytes.len(), 4 + ECDHE_BODY_LEN);
         assert_eq!(bytes[0], HandshakeType::ClientKeyExchange as u8);
-        let hs_len = ((bytes[1] as usize) << 16)
-            | ((bytes[2] as usize) << 8)
-            | (bytes[3] as usize);
+        let hs_len = ((bytes[1] as usize) << 16) | ((bytes[2] as usize) << 8) | (bytes[3] as usize);
         assert_eq!(
             hs_len, ECDHE_BODY_LEN,
             "HS length covers body only (no uint16 prefix)"
