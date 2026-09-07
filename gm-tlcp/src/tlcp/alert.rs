@@ -2,14 +2,13 @@
 //!
 //! Alerts carry a 1-byte level (`Warning` or `Fatal`) and a 1-byte
 //! description code. The single wire-format record is exactly
-//! `[level, description]` (2 bytes total) inside a HANDSHAKE-type
-//! record (per GmSSL's `tls_send_alert`).
-//!
-//! GB/T 38636-2020 §6.4.5.2.1 specifies that the alert *record* uses
-//! the HANDSHAKE content type, not the alert content type that some
-//! other implementations expect. This is one of the spots where
-//! early GmSSL versions had a wire-level bug; the current master
-//! (`3.3.0-dev.1183+`) is correct.
+//! `[level, description]` (2 bytes total) inside an **ALERT**-type
+//! record (content type 0x15), per RFC 5246 §7.2 /
+//! GB/T 38636-2020 §6.2.2.1 — identical to TLS 1.2. Early GmSSL
+//! releases incorrectly framed alerts with the HANDSHAKE content
+//! type (0x16); the current GmSSL master (3.3.0-dev.1183+) is
+//! correct and uses the ALERT content type, matching openHiTLS /
+//! Tongsuo. Audit D-1.
 
 use crate::error::TlcpError;
 

@@ -130,7 +130,6 @@ impl TlcpHandshake {
             session_id: self.session_id.clone(),
             cipher_suites: self.cipher_suites.clone(),
             compression_methods: vec![0x00],
-            sm2_ephemeral_public: None,
         })
     }
 

@@ -39,7 +39,9 @@ impl TlcpServerHandshake {
     /// Create a new server-side handshake context
     pub fn new() -> Result<Self, TlcpError> {
         let mut random = [0u8; 32];
-        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut random);
+        let gmt = crate::tlcp::constants::current_gmt_unix_time();
+        random[0..4].copy_from_slice(&gmt.to_be_bytes());
+        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut random[4..]);
 
         Ok(Self {
             state: TlcpHandshakeState::Idle,
@@ -63,7 +65,9 @@ impl TlcpServerHandshake {
     /// that matches a cached session, the server can skip the full handshake.
     pub fn with_session_cache(cache: TlcpSessionCache) -> Result<Self, TlcpError> {
         let mut random = [0u8; 32];
-        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut random);
+        let gmt = crate::tlcp::constants::current_gmt_unix_time();
+        random[0..4].copy_from_slice(&gmt.to_be_bytes());
+        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut random[4..]);
 
         Ok(Self {
             state: TlcpHandshakeState::Idle,
@@ -179,7 +183,6 @@ impl TlcpServerHandshake {
             session_id: self.session_id.clone(),
             cipher_suite: suite.id,
             compression_method: 0x00,
-            sm2_ephemeral_public: None, // Set by key exchange
         })
     }
 

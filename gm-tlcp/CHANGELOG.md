@@ -7,6 +7,133 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Dead SM2-ephemeral-key field removed from `TlcpClientHello` / `TlcpServerHello`**
+  ([messages/client_hello.rs](src/tlcp/messages/client_hello.rs),
+  [messages/server_hello.rs](src/tlcp/messages/server_hello.rs),
+  [handshake/client.rs](src/tlcp/handshake/client.rs),
+  [handshake/server.rs](src/tlcp/handshake/server.rs)).
+  Audit finding **M-1** in [`interop/AUDIT-2026-09-06.md`](interop/AUDIT-2026-09-06.md):
+  the `sm2_ephemeral_public` field, the `with_ephemeral_key()` setter, and the
+  in-parser that consumed the standard `extensions_length` as an SM2-key length
+  were unreachable code. The TLCP spec defines no Hello-extension semantics;
+  the previous code silently mis-parsed any peer that sent real extensions
+  (e.g. `extended_master_secret`). The new code silently ignores trailing
+  bytes after the compression-methods block, matching GmSSL/Tongsuo behaviour.
+  This is a **public-API breaking change** but has no in-tree callers.
+
+### Added
+
+- **Cargo feature flag `tlcp-strict`** (no behaviour change in default mode).
+  When enabled, gm-tlcp emits and accepts the strict GB/T 38636-2020 wire
+  format on the parts of the handshake where the deployed GmSSL/Tongsuo
+  ecosystem diverges from the spec (currently: audit findings **C-1** for
+  ECDHE `ClientKeyExchange` length prefix, **C-2** for static-ECC
+  `ServerKeyExchange`). The default (no feature) preserves byte-for-byte
+  interop with GmSSL master and Tongsuo NTLS. The cfg-gated logic for C-1
+  and C-2 will land in the next minor release.
+
+- **C-1 fix behind feature `tlcp-strict`** (no behaviour change in default
+  mode). Audit finding **C-1** in [`interop/AUDIT-2026-09-06.md`](interop/AUDIT-2026-09-06.md):
+  gm-tlcp's ECDHE `ClientKeyExchange` body used a non-standard 16-bit
+  length prefix to match GmSSL 2026-06+ master (`tls_uint16array_to_bytes`),
+  which broke interop with standards-strict peers like openHiTLS (alert
+  *Decode Error*). When `tlcp-strict` is enabled, the prefix is omitted
+  on the encoder side and not consumed on the decoder side, matching
+  RFC 5246 §7.4.7 / GB/T 38636-2020 §6.4.1.6. Verified against openHiTLS
+  `s_server -tlcp` (Docker, `tlcp-bin/`): the strict-mode client
+  successfully progresses past the CKE step where the default-mode client
+  was rejected. New cfg-gated unit tests (`tests` mod in
+  [messages/client_key_exchange.rs](src/tlcp/messages/client_key_exchange.rs))
+  assert exact wire bytes in both modes.
+
+- **C-2 fix behind feature `tlcp-strict`** (no behaviour change in default
+  mode). Audit finding **C-2** in [`interop/AUDIT-2026-09-06.md`](interop/AUDIT-2026-09-06.md):
+  gm-tlcp unconditionally emitted and read `ServerKeyExchange` regardless
+  of suite type, while standards-strict peers omit SKE for static-ECC
+  suites (RFC 5246 §7.4.3 / GB/T 38636-2020 §6.4.1.5). Under `tlcp-strict`:
+  - The client skips the SKE read+verify block entirely for static-ECC
+    suites (`suite.ecdhe == false`) and tracks whether `ServerHelloDone`
+    was already consumed in step 5.5 so step 6 doesn't hang waiting for
+    a record the standards-strict server doesn't send.
+  - The server skips the SKE generate+emit block for static-ECC suites
+    and returns an explicit `"strict-mode server-side static-ECC PMS
+    decryption is not implemented"` error if a static-ECC client connects
+    (the static-ECC server PMS-decrypt path is tracked separately).
+  Verified against openHiTLS `s_server -tlcp` for the e013 suite: the
+  strict-mode client now progresses past the previous step-6 hang and
+  reaches the Finished stage (the remaining `Decrypt Error` on Finished
+  is a downstream PMS/distid issue tracked as **M-3**). In default mode
+  the historical "always read SKE, fall through" behaviour is kept for
+  GmSSL/Tongsuo interop.
+
+- **M-3 partial: configurable SM2 distid for ECDHE PMS and CV
+  signature** (no behaviour change when defaults are used). Audit
+  finding **M-3** in [`interop/AUDIT-2026-09-06.md`](interop/AUDIT-2026-09-06.md):
+  the SM2 `distid` was hard-coded to `"1234567812345678"` at the
+  Z-value computation site (`mod.rs:1846`) and the CV self-verify site
+  (`mod.rs:1929`). Three new builder methods on `TlcpConnector`:
+  - `with_server_enc_distid(distid)` — `Z_server` in ECDHE PMS
+  - `with_client_enc_distid(distid)` — `Z_client` in ECDHE PMS
+  - `with_client_sign_distid(distid)` — `Z_client` for CV signature
+  When unset, all three fall back to `"1234567812345678"` (the GmSSL /
+  Tongsuo / openHiTLS convention), so existing GmSSL interop is
+  preserved. CV signing now uses `Sm2Signer::new_with_distid` with the
+  configured distid (instead of `Sm2Signer::new` which hard-codes the
+  PEM-loader's default), and the CV self-verify step uses the same
+  distid for consistency. New unit tests in
+  [mod.rs `tests` mod](src/tlcp/mod.rs) cover default-None, custom
+  values, and the empty-string-is-distinct-from-None invariant.
+  Verified by `cargo test --lib` (64/64 pass) in both default and
+  strict modes. Note: PR4 fixes the *configuration* surface; the
+  *root cause* of the openHiTLS `Decrypt Error (51)` on Finished
+  remains an open interop issue under investigation (x̂ transform
+  alignment between gm-tlcp and openHiTLS' SM2 key-agreement) and is
+  tracked separately as a follow-up.
+
+- **m-1, m-3, m-4, m-5, m-6, D-1, D-2 fixes** (audit cleanup, no
+  behaviour change for spec-compliant peers). Audit findings
+  **m-1** through **m-6** plus **D-1** and **D-2** in
+  [`interop/AUDIT-2026-09-06.md`](interop/AUDIT-2026-09-06.md):
+  - **m-1**: `ClientHello::new()` and the server-side handshake
+    constructors now set the first 4 bytes of `random` to the
+    current GMT Unix time per RFC 5246 §7.4.1.2 (helper
+    `tlcp::constants::current_gmt_unix_time()`).
+  - **m-3**: removed the stale `#[allow(dead_code)]` on
+    `TLCP_RECORD_TYPE_CCS` (it has always been used by the
+    handshake state machine; the attribute was a historical
+    leftover).
+  - **m-4**: `TlcpClientHello::from_body` now rejects non-null
+    `compression_methods` per GB/T 38636-2020 §6.4.1.1 (TLCP only
+    supports 0x00).
+  - **m-5**: `TlcpServerHello::from_bytes` now rejects unknown
+    `cipher_suite` IDs and non-null `compression_method`. The
+    four TLCP suites are enumerated explicitly with a clear error
+    message.
+  - **m-6**: `TlcpClientHello::from_body` now enforces
+    `session_id_len <= MAX_SESSION_ID_LEN` (32) per
+    GB/T 38636-2020 §6.4.1.1.
+  - **D-1**: rewrote the `tlcp/alert.rs` module doc to remove the
+    internal contradiction (the old text said "specifies
+    HANDSHAKE content type, not alert content type" and then
+    "the current master is correct" — but the code at
+    `mod.rs:162` and the actual GB/T 38636-2020 §6.2.2.1 both
+    confirm the standard uses ALERT content type 0x15, identical
+    to RFC 5246 §7.2 and to current GmSSL master).
+  - **D-2**: added a top-level "Limitations and interop
+    boundaries" section to
+    [mod.rs](src/tlcp/mod.rs) that enumerates the six divergences
+    between default and strict modes in a table (CKE prefix,
+    SKE-for-static-ECC, distid, GMT-time random, compression /
+    cipher-suite validation, session_id_len cap), and tells
+    production callers which mode to pick for GmSSL vs
+    openHiTLS / Tongsuo, and warns that running gm-tlcp as a
+    server for static-ECC suites is not yet supported.
+  - 8 new unit tests in the message-parser `tests` mods cover
+    the m-1, m-4, m-5, m-6 changes. Verified by `cargo test
+    --lib` (72/72 pass) in both default and strict modes.
+
 ## [0.1.0] - 2026-09-04
 
 First standalone release of `gm-tlcp`, extracted from `gm-tls`.

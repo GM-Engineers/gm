@@ -76,6 +76,20 @@ metrics = "0.23"
 [features]
 default = []
 
+# Strict GB/T 38636-2020 conformance mode.
+#
+# When enabled, gm-tlcp emits and accepts ONLY the standard-conformant
+# wire format on the parts of the handshake where the deployed GmSSL/Tongsuo
+# ecosystem diverges from the spec (currently: ECDHE ClientKeyExchange
+# length prefix, static-ECC ServerKeyExchange handling). The default
+# (no feature) preserves byte-for-byte interop with GmSSL master and
+# Tongsuo NTLS, which is the project's primary deployment target.
+#
+# Audit references: gm-tlcp/interop/AUDIT-2026-09-06.md
+#   C-1 — ClientKeyExchange: GmSSL-specific `uint16` length prefix
+#   C-2 — ServerKeyExchange: unconditional emit/expect on static-ECC
+tlcp-strict = []
+
 # 预留 feature 开关
 # grpc   = []   # tonic / gRPC over TLCP（待实现）
 # interop = []  # GmSSL 字节级对照向量（待实现）

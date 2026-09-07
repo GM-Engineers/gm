@@ -115,3 +115,16 @@ pub const DEFAULT_SESSION_LIFETIME: Duration = Duration::from_secs(86400);
 
 /// Maximum cached sessions (eviction limit)
 pub const MAX_CACHED_SESSIONS: usize = 1024;
+
+/// Return the current GMT Unix time (seconds since 1970-01-01
+/// 00:00:00 UTC, ignoring leap seconds) for the first 4 bytes of a
+/// ClientHello / ServerHello `random` (RFC 5246 §7.4.1.2 /
+/// GB/T 38636-2020 §6.4.1.1). Audit m-1.
+#[inline]
+pub fn current_gmt_unix_time() -> u32 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as u32)
+        .unwrap_or(0)
+}

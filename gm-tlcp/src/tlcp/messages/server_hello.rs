@@ -8,13 +8,17 @@
 //!   opaque          session_id<0..32>;
 //!   CipherSuite     cipher_suite;   // 2 bytes (selected)
 //!   CompressionMethod compression_method;   // 1 byte
-//!   // optional SM2 ECDHE extension (TLCP-specific)
-//!   opaque          sm2_ephemeral_public<0..2^16-1>;
 //! ```
+//!
+//! TLCP does not define any post-compression fields in §6.4.1.2;
+//! [`TlcpServerHello::from_bytes`] silently ignores any trailing bytes,
+//! matching GmSSL/Tongsuo behaviour.
 
 use crate::error::TlcpError;
 use crate::tlcp::HandshakeType;
-use crate::tlcp::constants::{TLS_ECC_SM4_GCM_SM3, TLS_ECDHE_SM4_CBC_SM3, TLS_ECDHE_SM4_GCM_SM3};
+use crate::tlcp::constants::{
+    TLS_ECC_SM4_CBC_SM3, TLS_ECC_SM4_GCM_SM3, TLS_ECDHE_SM4_CBC_SM3, TLS_ECDHE_SM4_GCM_SM3,
+};
 
 /// TLCP ServerHello message
 ///
@@ -31,8 +35,6 @@ pub struct TlcpServerHello {
     pub cipher_suite: [u8; 2],
     /// Selected compression method
     pub compression_method: u8,
-    /// SM2 ephemeral public key for ECDHE
-    pub sm2_ephemeral_public: Option<Vec<u8>>,
 }
 
 impl TlcpServerHello {
@@ -59,19 +61,29 @@ impl TlcpServerHello {
         let offset = 35 + session_id_len;
 
         let cipher_suite = [data[offset], data[offset + 1]];
+        // GB/T 38636-2020 §6.4.1.2 only defines the four TLCP
+        // cipher suites. Reject anything else at parse time so the
+        // caller gets a clear error rather than a generic "unknown
+        // cipher suite" later (audit m-5).
+        if !matches!(
+            cipher_suite,
+            TLS_ECDHE_SM4_GCM_SM3
+                | TLS_ECDHE_SM4_CBC_SM3
+                | TLS_ECC_SM4_GCM_SM3
+                | TLS_ECC_SM4_CBC_SM3
+        ) {
+            return Err(TlcpError::InvalidMessage(format!(
+                "ServerHello cipher_suite {:02X?} is not a known TLCP suite",
+                cipher_suite
+            )));
+        }
         let compression_method = data[offset + 2];
-
-        // Parse SM2 ECDHE extension if present
-        let sm2_ephemeral_public = if data.len() > offset + 3 + 2 {
-            let ext_len = u16::from_be_bytes([data[offset + 3], data[offset + 4]]) as usize;
-            if data.len() >= offset + 5 + ext_len {
-                Some(data[offset + 5..offset + 5 + ext_len].to_vec())
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        if compression_method != 0x00 {
+            return Err(TlcpError::InvalidMessage(format!(
+                "ServerHello compression_method {} must be 0x00 (TLCP null compression)",
+                compression_method
+            )));
+        }
 
         Ok(Self {
             version,
@@ -79,7 +91,6 @@ impl TlcpServerHello {
             session_id,
             cipher_suite,
             compression_method,
-            sm2_ephemeral_public,
         })
     }
 
@@ -103,12 +114,6 @@ impl TlcpServerHello {
         body.extend_from_slice(&self.cipher_suite);
         body.push(self.compression_method);
 
-        // SM2 ECDHE extension if present
-        if let Some(ref key) = self.sm2_ephemeral_public {
-            body.extend_from_slice(&(key.len() as u16).to_be_bytes());
-            body.extend_from_slice(key);
-        }
-
         let mut buf = Vec::with_capacity(4 + body.len());
         buf.push(HandshakeType::ServerHello as u8);
         let body_len = body.len() as u32;
@@ -117,5 +122,64 @@ impl TlcpServerHello {
         buf.push(body_len as u8);
         buf.extend(body);
         buf
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::TLCP_VERSION_1_0;
+
+    // m-5: cipher_suite must be one of the four TLCP suites.
+    #[test]
+    fn sh_rejects_unknown_cipher_suite() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&TLCP_VERSION_1_0); // version
+        data.extend_from_slice(&[0u8; 32]); // random
+        data.push(0); // session_id_len
+        data.extend_from_slice(&[0xAA, 0xBB]); // bogus cipher suite
+        data.push(0x00); // compression
+        let err = TlcpServerHello::from_bytes(&data).unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("not a known TLCP suite"),
+            "unexpected error: {}",
+            msg
+        );
+    }
+    #[test]
+    fn sh_rejects_non_null_compression_method() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&TLCP_VERSION_1_0);
+        data.extend_from_slice(&[0u8; 32]);
+        data.push(0); // session_id_len
+        data.extend_from_slice(&TLS_ECDHE_SM4_GCM_SM3);
+        data.push(0x01); // compression = 1, TLCP only allows 0
+        let err = TlcpServerHello::from_bytes(&data).unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("compression_method") && msg.contains("0x00"),
+            "unexpected error: {}",
+            msg
+        );
+    }
+    #[test]
+    fn sh_accepts_all_four_tlcp_suites() {
+        for suite in [
+            TLS_ECDHE_SM4_GCM_SM3,
+            TLS_ECDHE_SM4_CBC_SM3,
+            TLS_ECC_SM4_GCM_SM3,
+            TLS_ECC_SM4_CBC_SM3,
+        ] {
+            let mut data = Vec::new();
+            data.extend_from_slice(&TLCP_VERSION_1_0);
+            data.extend_from_slice(&[0u8; 32]);
+            data.push(0);
+            data.extend_from_slice(&suite);
+            data.push(0x00);
+            let parsed =
+                TlcpServerHello::from_bytes(&data).unwrap_or_else(|e| panic!("suite {:?}: {}", suite, e));
+            assert_eq!(parsed.cipher_suite, suite);
+        }
     }
 }

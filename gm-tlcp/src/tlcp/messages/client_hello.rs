@@ -8,9 +8,12 @@
 //!   opaque          session_id<0..32>;
 //!   CipherSuites    cipher_suites<2..2^16-1>;   // each suite is 2 bytes
 //!   CompressionMethods compression_methods<1..2^8-1>;
-//!   // optional SM2 ECDHE extension (TLCP-specific)
-//!   opaque          sm2_ephemeral_public<0..2^16-1>;
 //! ```
+//!
+//! TLCP does not define any Hello-extension semantics in §6.4.1.1;
+//! any extensions that ever appear on the wire are forwarded as
+//! opaque bytes by [`TlcpClientHello::from_body`] (currently: silently
+//! discarded after the compression-method block).
 //!
 //! Serialization prepends a 4-byte handshake header
 //! `[type=0x01 | length(3 bytes)]` per RFC 5246 §7.4.
@@ -37,15 +40,20 @@ pub struct TlcpClientHello {
     pub cipher_suites: Vec<[u8; 2]>,
     /// Compression methods (always \[0\] = null)
     pub compression_methods: Vec<u8>,
-    /// SM2 ephemeral public key for ECDHE (uncompressed, 65 bytes)
-    pub sm2_ephemeral_public: Option<Vec<u8>>,
 }
 
 impl TlcpClientHello {
     /// Create a new ClientHello with default settings
     pub fn new() -> Result<Self, TlcpError> {
         let mut random = [0u8; 32];
-        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut random);
+        // Per RFC 5246 §7.4.1.2 / GB/T 38636-2020 §6.4.1.1, the first
+        // 4 bytes are the GMT Unix time (seconds since 1970-01-01
+        // 00:00:00 UTC, ignoring leap seconds). The remaining 28 bytes
+        // are random. Filling the time field gives us RFC-compliant
+        // `random` and `gmt_unix_time` (audit m-1).
+        let gmt_unix_time = crate::tlcp::constants::current_gmt_unix_time();
+        random[0..4].copy_from_slice(&gmt_unix_time.to_be_bytes());
+        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut random[4..]);
 
         Ok(Self {
             version: TLCP_VERSION_1_0,
@@ -58,14 +66,7 @@ impl TlcpClientHello {
                 TLS_ECC_SM4_CBC_SM3,
             ],
             compression_methods: vec![0x00],
-            sm2_ephemeral_public: None,
         })
-    }
-
-    /// Set the SM2 ephemeral public key for ECDHE
-    pub fn with_ephemeral_key(mut self, public_key: &[u8]) -> Self {
-        self.sm2_ephemeral_public = Some(public_key.to_vec());
-        self
     }
 
     /// Serialize to bytes
@@ -98,14 +99,6 @@ impl TlcpClientHello {
         // Compression methods
         body.push(self.compression_methods.len() as u8);
         body.extend_from_slice(&self.compression_methods);
-
-        // SM2 ephemeral key (if present, as custom extension)
-        if let Some(ref key) = self.sm2_ephemeral_public {
-            // TLCP extension type for SM2 ECDHE parameters
-            // Using a simple approach: append as raw data with length prefix
-            body.extend_from_slice(&(key.len() as u16).to_be_bytes());
-            body.extend_from_slice(key);
-        }
 
         // Fill in length
         let body_len = body.len() as u32;
@@ -140,6 +133,14 @@ impl TlcpClientHello {
         }
         let sid_len = data[pos] as usize;
         pos += 1;
+        // GB/T 38636-2020 §6.4.1.1: session_id_len must be 0..=32.
+        if sid_len > crate::tlcp::constants::MAX_SESSION_ID_LEN {
+            return Err(TlcpError::InvalidMessage(format!(
+                "ClientHello session_id_len {} exceeds MAX_SESSION_ID_LEN ({})",
+                sid_len,
+                crate::tlcp::constants::MAX_SESSION_ID_LEN
+            )));
+        }
         if pos + sid_len > data.len() {
             return Err(TlcpError::InvalidMessage(
                 "ClientHello truncated at session_id".to_string(),
@@ -182,19 +183,22 @@ impl TlcpClientHello {
         }
         let compression_methods = data[pos..pos + comp_len].to_vec();
         pos += comp_len;
+        // GB/T 38636-2020 §6.4.1.1: TLCP only supports the null
+        // compression method (0x00). Reject peer-sent non-null methods
+        // to fail loud rather than silently accepting a divergent
+        // peer (audit m-4).
+        if !compression_methods.iter().all(|m| *m == 0x00) {
+            return Err(TlcpError::InvalidMessage(
+                "ClientHello compression_methods must be all 0x00 (TLCP only supports null)"
+                    .to_string(),
+            ));
+        }
 
-        // Optional SM2 ephemeral key extension
-        let sm2_ephemeral_public = if pos + 2 <= data.len() {
-            let key_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
-            pos += 2;
-            if pos + key_len <= data.len() {
-                Some(data[pos..pos + key_len].to_vec())
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        // TLCP §6.4.1.1 does not define any post-compression fields. Any
+        // trailing bytes are silently ignored for forward compatibility
+        // with peers that append custom data; this matches GmSSL/Tongsuo
+        // behaviour (they don't validate the trailing region either).
+        let _ = pos;
 
         Ok(Self {
             version,
@@ -202,7 +206,6 @@ impl TlcpClientHello {
             session_id,
             cipher_suites,
             compression_methods,
-            sm2_ephemeral_public,
         })
     }
 }
@@ -210,5 +213,88 @@ impl TlcpClientHello {
 impl Default for TlcpClientHello {
     fn default() -> Self {
         Self::new().expect("ClientHello creation should not fail")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // m-1: the first 4 bytes of the random are the GMT Unix time at
+    // the moment of construction. We can't pin the exact value, but
+    // we can verify the format (a recent timestamp within the last
+    // few hours of the system clock).
+    #[test]
+    fn ch_random_starts_with_recent_gmt_unix_time() {
+        let ch = TlcpClientHello::new().expect("new");
+        let now = crate::tlcp::constants::current_gmt_unix_time();
+        let bytes = u32::from_be_bytes([ch.random[0], ch.random[1], ch.random[2], ch.random[3]]);
+        let delta = now.abs_diff(bytes);
+        // Allow 1 hour of clock skew; covers leap-second hiccups and
+        // test-runners with stale clocks.
+        assert!(delta <= 3600, "random[0..4] = {} differs from now = {} by {}", bytes, now, delta);
+    }
+
+    // m-4: compression_methods must contain only 0x00.
+    #[test]
+    fn ch_rejects_non_null_compression_methods() {
+        // Build a minimal valid ClientHello body, then patch the
+        // compression-methods byte to 0x01.
+        let mut ch = TlcpClientHello::new().expect("new");
+        ch.compression_methods = vec![0x01];
+        let body = ch.to_bytes().expect("to_bytes");
+        // Strip the 4-byte handshake header before calling from_body.
+        let err = TlcpClientHello::from_body(&body[4..]).unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("compression_methods must be all 0x00"),
+            "unexpected error: {}",
+            msg
+        );
+    }
+    #[test]
+    fn ch_accepts_null_compression_methods() {
+        let ch = TlcpClientHello::new().expect("new");
+        let body = ch.to_bytes().expect("to_bytes");
+        let parsed = TlcpClientHello::from_body(&body[4..]).expect("from_body roundtrip");
+        assert_eq!(parsed.compression_methods, vec![0x00u8]);
+    }
+
+    // m-6: session_id_len must be 0..=32.
+    #[test]
+    fn ch_rejects_oversized_session_id_len() {
+        // Build a body long enough to pass the < 36 length check, then
+        // set sid_len = 33. The remaining fields after sid_len are
+        // filler (the parser rejects on sid_len before reading them).
+        let mut body = Vec::new();
+        body.extend_from_slice(&TLCP_VERSION_1_0);
+        body.extend_from_slice(&[0u8; 32]); // random
+        body.push(33); // sid_len = 33 (exceeds MAX_SESSION_ID_LEN=32)
+        body.extend_from_slice(&[0u8; 64]); // padding so the body is >= 36 bytes
+        let err = TlcpClientHello::from_body(&body).unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("session_id_len") && msg.contains("exceeds"),
+            "unexpected error: {}",
+            msg
+        );
+    }
+    #[test]
+    fn ch_accepts_max_session_id_len() {
+        // sid_len = 32 (the max) is fine. We only test the cap check
+        // here; a full roundtrip with 32 bytes of session_id would
+        // also need a valid cipher_suites and compression_methods
+        // region after the session_id.
+        let mut body = Vec::new();
+        body.extend_from_slice(&TLCP_VERSION_1_0);
+        body.extend_from_slice(&[0u8; 32]);
+        body.push(32); // sid_len = 32
+        body.extend_from_slice(&[0u8; 32]); // 32 bytes of session_id
+        body.extend_from_slice(&2u16.to_be_bytes()); // 1 cipher suite
+        body.extend_from_slice(&TLS_ECDHE_SM4_GCM_SM3);
+        body.push(1); // 1 compression method
+        body.push(0x00);
+        let parsed = TlcpClientHello::from_body(&body).expect("from_body");
+        assert_eq!(parsed.session_id.len(), 32);
     }
 }
