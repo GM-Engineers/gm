@@ -1,0 +1,26 @@
+# Build artifacts (regenerable via build_openhitls.sh)
+openhitls/
+openhitls-bin/
+openhitls-main.tar.gz
+
+# Test runtime artifacts (regenerable via run_*.sh)
+run/build-*.log
+run/gen-certs-*.log
+run/interop-*.log
+run/openhitls-server-*.log
+run/gmtlcp-client-*.log
+run/openssl.cnf
+run/openssl-client.cnf
+run/openssl-client-v3.cnf
+run/server_sign_pub.txt
+run/server_sign_pub.pem
+run/server_sign_pub.hex
+run/certs/
+run/certs/
+
+# Wire traces are kept under wire-traces/ (useful as evidence)
+!wire-traces/
+
+# macOS cruft
+.DS_Store
+._*
