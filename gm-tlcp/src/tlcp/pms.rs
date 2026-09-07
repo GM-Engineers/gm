@@ -368,4 +368,14 @@ mod tests {
         let actual = sm2_compute_z(&g_xy, b"1234567812345678").expect("Z(G)");
         assert_eq!(actual, expected, "Z(G) must match gmssl C implementation");
     }
+
+    // NOTE on M-2 KAT availability (2026-09-07):
+    //
+    // GB/T 32918.3-2016 Annex A.2 publishes a key-exchange KAT, but it uses a
+    // *test* curve (G_x = 421DEBD6...) different from sm2p256v1, so the values
+    // cannot be fed directly into `compute_tlcp_ecdhe_pms` (which is bound to
+    // sm2p256v1 via the `sm2` crate). The formula is self-consistent for
+    // sm2p256v1 (see `compute_tlcp_ecdhe_pms_roundtrip` above) and matches
+    // the spec text we extracted (Step B4/B6 and A5/A7). The actual M-2
+    // divergence is at the *call sites* in mod.rs, not in this function.
 }

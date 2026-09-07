@@ -1,212 +1,263 @@
-# M-2 Root Cause Analysis: SM2 ECDHE x̂ Transform Direction
+# M-2 Root Cause Analysis: SM2 ECDHE Shared-Secret Asymmetry
 
 Status: investigation complete, awaiting user approval before any code change.
 
 ## TL;DR
 
-`gm-tlcp/src/tlcp/pms.rs:117,123` applies the SM2 x̂ transform to the
-**wrong** x-coordinate relative to the spec. The implementation is
-self-consistent (gm-tlcp ↔ gm-tlcp roundtrip test passes) but disagrees
-with every spec-conformant peer (openHiTLS, Tongsuo, GmSSL master). The
-PR4 strict-mode interop test reproduces this: CKE/CV/CCS all accepted,
-then `Decrypt Error (51)` on Finished because the master_secret derived
-from the wrong PMS.
+gm-tlcp's `compute_tlcp_ecdhe_pms` formula in
+[`pms.rs:91-143`](../src/tlcp/pms.rs) is **spec-correct** (verified
+algebraically against GB/T 32918.3-2016 §6.4.2). The `pms.rs`-internal
+roundtrip test passes for that reason.
 
-## Spec reference
+The M-2 divergence is at the **call sites**, not in the formula:
 
-GB/T 32918.3-2016 §6.4.2 (key agreement with key confirmation, the
-basis for TLCP ECDHE per GB/T 38636-2020 §6.4.6.2 / GmSSL's
-`tlcp_send_client_key_exchange`):
+- The **client** (TlcpConnector) calls
+  `compute_tlcp_ecdhe_pms` and feeds the resulting 48-byte PMS into
+  PRF → master_secret.
+- The **server** (TlcpAcceptor) calls
+  `Sm2EcdhKeypair::compute_shared_secret(peer_pub)` which returns a
+  **32-byte raw x-coordinate** of the standard ECDH point — no x̂
+  transform, no KDF, no Z values. That 32-byte blob is fed into PRF as
+  the PMS.
 
-For **user A (initiator)**, given:
-- static priv `d_A`, static pub `P_A = d_A · G`
-- ephemeral priv `r_A`, ephemeral pub `R_A = r_A · G`
-- peer's ephemeral `R_B` and static `P_B`
+Client and server therefore produce different master_secret values
+from the same handshake parameters → diverging handshake keys →
+Finished MAC verification fails with `Decrypt Error (51)`.
+
+This is **strictly worse than the previous analysis assumed**: not
+only would gm-tlcp ↔ openHiTLS fail, gm-tlcp client ↔ gm-tlcp server
+would fail too if exercised end-to-end (the existing
+`gmssl_interop.rs` tests for that case are all `#[ignore]`-d behind a
+`gmssl_present()` guard, so the CI never catches it).
+
+## What the standard requires (extracted)
+
+GB/T 32918.3-2016 §6.4.2 — the basis for TLCP ECDHE per
+GB/T 38636-2020 §6.4.6.2 — gives, for **user A (initiator)**:
 
 ```
-x_1 = x-coordinate of R_B              (peer's ephemeral)
-x_2 = x-coordinate of R_A              (own ephemeral)
-t_A = 2^127 + (x_1 mod 2^127) · r_A + d_A   (mod n)   ← x̂ applied to PEER's x
-V   = t_A · ( (2^127 + (x_2 mod 2^127)) · R_B  +  P_B )  ← x̂ applied to OWN x
+A5:  tA = (dA + x̂1 · rA) mod n   where x̂1 = x̂(RA.x)  (own ephemeral x)
+A7:  U  = [h·tA](PB + [x̂2]RB)    where x̂2 = x̂(RB.x)  (peer ephemeral x)
+A8:  KA = KDF(xU ‖ yU ‖ ZA ‖ ZB, klen)
 ```
 
-For **user B (responder)**, swap A↔B.
+For **user B (responder)**, the steps are symmetric with the same
+`x̂(own_ephemeral)` / `x̂(peer_ephemeral)` rule:
 
-## Current gm-tlcp implementation (`pms.rs:91-143`)
+```
+B4:  tB = (dB + x̂2 · rB) mod n   where x̂2 = x̂(RB.x)
+B6:  V  = [h·tB](PA + [x̂1]RA)    where x̂1 = x̂(RA.x)
+B7:  KB = KDF(xV ‖ yV ‥ ZA ‖ ZB, klen)
+```
+
+Two consequences:
+
+1. The KDF input order is **`xV ‖ yV ‖ ZA ‖ ZB`** (initiator's Z
+   first, responder's Z second), in both A's and B's view. This is
+   not symmetric per-side; the order is fixed by the KDF spec.
+2. The PMS length is **`klen`** — for TLCP that's **48 bytes**
+   (KDF expands to the master_secret length), not the 32-byte
+   x-coordinate of a raw EC point.
+
+## Verification against the standard's KAT
+
+GB/T 32918.3-2016 Annex A.2 publishes a full worked example
+(taking A and B, computing tA, tB, RA, RB, V, U, KA=KB). I
+extracted the PDF and parsed Annex A.2 (test curve, 256-bit prime
+field). The KAT confirms the formula structure; the same algebra
+applied to sm2p256v1 is what `pms.rs:91-143` implements.
+
+Two practical obstacles prevent putting the KAT into a hex-constant
+test:
+
+- The KAT uses a **test curve** (`Gx = 421DEBD61B62EAB6...`) **not**
+  sm2p256v1 (`Gx = 32C4AE2C1F198119...`). The values can't be fed
+  directly into `compute_tlcp_ecdhe_pms` because the function is
+  bound to sm2p256v1 via the `sm2` crate.
+- A sm2p256v1 KAT was not found in openHiTLS, Tongsuo, or any other
+  public source I searched. The earlier analysis tried
+  [WebSearch]; the only authoritative sources were the PDF standard
+  itself (with the test-curve caveat) and academic papers.
+
+The `compute_tlcp_ecdhe_pms_roundtrip` test in
+[`pms.rs:256-323`](../src/tlcp/pms.rs) still serves as a
+self-consistency check on sm2p256v1 — both A and B compute the same
+48-byte PMS via the function.
+
+## What's actually wrong (line-level)
+
+### Client — correct
+
+[`mod.rs:1948`](../src/tlcp/mod.rs):
 
 ```rust
-let (local_ephemeral_x, _) = point_xy_bytes(&local_ephemeral_point)?;  // = x-coord of R_A
-let local_x_hat = scalar_from_x_hat(&local_ephemeral_x)?;              // = x̂(R_A.x)
-let t = local_x_hat * local_ephemeral_scalar + local_static_scalar;     // = x̂(R_A.x)·r_A + d_A
-
-let (peer_ephemeral_x, _) = point_xy_bytes(&peer_ephemeral_point)?;    // = x-coord of R_B
-let peer_x_hat = scalar_from_x_hat(&peer_ephemeral_x)?;                // = x̂(R_B.x)
-let shared_point = peer_ephemeral_point * peer_x_hat + peer_static_point;  // = R_B·x̂(R_B.x) + P_B
-
-let v = shared_point * t;
+let pms_vec = crate::tlcp::pms::compute_tlcp_ecdhe_pms(
+    &client_enc_pub_xy,                  // local_static_xy    (A's P_A)
+    &client_enc_kp.private_key().to_bytes().into(),  // local_static_priv (A's dA)
+    &client_ephemeral_xy,                // local_ephemeral_xy (A's R_A)
+    &client_ephemeral_priv,              // local_ephemeral_priv (A's rA)
+    &server_enc_pub_xy,                  // peer_static_xy     (B's P_B)
+    &server_ephemeral_xy,                // peer_ephemeral_xy  (B's R_B)
+    &z_server,                           // <-- ARGS
+    &z_client,                           //     See note ①
+    48,                                  //     klen = 48
+)
 ```
 
-Both `t` and `shared_point` use x̂ on the **same** x-coordinate (own
-ephemeral in `t`, peer ephemeral in `shared_point`), but in the
-**opposite** order from the spec.
+The function call is correct in *structure* (it uses
+`compute_tlcp_ecdhe_pms`, which is spec-compliant).
 
-The spec says:
-- `t` should use `x̂(peer_ephemeral_x)` = `x̂(R_B.x)`
-- `shared_point` should use `x̂(own_ephemeral_x)` = `x̂(R_A.x)` on `R_B`
+① **Argument-order bug**: `z_a` (initiator's Z = ZA = Z_client) is
+   supposed to come **first**, `z_b` (responder's Z = ZB = Z_server)
+   second. The call site passes `z_server` first, `z_client` second.
+   This alone is enough to break interop with any peer that follows
+   the KDF input order `xV ‖ yV ‖ ZA ‖ ZB`. The in-tree roundtrip
+   test gets away with this only because both A's and B's calls use
+   the *same* (z_server, z_client) order — same wrong order, same
+   wrong result.
 
-## Why the in-tree roundtrip test passes anyway
+### Server — wrong algorithm
 
-Let `a_hat = x̂(R_A.x)`, `b_hat = x̂(R_B.x)`.
+[`mod.rs:2419-2444`](../src/tlcp/mod.rs):
 
-Initiator (A) computes:
-```
-V_A = (a_hat·r_A + d_A) · (b_hat·R_B + P_B)
-    = (a_hat·r_A + d_A) · (b_hat·r_B + d_B) · G
-```
-
-Responder (B) computes:
-```
-V_B = (b_hat·r_B + d_B) · (a_hat·R_A + P_A)
-    = (b_hat·r_B + d_B) · (a_hat·r_A + d_A) · G
-```
-
-The scalar products `(a_hat·r_A + d_A)·(b_hat·r_B + d_B)` and
-`(b_hat·r_B + d_B)·(a_hat·r_A + d_A)` are equal by commutativity of
-multiplication. So V_A == V_B as EC points.
-
-This is the only reason the existing roundtrip test passes — the
-algorithm is *symmetrically wrong*, so two gm-tlcp instances agree
-with each other, but neither agrees with a spec-conformant peer.
-
-## What a spec-conformant peer computes
-
-openHiTLS (and Tongsuo, and GmSSL master) presumably implements the
-spec formula. Their V is:
-
-```
-V_spec_A = (b_hat·r_A + d_A) · (a_hat·R_B + P_B)
-         = (b_hat·r_A + d_A) · (a_hat·r_B + d_B) · G
-
-V_spec_B = (a_hat·r_B + d_B) · (b_hat·R_A + P_A)
-         = (a_hat·r_B + d_B) · (b_hat·r_A + d_A) · G
+```rust
+let pms = match server_ephemeral_kp_opt {
+    Some(kp) => kp
+        .compute_shared_secret(peer_pub)  // <-- WRONG
+        .map_err(|e| TlcpError::HandshakeFailed(format!(
+            "ECDHE shared secret: {}", e)))?,
+    None => { /* static-ECC path; not yet implemented */ }
+};
 ```
 
-These are equal to each other (same commutativity argument), but
-`V_spec != V_gm_tlcp` in general — the scalar products
-`(a_hat·r_A + d_A)·(b_hat·r_B + d_B)` and
-`(b_hat·r_A + d_A)·(a_hat·r_B + d_B)` differ.
+`Sm2EcdhKeypair::compute_shared_secret` (in `gm-crypto/src/sm2.rs`)
+is **standard ECDH**: it computes `peer_pub * my_priv` and returns
+the raw x-coordinate (32 bytes). No x̂, no KDF, no Z.
 
-## Confirmation: PR4 wire trace
+This is the structural mismatch. Even if the client's argument-order
+bug is fixed, server and client still produce different PMS lengths
+(32 vs 48), so PRF outputs diverge.
 
-`interop/openhitls/wire-traces/e011-ecdhe-mutualauth-strict-pr4.pcap`
-shows the strict-mode client successfully sending:
-- CKE (PR3-1 fix, no uint16 prefix)
-- CV (PR4 fix, default distid)
-- CCS
-- Encrypted Finished
+### Why the existing CI is green
 
-…then receiving `Alert Fatal Decrypt Error (51)`. The server
-processed CV successfully (signature verified) before trying to
-decrypt Finished — so the Z values match (PR4 fix is correct), the
-transcripts match, and the only divergence is the ECDHE shared
-secret V, which traces back to the x̂ transform direction.
+The CI's `gm-tlcp × GmSSL TLCP Interop` job reports `11 passed;
+0 failed` but the 7 actual interop tests are all `#[ignore]`-d
+behind `support::cert_setup::gmssl_present()`. The runner image
+doesn't install `gmssl`, so every real interop test prints
+`gmssl not on PATH; skipping` and returns `Ok(())`. The `11
+passed` count is the *support* unit tests (`pbkdf2_sm3_basic`,
+`hmac_sm3_short_key`, etc.), not real handshake exchanges.
 
-## Open verification: find an authoritative KAT
+This is **CI-shaped coverage that never actually exercises interop**.
+Confirmed by reading the test file and the most recent run log
+(commit `c389392`).
 
-To prove the diagnosis beyond doubt and to validate any future fix, I
-need a Known-Answer Test vector. Possibilities:
+## What a spec-conformant implementation does
 
-1. **National standard test vectors**: GB/T 32918.3-2016 Annex
-   (informative) is the canonical source. I don't have a copy of the
-   PDF in the local tree; would need to find it online or via a
-   standards database.
+Both client and server call the same function:
 
-2. **openHiTLS test vectors**: the openHiTLS source tree at
-   `openhitls/testcode/testdata/tls/` may have TLCP ECDHE vectors we
-   can extract. The current local checkout (`openhitls/`) is just the
-   main source, not the full testdata.
+```rust
+fn compute_tlcp_ecdhe_pms(
+    local_static_xy:   &[u8; 64], local_static_priv:   &[u8; 32],
+    local_ephemeral_xy:   &[u8; 64], local_ephemeral_priv:   &[u8; 32],
+    peer_static_xy:    &[u8; 64],
+    peer_ephemeral_xy: &[u8; 64],
+    z_initiator:       &[u8; 32],   // ZA
+    z_responder:       &[u8; 32],   // ZB
+    klen:              usize,
+) -> Result<Vec<u8>, TlcpError>
+```
 
-3. **Tongsuo vectors**: Tongsuo's `testdata/` has ECDHE test vectors
-   for various cipher suites; TLCP may or may not be there.
+For the server side, `local_*` is the server's data, `peer_*` is
+the client's data (taken from the CKE message), `z_initiator` =
+Z_client, `z_responder` = Z_server. The server already has the
+client's enc pub (from `process_server_certs`) and the client's
+ephemeral pub (from CKE), so the call can be wired up.
 
-4. **Cross-implementation parity**: spin up a peer (e.g. gm-crypto's
-   `sm2_kex` module which has its own x̂-correct algorithm) and
-   verify the *fixed* gm-tlcp matches.
+## Proposed fix (PR6, additive, cfg-gated)
 
-5. **Back-of-envelope proof**: the spec formula is short enough to
-   re-derive algebraically and confirm via the roundtrip structure.
-   This is what I did above but it's not a KAT.
+Per the previous analysis's "Recommended order of operations" plus
+the new findings:
 
-**Risk**: without a KAT, a fix that I implement might still be wrong
-in some edge case (e.g. all-zero x, x near n, specific curve params).
-The roundtrip test only proves the fix is self-consistent, not that
-it matches the spec.
+1. **Fix the argument-order bug** at `mod.rs:1948-1957`:
+   swap `z_server` and `z_client` so `z_a` (arg 7) = `z_client`,
+   `z_b` (arg 8) = `z_server`.
 
-## Proposed fix plan (cfg-gated, additive, low-risk)
+2. **Make the server use `compute_tlcp_ecdhe_pms`** at
+   `mod.rs:2419-2444`: replace the `compute_shared_secret` call
+   with the same function used on the client side. The server's
+   client-side inputs come from the CKE message + server cert;
+   `z_server` and `z_client` are already in scope (computed from
+   server enc pub / client enc pub respectively during step 4 /
+   step 6 in the certificate verification path).
 
-1. **Add a `tlcp-strict` cfg-gated code path** in
-   `pms.rs:compute_tlcp_ecdhe_pms` that applies the spec formula.
-   Default mode keeps the current (GmSSL-master-compatible) formula.
-2. **Update the KAT-style roundtrip test** in
-   `pms.rs:tests::compute_tlcp_ecdhe_pms_roundtrip` to compare both
-   implementations and assert they give different V (as they should
-   per the analysis).
-3. **Add a hex-constant KAT** test: pick one of A/B, hard-code V_x,
-   V_y, z_a, z_b, ephemeral/static scalars, and assert
-   `compute_tlcp_ecdhe_pms` produces a specific PMS bytes. **This
-   requires a KAT source.**
-4. **Re-run the openHiTLS strict-mode e011 test** with the fix. The
-   expected outcome is that the strict-mode client now reaches
-   `AppData` exchange instead of `Decrypt Error (51)`.
-5. **Smoke-test default mode** (GmSSL master interop CI job) — must
-   remain green. The default-mode formula is unchanged, so this
-   should be a no-op.
+3. **Add a regression test** that constructs a TlcpConnector +
+   TlcpAcceptor pair, runs them through a complete TLCP handshake
+   on a `tokio::TcpStream`, and asserts both reach
+   `HandshakeState::AppData`. This is a real interop test for the
+   default mode that **doesn't** require the gmssl binary.
 
-## Risk assessment
+4. **Gate behind `tlcp-strict`** to keep the default mode behavior
+   unchanged for the duration of a single release cycle. Reason:
+   the GmSSL-master CI job is "green" by virtue of always-skipping,
+   so we don't have positive evidence that GmSSL master interoperates
+   in default mode. Reverting to a server-side ECDH x-coord in
+   default mode risks breaking any other client that happened to
+   agree with the old behavior. Strict-mode opt-in flips the server
+   to the spec formula, matching openHiTLS / Tongsuo.
 
-| Risk | Likelihood | Impact | Mitigation |
-|---|---|---|---|
-| Spec interpretation is wrong | medium | fix doesn't actually match openHiTLS | KAT vector before merging |
-| openHiTLS has its own non-spec quirk | low | fix matches spec but still interop-fails | look at openHiTLS source |
-| Default-mode regression | low | GmSSL master CI job breaks | only cfg-gate the change; default untouched |
-| x̂ edge case (e.g. x near 0) | very low | crash in production | unit tests with edge-case x |
-| Subtle byte-order or endianness bug | low | wrong PMS even with correct formula | KAT vector covers this |
+5. **Keep the existing `compute_tlcp_ecdhe_pms_roundtrip` test** as
+   the formula's self-consistency check; add the new
+   end-to-end-to-Finished test as the cfg-gated regression check.
 
-## Recommended order of operations
+## Risk assessment (updated)
 
-1. **Find one authoritative KAT** (GB/T 32918.3-2016 Annex, or a
-   Tongsuo/openHiTLS testdata vector). This is a 30-60 min search
-   task. Without it, **do not implement**.
-2. Once KAT is found, add a hex-constant test that locks the spec
-   formula. This is the safety net.
-3. Implement the spec-correct formula as a separate function
-   `compute_tlcp_ecdhe_pms_spec(...)` next to the existing
-   `compute_tlcp_ecdhe_pms(...)`. Both should be in `pms.rs`.
-4. Wire the strict mode to call `compute_tlcp_ecdhe_pms_spec` and
-   default mode to call `compute_tlcp_ecdhe_pms` (unchanged).
-5. Run the full PR6 test matrix: in-tree roundtrip, GmSSL interop CI
-   (default mode), openHiTLS interop (strict mode).
-6. Update CHANGELOG with the fix and a credit to the openHiTLS wire
-   trace for the empirical evidence.
+| Risk                                                       | Likelihood | Impact                                                | Mitigation                                                                |
+| ---------------------------------------------------------- | ---------- | ----------------------------------------------------- | ------------------------------------------------------------------------- |
+| openHiTLS doesn't actually use spec formula                | very low   | fix matches spec but still interop-fails              | openHiTLS source already audited — see earlier search notes               |
+| Server-side fix needs extra inputs we don't yet have in scope | medium | wire-up requires plumbing client enc pub + client ephemeral to server PMS code path | read `mod.rs:2340-2444` end-to-end before coding; small change           |
+| Default-mode regression (GmSSL-master)                     | low        | GmSSL master CI breaks                                | cfg-gate the fix; default mode keeps `compute_shared_secret` until we have positive GmSSL-master interop evidence |
+| Reseed of PRNG or transcript hash on mid-handshake failure | very low   | session cache poisoning                               | existing bounds already cover this; no new state                          |
+
+## Order of operations
+
+1. Read `mod.rs:2300-2450` end-to-end to confirm all inputs needed
+   for the server's `compute_tlcp_ecdhe_pms` call are in scope.
+2. Implement the server-side switch (cfg-gated) + the argument-order
+   swap (cfg-gated).
+3. Add the new regression test.
+4. Local: `cargo +stable fmt --all && cargo +stable test -p gm-tlcp`.
+5. Push to github → wait for CI 10/10 → push to gitee / gitcode.
+6. Manually re-run the openHiTLS e011 strict-mode interop test
+   (the same one from PR4's wire trace). Expected outcome:
+   Finished accepted, AppData reachable.
+7. Update CHANGELOG / version bump (0.2.0 → 0.3.0; breaking
+   behavior under `--features tlcp-strict`).
 
 ## What this PR6 does NOT do
 
-- Does not investigate the static-ECC server PMS-decrypt path
+- Does not change the static-ECC server PMS-decrypt path
   (separate future PR; PR3-2's explicit error stays).
-- Does not change the GmSSL-targeted default mode.
-- Does not add a SM2 Z-value KAT (separate concern, can be added
-  later if needed for the distid PR4 follow-up).
-- Does not bump the version. The fix is additive behind the
-  `tlcp-strict` feature, so per SemVer 0.x it's a MINOR bump at
-  most. Recommend holding the version at 0.2.0 and bumping to 0.3.0
-  in a single commit that includes both M-2 fix and any M-3
-  follow-up that surfaces during the fix.
+- Does not change default-mode behavior (the server's
+  `compute_shared_secret` stays under `#[cfg(not(feature =
+  "tlcp-strict"))]`).
+- Does not introduce a sm2p256v1 KAT (the standard's Annex A.2 KAT
+  uses a different test curve; no other public sm2p256v1 ECDHE
+  KAT was found in the time available).
+- Does not bump the version yet; that comes in the same commit
+  that flips the cfg-gated server switch.
 
 ## Current state (unchanged from PR5)
 
 - gm-tlcp 0.2.0 on `main` (commit `c389392`)
 - github / gitee / gitcode all in sync
 - CI 10/10 green
-- default-mode GmSSL interop verified by CI
+- default-mode GmSSL interop "passes" via always-skipping tests
+  (false positive, not real evidence)
 - strict-mode openHiTLS interop: reaches Finished, then
-  `Decrypt Error (51)` (the M-2 bug)
+  `Decrypt Error (51)`
+- M-2 root cause now correctly identified as the
+  call-site asymmetry (server using `compute_shared_secret`,
+  client using `compute_tlcp_ecdhe_pms`) plus the client-side
+  argument-order bug — **not** the x̂ formula in `pms.rs`
+  (which is correct).
