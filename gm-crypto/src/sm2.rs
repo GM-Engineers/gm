@@ -1067,6 +1067,16 @@ impl Sm2EcdhKeypair {
             .to_vec()
     }
 
+    /// Get the private scalar as a 32-byte big-endian byte string.
+    ///
+    /// This is the raw `k` value used by [`Self::compute_shared_secret`]
+    /// and by TLCP ECDHE PMS KAP per GB/T 38636-2020 §6.4.6.2 (the
+    /// SM2 KAP `r_A` / `r_B` ephemeral random scalar). Returns a
+    /// fresh `Vec<u8>` on every call.
+    pub fn private_key_bytes(&self) -> Vec<u8> {
+        self.scalar.to_bytes().to_vec()
+    }
+
     /// Compute the ECDH shared secret with the peer's public key.
     ///
     /// The peer's public key must be in uncompressed format (0x04 || x || y, 65 bytes).

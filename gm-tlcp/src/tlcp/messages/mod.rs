@@ -9,6 +9,7 @@
 //! `server`.
 
 pub mod cert_pair;
+pub mod certificate_request;
 pub mod client_hello;
 pub mod client_key_exchange;
 pub mod ecdhe;
@@ -17,6 +18,7 @@ pub mod server_hello;
 pub mod server_hello_done;
 
 pub use cert_pair::TlcpCertPair;
+pub use certificate_request::TlcpCertificateRequest;
 pub use client_hello::TlcpClientHello;
 pub use client_key_exchange::TlcpClientKeyExchange;
 pub use ecdhe::{Sm2EcdheParams, TlcpServerKeyExchange};

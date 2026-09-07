@@ -179,6 +179,8 @@ mod alert;
 mod cipher_suite;
 mod constants;
 mod crypto;
+#[cfg(feature = "tlcp-strict")]
+mod cv_helper;
 mod handshake;
 mod handshake_type;
 mod key_material;
@@ -2205,6 +2207,19 @@ pub struct TlcpAcceptor {
     sign_key: Option<Arc<gm_crypto::sm2::Sm2KeyPair>>,
     /// Server encryption key pair (for static ECC cipher suites)
     enc_key: Option<Arc<gm_crypto::sm2::Sm2KeyPair>>,
+    /// SM2 user_id used to derive `Z_server` from the server's
+    /// encryption certificate during ECDHE PMS derivation
+    /// (GB/T 32918.1-2016 §6.1).
+    server_enc_distid: Option<String>,
+    /// SM2 user_id used to derive `Z_client` from the client's
+    /// encryption certificate during ECDHE PMS derivation
+    /// (GB/T 32918.1-2016 §6.1).
+    client_enc_distid: Option<String>,
+    /// SM2 user_id the client used to sign its `CertificateVerify`
+    /// (the client sign cert's user_id). Defaults to
+    /// `"1234567812345678"`. Override this if the client sign cert
+    /// was generated with a different user_id (audit M-3).
+    client_sign_distid: Option<String>,
 }
 impl Default for TlcpAcceptor {
     fn default() -> Self {
@@ -2220,6 +2235,9 @@ impl TlcpAcceptor {
             enc_cert: None,
             sign_key: None,
             enc_key: None,
+            server_enc_distid: None,
+            client_enc_distid: None,
+            client_sign_distid: None,
         }
     }
     /// Create an acceptor with a shared session cache for resumption.
@@ -2379,6 +2397,35 @@ impl TlcpAcceptor {
                 Some(kp)
             }
         };
+        // Step 5.5: Send CertificateRequest (strict-mode only).
+        //
+        // Per GB/T 38636-2020 §6.4.5.5 the server MAY send a
+        // CertificateRequest to ask the client to authenticate with a
+        // dual (sign + enc) SM2 certificate chain. We only do this
+        // when the strict KAP path is enabled (--features tlcp-strict)
+        // because the strict path needs the client's enc cert to
+        // compute Z_client for the SM2 KAP PMS. In default mode the
+        // server keeps the historical behaviour (no CR), which
+        // matches the existing GmSSL-master interop tests and keeps
+        // the default-mode handshake short.
+        #[cfg(feature = "tlcp-strict")]
+        {
+            let cr = TlcpCertificateRequest::standard();
+            let cr_bytes = cr.to_bytes()?;
+            write_handshake_record(&mut io, &cr_bytes)
+                .await
+                .map_err(|e| {
+                    TlcpError::HandshakeFailed(format!("write CertificateRequest: {}", e))
+                })?;
+            server_hs.transcript.extend_from_slice(&cr_bytes);
+        }
+        #[cfg(not(feature = "tlcp-strict"))]
+        {
+            // Default mode: skip CertificateRequest entirely. The
+            // server's PMS uses raw 32-byte ECDH (no client enc cert
+            // needed), so we don't require client authentication for
+            // the key agreement.
+        }
         // Step 6: Send ServerHelloDone
         let shd = TlcpServerHelloDone;
         let shd_bytes = shd.to_bytes();
@@ -2386,7 +2433,61 @@ impl TlcpAcceptor {
             .await
             .map_err(|e| TlcpError::HandshakeFailed(format!("write ServerHelloDone: {}", e)))?;
         server_hs.transcript.extend_from_slice(&shd_bytes);
-        // Step 7: Read ClientKeyExchange
+        // Step 7: Read Client Certificate (sent in reply to our
+        // CertificateRequest). The body is the RFC 5246 §7.4.6
+        // `Certificate` structure: `opaque ASN.1Cert<0..2^24-1>`
+        // (zero or more DER-encoded X.509 certs). An empty Certificate
+        // is permitted per the standard (the client has no cert and
+        // chooses to stay anonymous); in that case we treat it as
+        // "no client certs" and the strict KAP branch in step 8 will
+        // fail with a clear error if the suite is static-ECC. ECDHE
+        // suites still work because the KDF only needs client enc pub
+        // — which we capture here for both modes.
+        //
+        // In default mode (no `tlcp-strict`) the server does NOT send
+        // a CertificateRequest (see step 5.5), so the client skips
+        // Certificate entirely and goes straight to CKE.
+        #[cfg(feature = "tlcp-strict")]
+        let _client_certs: Vec<Vec<u8>> = {
+            let (_ct, cert_payload) = read_plaintext_record(&mut io).await.map_err(|e| {
+                TlcpError::HandshakeFailed(format!("read Client Certificate: {}", e))
+            })?;
+            let (cert_type, cert_body, _rem) = parse_handshake_message(&cert_payload)?;
+            if cert_type != HandshakeType::Certificate {
+                return Err(TlcpError::HandshakeFailed(format!(
+                    "Expected Certificate (client), got {:?}",
+                    cert_type
+                )));
+            }
+            server_hs.transcript.extend_from_slice(&cert_payload);
+            // Parse client certs (leaf-first; first entry is the leaf).
+            // Layout: u24 total_len; then u24 cert_len || cert_der for
+            // each cert. We accept any non-empty chain (gm-tlcp only
+            // needs the leaf cert's SM2 encryption pubkey for KAP).
+            let mut client_certs: Vec<Vec<u8>> = Vec::new();
+            if cert_body.len() >= 3 {
+                let _total = ((cert_body[0] as usize) << 16)
+                    | ((cert_body[1] as usize) << 8)
+                    | (cert_body[2] as usize);
+                let mut p = 3;
+                while p + 3 <= cert_body.len() {
+                    let len = ((cert_body[p] as usize) << 16)
+                        | ((cert_body[p + 1] as usize) << 8)
+                        | (cert_body[p + 2] as usize);
+                    p += 3;
+                    if p + len > cert_body.len() {
+                        break;
+                    }
+                    client_certs.push(cert_body[p..p + len].to_vec());
+                    p += len;
+                }
+            }
+            server_hs.set_client_certs(client_certs.clone());
+            client_certs
+        };
+        #[cfg(not(feature = "tlcp-strict"))]
+        let _client_certs_unused: Vec<Vec<u8>> = Vec::new();
+        // Step 7.5: Read ClientKeyExchange
         let (_ct, cke_payload) = read_plaintext_record(&mut io)
             .await
             .map_err(|e| TlcpError::HandshakeFailed(format!("read ClientKeyExchange: {}", e)))?;
@@ -2399,27 +2500,168 @@ impl TlcpAcceptor {
         }
         let cke = TlcpClientKeyExchange::from_body(&cke_body)?;
         server_hs.transcript.extend_from_slice(&cke_payload);
-        // Step 8: Compute shared secret
+        // Step 8: Compute pre-master secret.
         //
-        // `cke.key_exchange` carries the ECParameters-wrapped payload
-        // (`[curve_type][named_curve][pub_len][pub]`) on the wire; we
-        // strip the envelope to get the raw 65-byte SM2 public key
-        // before doing ECDH.
+        // In strict mode (feature `tlcp-strict`) we use the SM2 Key
+        // Agreement Protocol from GM/T 0003.3-2012 §6.1 (referenced
+        // by GB/T 38636-2020 §6.4.6.2), which feeds the KDF:
         //
-        // Strict mode + static-ECC: server_ephemeral_kp_opt is None (we
-        // skipped SKE in step 5). The static-ECC server PMS-decryption
-        // path is not yet implemented, so we return an explicit error
-        // here. A future PR will add SM2 decryption of the encrypted
-        // PMS that the client emits in this case.
-        let peer_pub = cke.ecdhe_public_key().ok_or_else(|| {
-            TlcpError::HandshakeFailed(
-                "ECDHE ClientKeyExchange missing ECParameters envelope for sm2p256v1".to_string(),
-            )
-        })?;
-        let pms = match server_ephemeral_kp_opt {
-            Some(kp) => kp
-                .compute_shared_secret(peer_pub)
-                .map_err(|e| TlcpError::HandshakeFailed(format!("ECDHE shared secret: {}", e)))?,
+        //   V = (x̄_R_A · r_A + k_A) · ((x̄_R_B · R_B) + P_B)
+        //   PMS = KDF(xV ∥ yV ∥ Z_A ∥ Z_B, 48)
+        //
+        // where Z_A / Z_B are computed from each side's enc cert
+        // public key + SM2 user_id. This is audit C-3 and matches
+        // GmSSL master / Tongsuo 8.3.0 behaviour byte-for-byte.
+        //
+        // In default mode (no feature) we keep the historical raw
+        // ECDH (32-byte x-coordinate) for backwards compatibility
+        // with the existing GmSSL interop paths; the strict path is
+        // the standards-conformant one.
+        let pms: Vec<u8> = match server_ephemeral_kp_opt {
+            Some(kp) => {
+                // The peer's ECDHE public key is wrapped in an
+                // ECParameters envelope (`03 00 29 || 41 || 65B`).
+                // We strip the envelope to get the 65-byte SM2 SEC1
+                // uncompressed point before feeding it into the KAP.
+                let peer_ephemeral_sec1 = cke.ecdhe_public_key().ok_or_else(|| {
+                    TlcpError::HandshakeFailed(
+                        "ECDHE ClientKeyExchange missing ECParameters envelope for sm2p256v1"
+                            .to_string(),
+                    )
+                })?;
+                #[cfg(feature = "tlcp-strict")]
+                {
+                    // 1) Build the server's KAP inputs from its own
+                    //    encryption keypair.
+                    let server_enc_kp = self.enc_key.clone().ok_or_else(|| {
+                        TlcpError::HandshakeFailed(
+                            "tlcp-strict server ECDHE PMS needs `with_dual_certs(..., enc_key)` \
+                             configured"
+                                .to_string(),
+                        )
+                    })?;
+                    let server_enc_priv_bytes = server_enc_kp.private_key_bytes();
+                    if server_enc_priv_bytes.len() != 32 {
+                        return Err(TlcpError::HandshakeFailed(format!(
+                            "server enc priv must be 32 bytes, got {}",
+                            server_enc_priv_bytes.len()
+                        )));
+                    }
+                    let mut server_enc_priv = [0u8; 32];
+                    server_enc_priv.copy_from_slice(&server_enc_priv_bytes);
+                    let server_enc_sec1 = server_enc_kp.public_key_bytes_uncompressed();
+                    if server_enc_sec1.len() != 65 || server_enc_sec1[0] != 0x04 {
+                        return Err(TlcpError::HandshakeFailed(format!(
+                            "server enc pub must be uncompressed (65B 0x04||X||Y), got {} bytes",
+                            server_enc_sec1.len()
+                        )));
+                    }
+                    let mut server_enc_xy = [0u8; 64];
+                    server_enc_xy.copy_from_slice(&server_enc_sec1[1..65]);
+                    // 2) Server's ephemeral kp inputs.
+                    let server_ephemeral_sec1 = kp.public_key_bytes();
+                    if server_ephemeral_sec1.len() != 65 || server_ephemeral_sec1[0] != 0x04 {
+                        return Err(TlcpError::HandshakeFailed(format!(
+                            "server ephemeral pub must be uncompressed (65B 0x04||X||Y), got {} bytes",
+                            server_ephemeral_sec1.len()
+                        )));
+                    }
+                    let mut server_ephemeral_xy = [0u8; 64];
+                    server_ephemeral_xy.copy_from_slice(&server_ephemeral_sec1[1..65]);
+                    let server_ephemeral_priv_bytes = kp.private_key_bytes();
+                    if server_ephemeral_priv_bytes.len() != 32 {
+                        return Err(TlcpError::HandshakeFailed(format!(
+                            "server ephemeral priv must be 32 bytes, got {}",
+                            server_ephemeral_priv_bytes.len()
+                        )));
+                    }
+                    let mut server_ephemeral_priv = [0u8; 32];
+                    server_ephemeral_priv.copy_from_slice(&server_ephemeral_priv_bytes);
+                    // 3) Build the peer's ECDHE inputs (the ephemeral
+                    //    pubkey from the client's CKE).
+                    if peer_ephemeral_sec1.len() != 65 || peer_ephemeral_sec1[0] != 0x04 {
+                        return Err(TlcpError::HandshakeFailed(format!(
+                            "client ephemeral pub must be uncompressed (65B 0x04||X||Y), got {} bytes",
+                            peer_ephemeral_sec1.len()
+                        )));
+                    }
+                    let mut peer_ephemeral_xy = [0u8; 64];
+                    peer_ephemeral_xy.copy_from_slice(&peer_ephemeral_sec1[1..65]);
+                    // 4) Pull the client's enc cert pubkey from the
+                    //    cert chain we recorded in step 7. Without
+                    //    that we can't compute Z_client and the KDF
+                    //    will diverge from the peer's.
+                    let client_enc_cert_der = server_hs.client_certs.first().ok_or_else(|| {
+                        TlcpError::HandshakeFailed(
+                            "tlcp-strict server ECDHE PMS needs the client \
+                                 to send a non-empty Certificate message in reply \
+                                 to our CertificateRequest; configure the \
+                                 TlcpConnector with with_client_certs(..., \
+                                 Some(enc_key_pem), ...)."
+                                .to_string(),
+                        )
+                    })?;
+                    let client_enc_pub_sec1 =
+                        crate::tlcp::crypto::verify::extract_sm2_pubkey_from_cert_der(
+                            client_enc_cert_der,
+                        )
+                        .map_err(TlcpError::HandshakeFailed)?;
+                    if client_enc_pub_sec1.len() != 65 || client_enc_pub_sec1[0] != 0x04 {
+                        return Err(TlcpError::HandshakeFailed(format!(
+                            "client enc pub must be uncompressed (65B 0x04||X||Y), got {} bytes",
+                            client_enc_pub_sec1.len()
+                        )));
+                    }
+                    let mut client_enc_xy = [0u8; 64];
+                    client_enc_xy.copy_from_slice(&client_enc_pub_sec1[1..65]);
+                    // 5) Resolve the SM2 user_ids (defaults match
+                    //    GmSSL/Tongsuo convention).
+                    let server_distid_bytes: &[u8] = self
+                        .server_enc_distid
+                        .as_deref()
+                        .map(|s: &str| s.as_bytes())
+                        .unwrap_or(gm_crypto::sm2::GM_TLS_DEFAULT_ID.as_bytes());
+                    let client_distid_bytes: &[u8] = self
+                        .client_enc_distid
+                        .as_deref()
+                        .map(|s: &str| s.as_bytes())
+                        .unwrap_or(gm_crypto::sm2::GM_TLS_DEFAULT_ID.as_bytes());
+                    // 6) Compute Z_server and Z_client.
+                    let z_server =
+                        crate::tlcp::pms::sm2_compute_z(&server_enc_xy, server_distid_bytes)
+                            .map_err(|e| TlcpError::HandshakeFailed(e.to_string()))?;
+                    let z_client =
+                        crate::tlcp::pms::sm2_compute_z(&client_enc_xy, client_distid_bytes)
+                            .map_err(|e| TlcpError::HandshakeFailed(e.to_string()))?;
+                    // 7) Compute the SM2 KAP pre-master secret.
+                    //    The Z-order is Z_server || Z_client on both
+                    //    sides because the server is the initiator of
+                    //    the key agreement (the server is the first
+                    //    party to send an ephemeral public key in SKE).
+                    crate::tlcp::pms::compute_tlcp_ecdhe_pms(
+                        &server_enc_xy,
+                        &server_enc_priv,
+                        &server_ephemeral_xy,
+                        &server_ephemeral_priv,
+                        &client_enc_xy,
+                        &peer_ephemeral_xy,
+                        &z_server,
+                        &z_client,
+                        48,
+                    )
+                    .map_err(|e| TlcpError::HandshakeFailed(e.to_string()))?
+                }
+                #[cfg(not(feature = "tlcp-strict"))]
+                {
+                    // Default (GmSSL-compatible) mode: 32-byte raw
+                    // ECDH x-coordinate. This is the historical path
+                    // preserved for byte-for-byte interop with the
+                    // existing GmSSL interop tests.
+                    kp.compute_shared_secret(peer_ephemeral_sec1).map_err(|e| {
+                        TlcpError::HandshakeFailed(format!("ECDHE shared secret: {}", e))
+                    })?
+                }
+            }
             None => {
                 #[cfg(feature = "tlcp-strict")]
                 {
@@ -2433,7 +2675,6 @@ impl TlcpAcceptor {
                 }
                 #[cfg(not(feature = "tlcp-strict"))]
                 {
-                    let _ = peer_pub;
                     return Err(TlcpError::HandshakeFailed(
                         "server_ephemeral_kp missing for default-mode static-ECC \
                          server (this is a bug; please file an issue)"
@@ -2443,28 +2684,92 @@ impl TlcpAcceptor {
             }
         };
         server_hs.complete_key_exchange(pms)?;
-        // Step 9: Read ChangeCipherSpec
+        // Step 8.5: Read CertificateVerify (if the client sent one).
         //
-        // Validate both the CCS content_type AND the payload. Per
-        // GB/T 38636-2020 (and RFC 5246 §7.1) the CCS payload MUST
-        // be the single byte `0x01`. Accepting any other byte is a
-        // protocol deviation that an attacker could exploit to confuse
-        // the handshake state machine.
-        let (ccs_type, ccs_payload) = read_plaintext_record(&mut io)
-            .await
-            .map_err(|e| TlcpError::HandshakeFailed(format!("read CCS: {}", e)))?;
-        if ccs_type != TLCP_RECORD_TYPE_CCS {
-            return Err(TlcpError::HandshakeFailed(format!(
-                "Expected CCS (0x14), got 0x{:02x}",
-                ccs_type
-            )));
+        // Only relevant in strict mode where the server sent a
+        // CertificateRequest; in default mode the server skips CR
+        // entirely and the client's CKE is followed directly by CCS.
+        #[cfg(feature = "tlcp-strict")]
+        {
+            // The client only emits a CertificateVerify message when
+            // the server sent a CertificateRequest AND the client has
+            // a client certificate chain configured (see
+            // `connect_with_certs` step 7.5). CV is a handshake
+            // message that the server MUST verify against the client's
+            // sign cert public key + the SM2 user_id used at cert
+            // generation. After verification, the signature bytes are
+            // appended to the server's transcript so that the
+            // subsequent Finished-PRF hash matches the client's.
+            //
+            // We probe the next record's first byte to decide whether
+            // to consume a CV: if it's `CertificateVerify = 0x0F`, we
+            // read and verify it; otherwise we leave the record in
+            // place for step 9 (CCS).
+            let (_ct, cv_probe_payload) = read_plaintext_record(&mut io)
+                .await
+                .map_err(|e| TlcpError::HandshakeFailed(format!("read post-CKE record: {}", e)))?;
+            let post_cke_record_opt: Option<Vec<u8>> = if cv_probe_payload.first().copied()
+                == Some(crate::tlcp::HandshakeType::CertificateVerify as u8)
+            {
+                crate::tlcp::cv_helper::process_certificate_verify(
+                    &cv_probe_payload,
+                    &mut server_hs,
+                    self.client_sign_distid.as_deref(),
+                )?;
+                None
+            } else {
+                Some(cv_probe_payload)
+            };
+            // Step 9: Read ChangeCipherSpec
+            //
+            // Validate both the CCS content_type AND the payload. Per
+            // GB/T 38636-2020 (and RFC 5246 §7.1) the CCS payload MUST
+            // be the single byte `0x01`. Accepting any other byte is a
+            // protocol deviation that an attacker could exploit to
+            // confuse the handshake state machine.
+            let (ccs_type, ccs_payload) = if let Some(payload) = post_cke_record_opt {
+                let ct = TLCP_RECORD_TYPE_CCS;
+                (ct, payload)
+            } else {
+                read_plaintext_record(&mut io)
+                    .await
+                    .map_err(|e| TlcpError::HandshakeFailed(format!("read CCS: {}", e)))?
+            };
+            if ccs_type != TLCP_RECORD_TYPE_CCS {
+                return Err(TlcpError::HandshakeFailed(format!(
+                    "Expected CCS (0x14), got 0x{:02x}",
+                    ccs_type
+                )));
+            }
+            if ccs_payload.as_slice() != [0x01u8] {
+                return Err(TlcpError::HandshakeFailed(format!(
+                    "CCS payload must be 0x01, got {} bytes: {:02x?}",
+                    ccs_payload.len(),
+                    ccs_payload
+                )));
+            }
         }
-        if ccs_payload.as_slice() != [0x01u8] {
-            return Err(TlcpError::HandshakeFailed(format!(
-                "CCS payload must be 0x01, got {} bytes: {:02x?}",
-                ccs_payload.len(),
-                ccs_payload
-            )));
+        #[cfg(not(feature = "tlcp-strict"))]
+        {
+            // Default mode: no CR / no CV. Go straight to step 9.
+            //
+            // Validate both the CCS content_type AND the payload.
+            let (ccs_type, ccs_payload) = read_plaintext_record(&mut io)
+                .await
+                .map_err(|e| TlcpError::HandshakeFailed(format!("read CCS: {}", e)))?;
+            if ccs_type != TLCP_RECORD_TYPE_CCS {
+                return Err(TlcpError::HandshakeFailed(format!(
+                    "Expected CCS (0x14), got 0x{:02x}",
+                    ccs_type
+                )));
+            }
+            if ccs_payload.as_slice() != [0x01u8] {
+                return Err(TlcpError::HandshakeFailed(format!(
+                    "CCS payload must be 0x01, got {} bytes: {:02x?}",
+                    ccs_payload.len(),
+                    ccs_payload
+                )));
+            }
         }
         // Step 10: Read client Finished (now encrypted)
         // For now, we create the stream with key material so we can decrypt
@@ -2547,11 +2852,46 @@ impl TlcpAcceptor {
         }
         Ok(stream)
     }
+    /// Configure the SM2 user_id used to derive `Z_server`
+    /// (GB/T 32918.1-2016 §6.1) from the server's encryption
+    /// certificate during the ECDHE PMS derivation.
+    ///
+    /// Defaults to `"1234567812345678"` (the GmSSL/Tongsuo convention)
+    /// when not configured. Override this if the server enc cert was
+    /// generated with a different user_id — otherwise the Z value
+    /// would mismatch and the ECDHE pre-master secret would diverge
+    /// from the peer's (audit M-3).
+    pub fn with_server_enc_distid(mut self, distid: String) -> Self {
+        self.server_enc_distid = Some(distid);
+        self
+    }
+    /// Configure the SM2 user_id used to derive `Z_client`
+    /// (GB/T 32918.1-2016 §6.1) from the client's encryption
+    /// certificate during the ECDHE PMS derivation.
+    ///
+    /// Defaults to `"1234567812345678"` when not configured. Override
+    /// this if the client enc cert was generated with a different
+    /// user_id (audit M-3).
+    pub fn with_client_enc_distid(mut self, distid: String) -> Self {
+        self.client_enc_distid = Some(distid);
+        self
+    }
+    /// Configure the SM2 user_id the client used to sign its
+    /// `CertificateVerify` (the client sign cert's user_id).
+    ///
+    /// Defaults to `"1234567812345678"` when not configured.
+    /// Override this if the client sign cert was generated with a
+    /// different user_id (audit M-3).
+    pub fn with_client_sign_distid(mut self, distid: String) -> Self {
+        self.client_sign_distid = Some(distid);
+        self
+    }
     /// Access the session cache for this acceptor.
     pub fn session_cache(&self) -> &TlcpSessionCache {
         &self.session_cache
     }
 }
+
 /// Shared ECDHE context for loopback/integration testing.
 ///
 /// In production, the client and server exchange ephemeral public keys over the

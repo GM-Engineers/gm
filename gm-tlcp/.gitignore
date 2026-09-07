@@ -21,3 +21,10 @@ Thumbs.db
 fuzz/corpus/
 fuzz/artifacts/
 fuzz/crash-*
+
+# Cert / key artefacts that should never be committed
+tests/**/*.pem
+tests/**/*.key
+tests/**/*.crt
+tests/**/*.csr
+tests/fixtures/

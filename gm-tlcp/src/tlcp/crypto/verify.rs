@@ -59,13 +59,28 @@ pub(crate) fn verify_ske_signature(
             .verify(&msg, &signature_raw)
             .map_err(|e| TlcpError::HandshakeFailed(format!("ECC SKE signature verify: {}", e)))
     } else {
-        // ECDHE path: parse Sm2EcdheParams. gmSSL emits DER signatures
-        // too, so decode before passing to the raw-format verifier.
+        // ECDHE path: parse Sm2EcdheParams. SM2 signatures come in two
+        // wire formats depending on the producer:
+        //   - GmSSL 2026-06+ master: raw r||s, 64 bytes (no DER framing).
+        //   - GmSSL 3.x / Tongsuo 8.3.0 / our own `Sm2Signer::sign`:
+        //     raw r||s, 64 bytes.
+        //   - Some X.509 / CMS profiles: DER (`0x30 0x46 0x02 0x21 ...`).
+        //
+        // We accept both: if the signature is exactly 64 bytes we treat
+        // it as raw r||s; otherwise we try to parse it as DER. This
+        // matches the historical gmssl master behaviour and keeps us
+        // compatible with peers that emit DER (e.g. openHiTLS, the
+        // Tongsuo built-in verifier).
         let ske = TlcpServerKeyExchange::from_body(ske_body)?;
-        let raw_sig = gm_crypto::sm2::sm2_signature_der_to_raw(&ske.ecdhe_params.signature)
-            .map_err(|e| {
+        let raw_sig: [u8; 64] = if ske.ecdhe_params.signature.len() == 64 {
+            let mut a = [0u8; 64];
+            a.copy_from_slice(&ske.ecdhe_params.signature);
+            a
+        } else {
+            gm_crypto::sm2::sm2_signature_der_to_raw(&ske.ecdhe_params.signature).map_err(|e| {
                 TlcpError::HandshakeFailed(format!("ECDHE SKE signature DER decode: {}", e))
-            })?;
+            })?
+        };
         // Build signed message: cr || sr || server_ecdh_params (the full
         // RFC 4492 ECParameters blob on the wire, NOT just the raw 65-byte
         // public key). GmSSL 2026-06+ master signs the ECParameters

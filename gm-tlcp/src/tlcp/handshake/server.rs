@@ -19,6 +19,13 @@ pub struct TlcpServerHandshake {
     pub client_random: Option<[u8; 32]>,
     /// Server dual certificates
     pub server_certs: Option<TlcpCertPair>,
+    /// Client certificate chain (DER, leaf-first) — populated when the
+    /// server sends a CertificateRequest and the client responds with a
+    /// `Certificate` handshake message. The first entry is the leaf;
+    /// `server_hs.client_certs[0]` is the cert the server uses to
+    /// extract the client's SM2 encryption public key for ECDHE PMS
+    /// per GB/T 38636-2020 §6.4.6.2 + GM/T 0003.3-2012 §6.1.
+    pub client_certs: Vec<Vec<u8>>,
     /// Pre-master secret (computed after key exchange)
     pub pre_master_secret: Option<Vec<u8>>,
     /// Master secret
@@ -49,6 +56,7 @@ impl TlcpServerHandshake {
             server_random: random,
             client_random: None,
             server_certs: None,
+            client_certs: Vec::new(),
             pre_master_secret: None,
             master_secret: None,
             transcript: Vec::new(),
@@ -75,6 +83,7 @@ impl TlcpServerHandshake {
             server_random: random,
             client_random: None,
             server_certs: None,
+            client_certs: Vec::new(),
             pre_master_secret: None,
             master_secret: None,
             transcript: Vec::new(),
@@ -189,6 +198,15 @@ impl TlcpServerHandshake {
     /// Set the server dual certificates
     pub fn set_server_certs(&mut self, certs: TlcpCertPair) {
         self.server_certs = Some(certs);
+    }
+
+    /// Record the client certificate chain received in the client's
+    /// `Certificate` handshake message (in reply to a server
+    /// `CertificateRequest`). Stored in leaf-first order; the leaf
+    /// entry is the cert whose SM2 encryption public key is fed into
+    /// the ECDHE PMS KDF per GB/T 38636-2020 §6.4.6.2.
+    pub fn set_client_certs(&mut self, chain: Vec<Vec<u8>>) {
+        self.client_certs = chain;
     }
 
     /// Complete the key exchange and derive master secret.
