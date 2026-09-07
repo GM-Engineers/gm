@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-07
+
 ### Changed
 
 - **Dead SM2-ephemeral-key field removed from `TlcpClientHello` / `TlcpServerHello`**
@@ -238,4 +240,5 @@ for the extraction itself and the public API baseline.
   resumption; now re-derived per handshake.
 
 [Unreleased]: https://github.com/GM-Engineers/gm/compare/main...HEAD
+[0.2.0]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.1.0...gm-tlcp-v0.2.0
 [0.1.0]: https://github.com/GM-Engineers/gm/releases/tag/gm-tlcp-v0.1.0
