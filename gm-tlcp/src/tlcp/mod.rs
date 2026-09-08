@@ -1557,7 +1557,10 @@ impl TlcpConnector {
                 server_hello.cipher_suite
             ))
         })?;
-        let is_ecc_mode = !suite.ecdhe;
+        let is_ecc_mode = !matches!(
+            suite.key_exchange,
+            crate::tlcp::cipher_suite::KeyExchangeMode::Ecdhe
+        );
         // Spec-default (RFC 5246 §7.4.3 + GB/T 38636-2020 §6.4.5.4
         // interpretation-B): both ECDHE and static-ECC suites emit
         // ServerKeyExchange. The two variants differ in body shape
@@ -1847,7 +1850,10 @@ impl TlcpConnector {
             //     `cert_pair.enc_cert`)
             //   - Server ephemeral pub (from ServerKeyExchange)
             //   - Z_A, Z_B (SM2 Z values for both static pubs)
-            let ske = TlcpServerKeyExchange::from_body(&ske_body)?;
+            let ske = TlcpServerKeyExchange::from_body(
+                &ske_body,
+                crate::tlcp::cipher_suite::KeyExchangeMode::Ecdhe,
+            )?;
             // 1. Load the client's static encryption key (configured
             //    via with_client_certs(..., Some(enc_key_pem), ...)).
             let client_enc_pem = self.client_enc_key.as_deref().ok_or_else(|| {
@@ -2370,8 +2376,29 @@ impl TlcpAcceptor {
             .map_err(|e| TlcpError::HandshakeFailed(format!("write Certificate: {}", e)))?;
         server_hs.transcript.extend_from_slice(&cert_msg);
         server_hs.set_server_certs(cert_pair);
-        // Step 5: ServerKeyExchange.
-        //
+        // R-4: SM9 IBC (E017/E057) suites are declared and have
+        // SKE/CKE wire format support, but the full server-side PMS
+        // decryption path is tracked in R-4.1 / gm-tlcp 0.5.1.
+        // IBSDH (E015/E055) and RSA suites are pending R-4.1 / R-5.
+        // Return an explicit error rather than silently going through
+        // ECDHE/ECC code paths.
+        match suite.key_exchange {
+            crate::tlcp::cipher_suite::KeyExchangeMode::Ecdhe
+            | crate::tlcp::cipher_suite::KeyExchangeMode::Ecc => {}
+            crate::tlcp::cipher_suite::KeyExchangeMode::Ibc => {
+                return Err(TlcpError::HandshakeFailed(
+                    "SM9 IBC suites (E017/E057) declared in gm-tlcp 0.5.0 (R-4) but full handshake PMS path is not yet wired; pending R-4.1 / gm-tlcp 0.5.1. The SKE / CKE wire format is implemented and unit-tested; only the server-side Ibc body variant decryption in step 8 is missing.".to_string(),
+                ));
+            }
+            crate::tlcp::cipher_suite::KeyExchangeMode::Ibsdh
+            | crate::tlcp::cipher_suite::KeyExchangeMode::Rsa => {
+                return Err(TlcpError::HandshakeFailed(format!(
+                    "cipher suite {} uses key exchange {:?} which is not yet implemented; pending R-4.1 / R-5.",
+                    suite.name, suite.key_exchange
+                )));
+            }
+        }
+        // Step 5: ServerKeyExchange.        //
         // - ECDHE suites (E011/E051): emit `Ecdhe(Sm2EcdheParams)` body
         //   (full RFC 4492 ECParameters blob). Captures the ephemeral
         //   keypair for step 8 PMS derivation.
@@ -2386,7 +2413,10 @@ impl TlcpAcceptor {
         //   - GmSSL-master shim (--features tlcp-gmssl-compat): emit
         //     ECDHE-style body (interpretation-C). Captures ephemeral
         //     keypair for raw 32-byte ECDH PMS derivation in step 8.
-        let server_ephemeral_kp_opt: Option<gm_crypto::sm2::Sm2EcdhKeypair> = if suite.ecdhe {
+        let server_ephemeral_kp_opt: Option<gm_crypto::sm2::Sm2EcdhKeypair> = if matches!(
+            suite.key_exchange,
+            crate::tlcp::cipher_suite::KeyExchangeMode::Ecdhe
+        ) {
             let sign_signer = gm_crypto::sm2::Sm2Signer::new(&sign_kp)
                 .map_err(|e| TlcpError::HandshakeFailed(format!("sign signer: {}", e)))?;
             let (ske, kp) =
@@ -2544,7 +2574,18 @@ impl TlcpAcceptor {
                 cke_type
             )));
         }
-        let cke = TlcpClientKeyExchange::from_body(&cke_body, !suite.ecdhe)?;
+        // R-4: SM9 IBC suites route to the Ibc variant of CKE.
+        let cke = TlcpClientKeyExchange::from_body(
+            &cke_body,
+            !matches!(
+                suite.key_exchange,
+                crate::tlcp::cipher_suite::KeyExchangeMode::Ecdhe
+            ),
+            matches!(
+                suite.key_exchange,
+                crate::tlcp::cipher_suite::KeyExchangeMode::Ibc
+            ),
+        )?;
         server_hs.transcript.extend_from_slice(&cke_payload);
         // Step 8: Compute pre-master secret.
         //
@@ -3321,10 +3362,14 @@ mod tests {
     fn test_cipher_suite_lookup() {
         let suite = TlcpCipherSuite::from_id(TLS_ECDHE_SM4_GCM_SM3).unwrap();
         assert_eq!(suite.name, "ECDHE_SM4_GCM_SM3");
-        assert!(suite.ecdhe);
+        assert!(matches!(suite.key_exchange, crate::tlcp::cipher_suite::KeyExchangeMode::Ecdhe));
         assert!(suite.gcm);
         let suite_cbc = TlcpCipherSuite::from_id(TLS_ECC_SM4_CBC_SM3).unwrap();
-        assert!(!suite_cbc.ecdhe);
+        assert!(suite_cbc.name == "ECC_SM4_CBC_SM3");
+        assert!(!matches!(
+            suite_cbc.key_exchange,
+            crate::tlcp::cipher_suite::KeyExchangeMode::Ecdhe
+        ));
         assert!(!suite_cbc.gcm);
     }
     /// Regression test: the four TLCP cipher-suite code points must
@@ -3381,7 +3426,9 @@ mod tests {
     #[test]
     fn test_cipher_suite_all() {
         let all = TlcpCipherSuite::all();
-        assert_eq!(all.len(), 4);
+        // 4 SM2-based (ECDHE/ECC x GCM/CBC) + 2 SM9-IBC (GCM/CBC).
+        // SM9-IBSDH pending R-4.1; RSA pending R-5.
+        assert_eq!(all.len(), 6);
     }
     #[test]
     fn test_handshake_type_conversion() {
@@ -4065,7 +4112,7 @@ mod tests {
         assert_eq!(bytes[0], HandshakeType::ServerKeyExchange as u8);
         // Parse: skip 4-byte header (type + 3-byte length)
         let body_len = ((bytes[2] as usize) << 8) | bytes[3] as usize;
-        let parsed = TlcpServerKeyExchange::from_body(&bytes[4..4 + body_len]).unwrap();
+        let parsed = TlcpServerKeyExchange::from_body_legacy(&bytes[4..4 + body_len]).unwrap();
         let parsed_ecdhe = parsed
             .as_ecdhe()
             .expect("expected ECDHE variant in test_server_key_exchange_roundtrip");
@@ -4089,7 +4136,7 @@ mod tests {
         assert_eq!(bytes[0], HandshakeType::ClientKeyExchange as u8);
         // Handshake body length is 24-bit, spanning bytes 1..=3.
         let body_len = ((bytes[1] as usize) << 16) | ((bytes[2] as usize) << 8) | bytes[3] as usize;
-        let parsed = TlcpClientKeyExchange::from_body(&bytes[4..4 + body_len], false).unwrap();
+        let parsed = TlcpClientKeyExchange::from_body(&bytes[4..4 + body_len], false, false).unwrap();
         // The wire payload is the ECParameters-wrapped blob
         // (`[curve_type][named_curve][pub_len][pub]`). The raw public
         // key is recoverable via `ecdhe_public_key()`.
@@ -4109,7 +4156,7 @@ mod tests {
         let bytes = cke.to_bytes();
         assert_eq!(bytes[0], HandshakeType::ClientKeyExchange as u8);
         let body_len = ((bytes[1] as usize) << 16) | ((bytes[2] as usize) << 8) | bytes[3] as usize;
-        let parsed = TlcpClientKeyExchange::from_body(&bytes[4..4 + body_len], true).unwrap();
+        let parsed = TlcpClientKeyExchange::from_body(&bytes[4..4 + body_len], true, false).unwrap();
         assert_eq!(
             parsed.as_ecc_ciphertext().expect("Ecc variant"),
             encrypted_pms.as_slice()

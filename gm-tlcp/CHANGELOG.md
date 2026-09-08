@@ -7,6 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-08
+
+### Added — SM9 IBC cipher suites (partial; R-4)
+
+- **Two new cipher suites declared**: `IBC_SM4_GCM_SM3` (`0xE0, 0x57`)
+  and `IBC_SM4_CBC_SM3` (`0xE0, 0x17`). Per GB/T 38636-2020 §6.4.5.2.1
+  表 2, these are the SM9 identity-based cryptography (IBC) static-key
+  suites (server identity is fixed, no ECDHE).
+- **`KeyExchangeMode` enum** in [`src/tlcp/cipher_suite.rs`](src/tlcp/cipher_suite.rs)
+  replaces the previous binary `ecdhe: bool` discriminant. Variants:
+  `Ecdhe`, `Ecc`, `Ibc` (R-4), `Ibsdh` (R-4.1), `Rsa` (R-5).
+  The `ecdhe: bool` field is kept as a `#[deprecated]` helper for
+  0.4.x callers; will be removed in gm-tlcp 1.0.
+- **SKE Ibc variant**: [`ServerKeyExchangeBody::Ibc`](src/tlcp/messages/ecdhe.rs)
+  wire layout `uint16 id_len || id || uint16 sig_len || sig_der`
+  (server identity explicit in body, not extracted from cert subject).
+  Mirrors the static-ECC interpretation-B shape; signature covers
+  `client_random || server_random || server_sm9_id`.
+- **CKE Ibc variant**: [`ClientKeyExchangeBody::Ibc`](src/tlcp/messages/client_key_exchange.rs)
+  carries the SM9-encrypted pre-master secret ciphertext. Server-side
+  SM9 decryption path is **not yet implemented**; the handshake
+  state machine returns an explicit
+  `TlcpError::HandshakeFailed("SM9 IBC suites ... pending R-4.1")`
+  error.
+- **`KeyExchangeMode` re-export** at crate root
+  (`gm_tlcp::KeyExchangeMode`).
+- **`gm-sm9-rs = "0.1"` dependency** added to gm-tlcp (pure-Rust SM9
+  backend, default features off).
+
+### Changed — BREAKING (callers using `suite.ecdhe` must migrate)
+
+- `TlcpCipherSuite::ecdhe: bool` field is `#[deprecated]` since 0.5.0.
+  Use `suite.key_exchange == KeyExchangeMode::Ecdhe` instead.
+- `TlcpServerKeyExchange::from_body(body)` 1-arg call is now an
+  explicit-error form. Use:
+  - `from_body(body, KeyExchangeMode::Ecdhe | Ecc | Ibc)` for
+    the strict per-variant form, **or**
+  - `from_body_legacy(body)` for the auto-detect (ECDHE if
+    `0x03 0x00 0x29` prefix present, otherwise ECC) form
+    used by old callers.
+- `TlcpClientKeyExchange::from_body(body, is_ecc_mode: bool)` is
+  now `from_body(body, is_ecc_mode, is_ibc_mode)`. Pass `false` for
+  `is_ibc_mode` to preserve the 0.4.x behaviour.
+
+### Deferred to R-4.1 / R-5
+
+- **SM9 IBSDH (E055/E015)** — 2-round identity-based key exchange
+  per GM/T 0044-2016 §6.1. Requires handshake state machine changes
+  (multi-message Initiator/Responder exchange); too large for R-4.
+- **Server-side IBC PMS decryption** — `Sm9Decryptor::decrypt(ciphertext)`
+  integration in `accept_with_certs` step 8. The IBC SKE/CKE wire
+  format is fully implemented and unit-tested; only the protocol
+  glue remains.
+- **RSA suites (E019/E01C/E059/E05A)** — pending R-5. Will use
+  the RustCrypto `rsa` crate directly in gm-tlcp (RSA is **not** a
+  国密 algorithm, so it does not belong in gm-crypto).
+
+### Tests
+
+- 99 lib tests (was 91 in 0.4.0; +8 from R-4):
+  5 new SKE IBC tests + 1 new CKE IBC test + 2 cipher_suite enum tests.
+- 5 loopback tests (unchanged).
+- 32 integration tests (unchanged).
+- 8 doctests (unchanged).
+
+### Verification
+
+- `cargo +stable fmt --all -- --check` ✓
+- `cargo +stable clippy --workspace --all-features --all-targets -- -D warnings` ✓
+- `cargo +stable test -p gm-tlcp` (default) ✓
+- `cargo +stable test -p gm-tlcp --features tlcp-gmssl-compat` ✓
+- `cargo +stable test -p gm-tlcp --features tlcp-strict` ✓
+- `cargo +stable publish -p gm-tlcp --dry-run --registry crates-io` ✓
+
 ## [0.4.0] - 2026-09-08
 
 ### Changed — BREAKING (server-side static-ECC PMS now works)

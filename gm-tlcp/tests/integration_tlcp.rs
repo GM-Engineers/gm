@@ -365,7 +365,10 @@ async fn test_tlcp_cipher_suite_negotiation() {
     server.process_client_hello(&client_hello).await.unwrap();
 
     let suite = server.cipher_suite.unwrap();
-    assert!(suite.ecdhe, "Server should prefer ECDHE");
+    assert!(
+        matches!(suite.key_exchange, gm_tlcp::KeyExchangeMode::Ecdhe),
+        "Server should prefer ECDHE",
+    );
     assert!(suite.gcm, "Server should prefer GCM");
     assert_eq!(suite.id, TLS_ECDHE_SM4_GCM_SM3);
 }

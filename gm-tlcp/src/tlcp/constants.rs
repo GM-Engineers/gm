@@ -70,6 +70,20 @@ pub const TLS_ECC_SM4_GCM_SM3: [u8; 2] = [0xE0, 0x53];
 /// Inherited unchanged from GM/T 0024-2014.
 pub const TLS_ECC_SM4_CBC_SM3: [u8; 2] = [0xE0, 0x13];
 
+/// TLCP cipher suite: SM9 IBC + SM4-GCM + SM3 (static key)
+///
+/// GB/T 38636-2020 §6.4.5.2.1 表 2: code point `0xE057`.
+/// Added in gm-tlcp 0.5.0 (R-4); uses SM9 identity-based
+/// encryption (KGC public params + recipient identity).
+pub const TLS_IBC_SM4_GCM_SM3: [u8; 2] = [0xE0, 0x57];
+
+/// TLCP cipher suite: SM9 IBC + SM4-CBC + SM3 (static key)
+///
+/// GB/T 38636-2020 §6.4.5.2.1 表 2: code point `0xE017`.
+/// Added in gm-tlcp 0.5.0 (R-4); same protocol as
+/// [`TLS_IBC_SM4_GCM_SM3`] but with the CBC record layer.
+pub const TLS_IBC_SM4_CBC_SM3: [u8; 2] = [0xE0, 0x17];
+
 /// Maximum TLCP record size
 pub const MAX_TLCP_RECORD_SIZE: usize = 16 * 1024;
 

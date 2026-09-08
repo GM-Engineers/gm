@@ -38,6 +38,9 @@ use crate::tlcp::constants::TLCP_ECH_PARAMS_PREFIX;
 /// - `Ecc { ciphertext }` for static-ECC suites (E013 / E053).
 ///   The wire body is the SM2-encrypted pre-master secret
 ///   (`ECCEncryptedPreMasterSecret` per §6.4.5.8 c)).
+/// - `Ibc { ciphertext }` for SM9 IBC suites (E017 / E057, R-4).
+///   The wire body is the SM9-encrypted pre-master secret
+///   (`IBCEncryptedPreMasterSecret` per GM/T 0044-2016 §7.3).
 ///
 /// The server distinguishes the two by the negotiated suite
 /// (`is_ecc_mode` from `ServerHello.cipher_suite`), since the
@@ -59,6 +62,12 @@ pub enum ClientKeyExchangeBody {
     /// default; auto-detection in `Sm2Decryptor::decrypt` handles
     /// raw and versioned forms too).
     Ecc { ciphertext: Vec<u8> },
+    /// SM9 IBC body for E017 / E057 (R-4).
+    /// Contains the SM9-encrypted pre-master secret ciphertext
+    /// (`IBCEncryptedPreMasterSecret`, GM/T 0044-2016 §7.3).
+    /// Server SM9-decrypts using its IBC user key (derived from
+    /// KGC master + server identity) to recover the 48-byte PMS.
+    Ibc { ciphertext: Vec<u8> },
 }
 
 /// TLCP ClientKeyExchange message (GB/T 38636-2020 §6.4.1.6).
@@ -103,6 +112,26 @@ impl TlcpClientKeyExchange {
         }
     }
 
+    /// Create a ClientKeyExchange wrapping the SM9-encrypted
+    /// pre-master secret ciphertext (SM9 IBC suites, R-4).
+    pub fn new_ibc(encrypted_pms: Vec<u8>) -> Self {
+        Self {
+            body: ClientKeyExchangeBody::Ibc {
+                ciphertext: encrypted_pms,
+            },
+        }
+    }
+
+    /// Borrow the inner IBC ciphertext, or `None` if this is not
+    /// the IBC variant. Used by the server-side SM9 IBC PMS-decrypt
+    /// path (R-4).
+    pub fn as_ibc_ciphertext(&self) -> Option<&[u8]> {
+        match &self.body {
+            ClientKeyExchangeBody::Ibc { ciphertext } => Some(ciphertext),
+            ClientKeyExchangeBody::Ecdhe { .. } | ClientKeyExchangeBody::Ecc { .. } => None,
+        }
+    }
+
     /// Borrow the inner ECDHE body (the ECParameters-wrapped
     /// ephemeral public key), or `None` if this is an ECC body.
     ///
@@ -111,7 +140,7 @@ impl TlcpClientKeyExchange {
     pub fn as_ecdhe_wire_body(&self) -> Option<&[u8]> {
         match &self.body {
             ClientKeyExchangeBody::Ecdhe { ephemeral_public } => Some(ephemeral_public),
-            ClientKeyExchangeBody::Ecc { .. } => None,
+            ClientKeyExchangeBody::Ecc { .. } | ClientKeyExchangeBody::Ibc { .. } => None,
         }
     }
 
@@ -123,7 +152,7 @@ impl TlcpClientKeyExchange {
     pub fn as_ecc_ciphertext(&self) -> Option<&[u8]> {
         match &self.body {
             ClientKeyExchangeBody::Ecc { ciphertext } => Some(ciphertext),
-            ClientKeyExchangeBody::Ecdhe { .. } => None,
+            ClientKeyExchangeBody::Ecdhe { .. } | ClientKeyExchangeBody::Ibc { .. } => None,
         }
     }
 
@@ -162,6 +191,7 @@ impl TlcpClientKeyExchange {
         let payload_len = match &self.body {
             ClientKeyExchangeBody::Ecdhe { ephemeral_public } => ephemeral_public.len(),
             ClientKeyExchangeBody::Ecc { ciphertext } => ciphertext.len(),
+            ClientKeyExchangeBody::Ibc { ciphertext } => ciphertext.len(),
         };
         // Pre-allocate for the worst case (GmSSL shim: 4-byte HS
         // header + 2-byte uint16 + body). Spec mode wastes 2 bytes
@@ -195,6 +225,9 @@ impl TlcpClientKeyExchange {
             ClientKeyExchangeBody::Ecc { ciphertext } => {
                 buf.extend_from_slice(ciphertext);
             }
+            ClientKeyExchangeBody::Ibc { ciphertext } => {
+                buf.extend_from_slice(ciphertext);
+            }
         }
         buf
     }
@@ -212,7 +245,7 @@ impl TlcpClientKeyExchange {
     /// GmSSL-master shim: body is `uint16 payload_length || payload`.
     /// Spec-default mode: body is the raw ECDH params / encrypted
     /// PMS — no uint16 prefix.
-    pub fn from_body(body: &[u8], is_ecc_mode: bool) -> Result<Self, TlcpError> {
+    pub fn from_body(body: &[u8], is_ecc_mode: bool, is_ibc_mode: bool) -> Result<Self, TlcpError> {
         // The variant is chosen by the negotiated suite (is_ecc_mode).
         // The wire framing differs by feature flag:
         //   * `tlcp-gmssl-compat`: body = uint16 payload_len || payload
@@ -252,7 +285,13 @@ impl TlcpClientKeyExchange {
             body.to_vec()
         };
 
-        Ok(if is_ecc_mode {
+        Ok(if is_ibc_mode {
+            Self {
+                body: ClientKeyExchangeBody::Ibc {
+                    ciphertext: payload,
+                },
+            }
+        } else if is_ecc_mode {
             Self {
                 body: ClientKeyExchangeBody::Ecc {
                     ciphertext: payload,
@@ -319,7 +358,7 @@ mod tests {
     fn gmssl_compat_from_body_roundtrip() {
         let cke = make_ecdhe_cke();
         let bytes = cke.to_bytes();
-        let parsed = TlcpClientKeyExchange::from_body(&bytes[4..], false).unwrap();
+        let parsed = TlcpClientKeyExchange::from_body(&bytes[4..], false, false).unwrap();
         let parsed_env = parsed.as_ecdhe_wire_body().expect("ECDHE variant");
         assert_eq!(parsed_env, cke.as_ecdhe_wire_body().unwrap());
     }
@@ -328,12 +367,12 @@ mod tests {
     #[test]
     fn gmssl_compat_from_body_rejects_truncated_input() {
         // Need at least 2 bytes for the uint16 prefix.
-        assert!(TlcpClientKeyExchange::from_body(&[], false).is_err());
-        assert!(TlcpClientKeyExchange::from_body(&[0x00], false).is_err());
+        assert!(TlcpClientKeyExchange::from_body(&[], false, false).is_err());
+        assert!(TlcpClientKeyExchange::from_body(&[0x00], false, false).is_err());
         // uint16 says 100 bytes follow, but we only provide 2.
         let mut body = vec![0x00, 0x64];
         body.resize(2 + 50, 0xAA);
-        assert!(TlcpClientKeyExchange::from_body(&body, false).is_err());
+        assert!(TlcpClientKeyExchange::from_body(&body, false, false).is_err());
     }
 
     // -----------------------------------------------------------------
@@ -363,7 +402,7 @@ mod tests {
     fn spec_default_from_body_roundtrip() {
         let cke = make_ecdhe_cke();
         let bytes = cke.to_bytes();
-        let parsed = TlcpClientKeyExchange::from_body(&bytes[4..], false).unwrap();
+        let parsed = TlcpClientKeyExchange::from_body(&bytes[4..], false, false).unwrap();
         let parsed_env = parsed.as_ecdhe_wire_body().expect("ECDHE variant");
         assert_eq!(parsed_env, cke.as_ecdhe_wire_body().unwrap());
     }
@@ -376,7 +415,7 @@ mod tests {
         let mut body = vec![0x03, 0x00, 0x29, 65]; // ECParams + pub_len
         body.extend_from_slice(&sample_pubkey());
         assert_eq!(body.len(), ECDHE_BODY_LEN);
-        let parsed = TlcpClientKeyExchange::from_body(&body, false).unwrap();
+        let parsed = TlcpClientKeyExchange::from_body(&body, false, false).unwrap();
         assert_eq!(parsed.as_ecdhe_wire_body().unwrap(), body.as_slice());
     }
 
@@ -423,7 +462,7 @@ mod tests {
             "HS length covers ciphertext only"
         );
         assert_eq!(bytes.len(), 4 + sample_ecc_ciphertext().len());
-        let parsed = TlcpClientKeyExchange::from_body(&bytes[4..], true).unwrap();
+        let parsed = TlcpClientKeyExchange::from_body(&bytes[4..], true, false).unwrap();
         let parsed_ct = parsed.as_ecc_ciphertext().expect("Ecc variant");
         assert_eq!(parsed_ct, sample_ecc_ciphertext().as_slice());
         assert!(parsed.as_ecdhe_wire_body().is_none());
@@ -446,7 +485,7 @@ mod tests {
             &bytes[4..6],
             &(sample_ecc_ciphertext().len() as u16).to_be_bytes()
         );
-        let parsed = TlcpClientKeyExchange::from_body(&bytes[4..], true).unwrap();
+        let parsed = TlcpClientKeyExchange::from_body(&bytes[4..], true, false).unwrap();
         let parsed_ct = parsed.as_ecc_ciphertext().expect("Ecc variant");
         assert_eq!(parsed_ct, sample_ecc_ciphertext().as_slice());
     }
@@ -460,18 +499,58 @@ mod tests {
         let cke_ecdhe = make_ecdhe_cke();
         let bytes = cke_ecdhe.to_bytes();
         // Pass is_ecc_mode=true even though it's an ECDHE wire body.
-        let parsed = TlcpClientKeyExchange::from_body(&bytes[4..], true).unwrap();
+        let parsed = TlcpClientKeyExchange::from_body(&bytes[4..], true, false).unwrap();
         assert!(parsed.as_ecc_ciphertext().is_some(), "stored under Ecc");
         assert!(parsed.as_ecdhe_wire_body().is_none());
         assert!(parsed.ecdhe_public_key().is_none());
         // And the other way:
         let cke_ecc = TlcpClientKeyExchange::new_ecc(sample_ecc_ciphertext());
         let bytes_ecc = cke_ecc.to_bytes();
-        let parsed2 = TlcpClientKeyExchange::from_body(&bytes_ecc[4..], false).unwrap();
+        let parsed2 = TlcpClientKeyExchange::from_body(&bytes_ecc[4..], false, false).unwrap();
         assert!(parsed2.as_ecdhe_wire_body().is_some(), "stored under Ecdhe");
         assert!(parsed2.as_ecc_ciphertext().is_none());
         // The "ECParameters envelope" parse will likely fail because the
         // body bytes don't match the sm2p256v1 prefix.
         assert!(parsed2.ecdhe_public_key().is_none());
+    }
+
+    // ----- IBC (SM9 encrypted PMS) roundtrip (R-4) -----
+
+    fn sample_ibc_ciphertext() -> Vec<u8> {
+        // A pretend SM9 ciphertext. The wire format is whatever
+        // gm-sm9-rs `Encryptor::encrypt` produces (raw bytes; not DER).
+        vec![0xC1u8; 320]
+    }
+
+    #[cfg(not(feature = "tlcp-gmssl-compat"))]
+    #[test]
+    fn cke_ibc_to_bytes_no_gmssl_compat_prefix() {
+        let cke = TlcpClientKeyExchange::new_ibc(sample_ibc_ciphertext());
+        let bytes = cke.to_bytes();
+        // 4-byte HS header + raw ciphertext (no uint16 prefix).
+        assert_eq!(bytes.len(), 4 + sample_ibc_ciphertext().len());
+        let parsed = TlcpClientKeyExchange::from_body(&bytes[4..], false, true).unwrap();
+        let parsed_ct = parsed.as_ibc_ciphertext().expect("Ibc variant");
+        assert_eq!(parsed_ct, sample_ibc_ciphertext().as_slice());
+        assert!(parsed.as_ecdhe_wire_body().is_none());
+        assert!(parsed.as_ecc_ciphertext().is_none());
+    }
+
+    #[cfg(feature = "tlcp-gmssl-compat")]
+    #[test]
+    fn cke_ibc_to_bytes_gmssl_compat_emits_uint16_length_prefix() {
+        let cke = TlcpClientKeyExchange::new_ibc(sample_ibc_ciphertext());
+        let bytes = cke.to_bytes();
+        // HS header: 4 bytes. After that: uint16 payload_len = 320.
+        assert_eq!(bytes.len(), 4 + 2 + sample_ibc_ciphertext().len());
+        let hs_len = ((bytes[1] as usize) << 16) | ((bytes[2] as usize) << 8) | (bytes[3] as usize);
+        assert_eq!(hs_len, 2 + sample_ibc_ciphertext().len());
+        assert_eq!(
+            &bytes[4..6],
+            &(sample_ibc_ciphertext().len() as u16).to_be_bytes()
+        );
+        let parsed = TlcpClientKeyExchange::from_body(&bytes[4..], false, true).unwrap();
+        let parsed_ct = parsed.as_ibc_ciphertext().expect("Ibc variant");
+        assert_eq!(parsed_ct, sample_ibc_ciphertext().as_slice());
     }
 }

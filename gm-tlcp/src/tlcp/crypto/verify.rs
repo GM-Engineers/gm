@@ -71,7 +71,10 @@ pub(crate) fn verify_ske_signature(
         // matches the historical gmssl master behaviour and keeps us
         // compatible with peers that emit DER (e.g. openHiTLS, the
         // Tongsuo built-in verifier).
-        let ske = TlcpServerKeyExchange::from_body(ske_body)?;
+        let ske = TlcpServerKeyExchange::from_body(
+            ske_body,
+            crate::tlcp::cipher_suite::KeyExchangeMode::Ecdhe,
+        )?;
         let ecdhe_params = ske.as_ecdhe().ok_or_else(|| {
             TlcpError::InvalidMessage(
                 "ECDHE verify called on non-ECDHE ServerKeyExchange body".to_string(),

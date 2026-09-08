@@ -4,10 +4,22 @@
 //! `[ECParameters | ECPoint | signature]` that appears in the
 //! `ServerKeyExchange` for ECDHE suites (E011 / E051).
 //!
-//! `TlcpServerKeyExchange` wraps either the ECDHE body or a
-//! sig-only static-ECC body (GB/T 38636-2020 §6.4.5.4
-//! interpretation-B, used by openHiTLS / Tongsuo for E013 / E053).
-//! The 4-byte handshake header is identical in both cases
+//! `TlcpServerKeyExchange` wraps one of three body variants:
+//!
+//! - **Ecdhe** for ECDHE suites (E011 / E051): full RFC 4492 ECParameters
+//!   blob signed over `client_random || server_random || server_ecdh_params`.
+//! - **Ecc** for static-ECC suites (E013 / E053): sig-only body
+//!   (`uint16 sig_len || sig_der`) signed over
+//!   `client_random || server_random || enc_cert_der`.
+//! - **Ibc** for SM9 IBC suites (E017 / E057, R-4): sig-only body
+//!   (`uint16 id_len || id || uint16 sig_len || sig_der`) signed over
+//!   `client_random || server_random || server_sm9_id`. (The id
+//!   embedded in the body mirrors what an SM9 client would extract
+//!   from the server's encryption certificate; we carry it explicitly
+//!   so a parser does not depend on certificate-subjectAltName handling
+//!   to know which identity to encrypt the PMS under.)
+//!
+//! The 4-byte handshake header is identical in all three cases
 //! (`[type=0x0C | length(3)])`).
 
 use crate::error::TlcpError;
@@ -138,8 +150,21 @@ pub enum ServerKeyExchangeBody {
     Ecdhe(Sm2EcdheParams),
     /// Sig-only body for static-ECC suites (E013 / E053, interpretation B).
     Ecc {
-        /// SM2 signature over `cr ∥ sr ∥ enc_cert_header ∥ enc_cert`
-        /// (DER-encoded, ≤ 65535 bytes)
+        /// SM2 signature over `cr || sr || enc_cert_header || enc_cert`
+        /// (DER-encoded, <= 65535 bytes)
+        signature: Vec<u8>,
+    },
+    /// Sig-only body for SM9 IBC suites (E017 / E057, R-4).
+    ///
+    /// Wire layout: `uint16 id_len || id || uint16 sig_len || sig_der`.
+    /// The SM9 IBC signature covers `client_random || server_random ||
+    /// server_sm9_id` under the server's SM9 signing user key.
+    Ibc {
+        /// SM9 server identity (recipient of the SM9 PKE).
+        /// UTF-8 bytes, e.g. `alice@example.com` or an X.500 DN.
+        server_id: Vec<u8>,
+        /// SM9 IBC signature over `cr || sr || server_sm9_id`
+        /// (DER-encoded, <= 65535 bytes).
         signature: Vec<u8>,
     },
 }
@@ -181,7 +206,7 @@ impl TlcpServerKeyExchange {
     pub fn as_ecdhe(&self) -> Option<&Sm2EcdheParams> {
         match &self.body {
             ServerKeyExchangeBody::Ecdhe(p) => Some(p),
-            ServerKeyExchangeBody::Ecc { .. } => None,
+            ServerKeyExchangeBody::Ecc { .. } | ServerKeyExchangeBody::Ibc { .. } => None,
         }
     }
 
@@ -189,7 +214,29 @@ impl TlcpServerKeyExchange {
     pub fn as_ecc_signature(&self) -> Option<&[u8]> {
         match &self.body {
             ServerKeyExchangeBody::Ecc { signature } => Some(signature),
-            ServerKeyExchangeBody::Ecdhe(_) => None,
+            ServerKeyExchangeBody::Ecdhe(_) | ServerKeyExchangeBody::Ibc { .. } => None,
+        }
+    }
+
+    /// Create a new ServerKeyExchange wrapping a sig-only SM9 IBC body (R-4).
+    pub fn new_ibc(server_id: Vec<u8>, signature: Vec<u8>) -> Self {
+        Self {
+            body: ServerKeyExchangeBody::Ibc {
+                server_id,
+                signature,
+            },
+        }
+    }
+
+    /// Borrow the SM9 server identity + signature, or `None` if this is not
+    /// the IBC variant.
+    pub fn as_ibc(&self) -> Option<(&[u8], &[u8])> {
+        match &self.body {
+            ServerKeyExchangeBody::Ibc {
+                server_id,
+                signature,
+            } => Some((server_id.as_slice(), signature.as_slice())),
+            _ => None,
         }
     }
 
@@ -343,6 +390,18 @@ impl TlcpServerKeyExchange {
                 buf.extend_from_slice(signature);
                 buf
             }
+            ServerKeyExchangeBody::Ibc {
+                server_id,
+                signature,
+            } => {
+                // uint16 id_len || id || uint16 sig_len || sig_der
+                let mut buf = Vec::with_capacity(2 + server_id.len() + 2 + signature.len());
+                buf.extend_from_slice(&(server_id.len() as u16).to_be_bytes());
+                buf.extend_from_slice(server_id);
+                buf.extend_from_slice(&(signature.len() as u16).to_be_bytes());
+                buf.extend_from_slice(signature);
+                buf
+            }
         }
     }
 
@@ -361,41 +420,110 @@ impl TlcpServerKeyExchange {
     /// Deserialize from a ServerKeyExchange body (after the 4-byte
     /// `type || 24-bit length` handshake header has been stripped).
     ///
-    /// Auto-detects the variant: if the body starts with the
-    /// ECParameters prefix (`0x03 0x00 0x29`), it's `Ecdhe`; otherwise
-    /// it's `Ecc { signature }`. This auto-detection lets us talk to
-    /// ECDHE peers (GmSSL/Tongsuo/openHiTLS for ECDHE suites) and
-    /// sig-only peers (openHiTLS/Tongsuo for static-ECC suites) from
-    /// the same parser.
-    pub fn from_body(body: &[u8]) -> Result<Self, TlcpError> {
+    /// The wire shape differs across the three `KeyExchangeMode`
+    /// variants, so callers must tell us which kind of suite is in
+    /// use (`kind: KeyExchangeMode`):
+    ///
+    /// - `Ecdhe`: full RFC 4492 ECParameters blob (`0x03 0x00 0x29` prefix).
+    /// - `Ecc`: `uint16 sig_len || sig_der`.
+    /// - `Ibc`: `uint16 id_len || id || uint16 sig_len || sig_der` (R-4).
+    ///
+    /// We do **not** auto-detect IBC from the body, because the
+    /// first two bytes of an IBC body (`uint16 id_len`) would
+    /// otherwise be misread as the `uint16 sig_len` of an ECC body.
+    /// Use the suite ID negotiated in the ServerHello to pick `kind`.
+    pub fn from_body(
+        body: &[u8],
+        kind: crate::tlcp::cipher_suite::KeyExchangeMode,
+    ) -> Result<Self, TlcpError> {
+        use crate::tlcp::cipher_suite::KeyExchangeMode;
+        match kind {
+            KeyExchangeMode::Ecdhe => {
+                if body.len() < TLCP_ECH_PARAMS_PREFIX.len()
+                    || body[..TLCP_ECH_PARAMS_PREFIX.len()] != TLCP_ECH_PARAMS_PREFIX
+                {
+                    return Err(TlcpError::InvalidMessage(
+                        "ECDHE SKE body must start with ECParameters prefix".to_string(),
+                    ));
+                }
+                let ecdhe_params = Sm2EcdheParams::from_bytes(body)?;
+                Ok(Self {
+                    body: ServerKeyExchangeBody::Ecdhe(ecdhe_params),
+                })
+            }
+            KeyExchangeMode::Ecc => {
+                // body = uint16 sig_len || sig_der
+                if body.len() < 2 {
+                    return Err(TlcpError::InvalidMessage(format!(
+                        "ECC SKE body too short: {} bytes, need at least 2",
+                        body.len()
+                    )));
+                }
+                let sig_len = u16::from_be_bytes([body[0], body[1]]) as usize;
+                if body.len() < 2 + sig_len {
+                    return Err(TlcpError::InvalidMessage(format!(
+                        "ECC SKE signature truncated: body {} < 2 + sig_len {}",
+                        body.len(),
+                        sig_len
+                    )));
+                }
+                let signature = body[2..2 + sig_len].to_vec();
+                Ok(Self {
+                    body: ServerKeyExchangeBody::Ecc { signature },
+                })
+            }
+            KeyExchangeMode::Ibc => {
+                // body = uint16 id_len || id || uint16 sig_len || sig_der
+                if body.len() < 4 {
+                    return Err(TlcpError::InvalidMessage(format!(
+                        "IBC SKE body too short: {} bytes, need at least 4",
+                        body.len()
+                    )));
+                }
+                let id_len = u16::from_be_bytes([body[0], body[1]]) as usize;
+                if body.len() < 2 + id_len + 2 {
+                    return Err(TlcpError::InvalidMessage(format!(
+                        "IBC SKE id truncated: body {} < 4 + id_len {}",
+                        body.len(),
+                        id_len
+                    )));
+                }
+                let server_id = body[2..2 + id_len].to_vec();
+                let sig_offset = 2 + id_len;
+                let sig_len = u16::from_be_bytes([body[sig_offset], body[sig_offset + 1]]) as usize;
+                if body.len() < sig_offset + 2 + sig_len {
+                    return Err(TlcpError::InvalidMessage(format!(
+                        "IBC SKE signature truncated: body {} < {} + sig_len {}",
+                        body.len(),
+                        sig_offset + 2,
+                        sig_len
+                    )));
+                }
+                let signature = body[sig_offset + 2..sig_offset + 2 + sig_len].to_vec();
+                Ok(Self {
+                    body: ServerKeyExchangeBody::Ibc {
+                        server_id,
+                        signature,
+                    },
+                })
+            }
+            KeyExchangeMode::Ibsdh | KeyExchangeMode::Rsa => Err(TlcpError::InvalidMessage(
+                "ServerKeyExchange not used for IBSDH or RSA suites (yet)".to_string(),
+            )),
+        }
+    }
+
+    /// Backward-compat `from_body` for ECDHE/ECC-only callers. Defaults
+    /// to auto-detect: prefix `0x03 0x00 0x29` -> ECDHE; otherwise ECC.
+    /// **Do not** use for SM9 IBC suites — use the explicit `from_body`
+    /// form above with `KeyExchangeMode::Ibc`.
+    pub fn from_body_legacy(body: &[u8]) -> Result<Self, TlcpError> {
         if body.len() >= TLCP_ECH_PARAMS_PREFIX.len()
             && body[..TLCP_ECH_PARAMS_PREFIX.len()] == TLCP_ECH_PARAMS_PREFIX
         {
-            // ECDHE body.
-            let ecdhe_params = Sm2EcdheParams::from_bytes(body)?;
-            Ok(Self {
-                body: ServerKeyExchangeBody::Ecdhe(ecdhe_params),
-            })
+            Self::from_body(body, crate::tlcp::cipher_suite::KeyExchangeMode::Ecdhe)
         } else {
-            // Ecc body = uint16 sig_len || sig_der
-            if body.len() < 2 {
-                return Err(TlcpError::InvalidMessage(format!(
-                    "ECC SKE body too short: {} bytes, need at least 2",
-                    body.len()
-                )));
-            }
-            let sig_len = u16::from_be_bytes([body[0], body[1]]) as usize;
-            if body.len() < 2 + sig_len {
-                return Err(TlcpError::InvalidMessage(format!(
-                    "ECC SKE signature truncated: body {} < 2 + sig_len {}",
-                    body.len(),
-                    sig_len
-                )));
-            }
-            let signature = body[2..2 + sig_len].to_vec();
-            Ok(Self {
-                body: ServerKeyExchangeBody::Ecc { signature },
-            })
+            Self::from_body(body, crate::tlcp::cipher_suite::KeyExchangeMode::Ecc)
         }
     }
 }
@@ -424,7 +552,7 @@ mod tests {
         assert_eq!(bytes[0], HandshakeType::ServerKeyExchange as u8);
         let body_len =
             ((bytes[1] as usize) << 16) | ((bytes[2] as usize) << 8) | (bytes[3] as usize);
-        let parsed = TlcpServerKeyExchange::from_body(&bytes[4..4 + body_len]).unwrap();
+        let parsed = TlcpServerKeyExchange::from_body_legacy(&bytes[4..4 + body_len]).unwrap();
         let parsed_ecdhe = parsed.as_ecdhe().expect("expected ECDHE variant");
         assert_eq!(parsed_ecdhe.ephemeral_public, ephemeral_pub);
         assert_eq!(parsed_ecdhe.signature, signature);
@@ -463,7 +591,7 @@ mod tests {
         let bytes = ske.to_bytes();
         let body_len =
             ((bytes[1] as usize) << 16) | ((bytes[2] as usize) << 8) | (bytes[3] as usize);
-        let parsed = TlcpServerKeyExchange::from_body(&bytes[4..4 + body_len]).unwrap();
+        let parsed = TlcpServerKeyExchange::from_body_legacy(&bytes[4..4 + body_len]).unwrap();
         assert!(parsed.as_ecdhe().is_none());
         let parsed_sig = parsed.as_ecc_signature().expect("expected Ecc variant");
         assert_eq!(parsed_sig, signature.as_slice());
@@ -472,9 +600,9 @@ mod tests {
     #[test]
     fn ske_ecc_from_body_rejects_truncated_input() {
         // body = 1 byte (less than the uint16 sig_len prefix)
-        assert!(TlcpServerKeyExchange::from_body(&[0x00]).is_err());
+        assert!(TlcpServerKeyExchange::from_body_legacy(&[0x00]).is_err());
         // body = uint16(10) but no payload
-        assert!(TlcpServerKeyExchange::from_body(&[0x00, 0x0A]).is_err());
+        assert!(TlcpServerKeyExchange::from_body_legacy(&[0x00, 0x0A]).is_err());
     }
 
     // ----- variant auto-detection: body starting with ECParameters
@@ -492,7 +620,7 @@ mod tests {
         // since the parser only requires pub_len bytes
         // are present, then reads sig_len bytes)
         body.extend_from_slice(&0u16.to_be_bytes()); // sig_len = 0
-        let parsed = TlcpServerKeyExchange::from_body(&body).expect("parse should succeed");
+        let parsed = TlcpServerKeyExchange::from_body_legacy(&body).expect("parse should succeed");
         assert!(parsed.as_ecdhe().is_some());
         assert!(parsed.as_ecc_signature().is_none());
     }
@@ -501,7 +629,7 @@ mod tests {
     fn ske_from_body_autodetects_ecc_when_prefix_absent() {
         // body = uint16(0) || (no sig bytes) — short but valid empty-sig Ecc.
         let body = vec![0x00, 0x00];
-        let parsed = TlcpServerKeyExchange::from_body(&body).expect("parse should succeed");
+        let parsed = TlcpServerKeyExchange::from_body_legacy(&body).expect("parse should succeed");
         assert!(parsed.as_ecdhe().is_none());
         assert_eq!(parsed.as_ecc_signature().map(|s| s.len()), Some(0));
     }
@@ -584,5 +712,78 @@ mod tests {
         assert_eq!(bytes[6], 0x30, "DER sig must start with 0x30 SEQUENCE tag");
         assert_eq!(body_len, 2 + sig_len);
         assert_eq!(bytes.len(), 4 + body_len);
+    }
+
+    // ----- IBC (sig-only with SM9 ID) roundtrip (R-4) -----
+
+    #[test]
+    fn ske_ibc_to_bytes_writes_uint16_id_len_then_id_then_uint16_sig_len_then_sig() {
+        let server_id: Vec<u8> = b"alice@example.com".to_vec();
+        let signature = vec![0xCC; 72];
+        let ske = TlcpServerKeyExchange::new_ibc(server_id.clone(), signature.clone());
+        let bytes = ske.to_bytes();
+        // 4-byte HS header
+        assert_eq!(bytes[0], HandshakeType::ServerKeyExchange as u8);
+        let body_len =
+            ((bytes[1] as usize) << 16) | ((bytes[2] as usize) << 8) | (bytes[3] as usize);
+        // body = uint16(id_len=17) || id_17 || uint16(sig_len=72) || sig_72 = 110 bytes
+        assert_eq!(body_len, 2 + server_id.len() + 2 + signature.len());
+        assert_eq!(&bytes[4..6], &(server_id.len() as u16).to_be_bytes());
+        assert_eq!(&bytes[6..6 + server_id.len()], server_id.as_slice());
+        let sig_offset = 6 + server_id.len();
+        assert_eq!(
+            &bytes[sig_offset..sig_offset + 2],
+            &(signature.len() as u16).to_be_bytes()
+        );
+        assert_eq!(
+            &bytes[sig_offset + 2..sig_offset + 2 + signature.len()],
+            signature.as_slice()
+        );
+    }
+
+    #[test]
+    fn ske_ibc_from_body_roundtrip_preserves_id_and_signature() {
+        use crate::tlcp::cipher_suite::KeyExchangeMode;
+        let server_id: Vec<u8> = b"sm9-test-server@tlcp.local".to_vec();
+        let signature = vec![0xDD; 70];
+        let ske = TlcpServerKeyExchange::new_ibc(server_id.clone(), signature.clone());
+        let bytes = ske.to_bytes();
+        let body_len =
+            ((bytes[1] as usize) << 16) | ((bytes[2] as usize) << 8) | (bytes[3] as usize);
+        let parsed =
+            TlcpServerKeyExchange::from_body(&bytes[4..4 + body_len], KeyExchangeMode::Ibc)
+                .expect("IBC SKE parse should succeed");
+        let (id, sig) = parsed.as_ibc().expect("expected IBC variant");
+        assert_eq!(id, server_id.as_slice());
+        assert_eq!(sig, signature.as_slice());
+        assert!(parsed.as_ecdhe().is_none());
+        assert!(parsed.as_ecc_signature().is_none());
+    }
+
+    #[test]
+    fn ske_ibc_from_body_rejects_truncated_input() {
+        use crate::tlcp::cipher_suite::KeyExchangeMode;
+        assert!(TlcpServerKeyExchange::from_body(&[0x00], KeyExchangeMode::Ibc).is_err());
+        assert!(TlcpServerKeyExchange::from_body(&[0x00, 0x0A], KeyExchangeMode::Ibc).is_err());
+        // uint16(5) || id_5 || (no sig_len) - too short for sig len
+        let mut body = vec![0x00, 0x05];
+        body.extend_from_slice(b"abcde");
+        assert!(TlcpServerKeyExchange::from_body(&body, KeyExchangeMode::Ibc).is_err());
+    }
+
+    #[test]
+    fn ske_from_body_rejects_ecdhe_kind_without_prefix() {
+        use crate::tlcp::cipher_suite::KeyExchangeMode;
+        // An Ecc-style body must NOT parse as ECDHE.
+        let body = vec![0x00, 0x0A, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert!(TlcpServerKeyExchange::from_body(&body, KeyExchangeMode::Ecdhe).is_err());
+    }
+
+    #[test]
+    fn ske_from_body_rejects_ibsdh_and_rsa_kinds() {
+        use crate::tlcp::cipher_suite::KeyExchangeMode;
+        let body = vec![0u8; 8];
+        assert!(TlcpServerKeyExchange::from_body(&body, KeyExchangeMode::Ibsdh).is_err());
+        assert!(TlcpServerKeyExchange::from_body(&body, KeyExchangeMode::Rsa).is_err());
     }
 }

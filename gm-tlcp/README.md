@@ -30,9 +30,10 @@ TLCP（Transport Layer Cryptographic Protocol，传输层密码协议）是 GB/T
 - ✅ Session resumption via session IDs (`TlcpSessionCache`)
 - ✅ Alert 协议（`TlcpAlert` / `TlcpAlertDescription`）
 - ✅ 全部 4 个密码套件
-- ✅ 91 lib tests + 5 loopback tests（`tests/gm_tlcp_loopback.rs`，包含 `gm_tlcp_kap_pms_roundtrip_with_real_keys`）+ 32 integration tests (`tests/integration_tlcp.rs`) + 4 default gmssl interop tests (7 more `#[ignore]`d, run with `--ignored` when `gmssl` is on `PATH`)
+- ✅ 99 lib tests + 5 loopback tests（`tests/gm_tlcp_loopback.rs`，包含 `gm_tlcp_kap_pms_roundtrip_with_real_keys`）+ 32 integration tests (`tests/integration_tlcp.rs`) + 4 default gmssl interop tests (7 more `#[ignore]`d, run with `--ignored` when `gmssl` is on `PATH`)
 - ✅ GmSSL 3.3.0-dev (`master`) handshake + APP_DATA byte-for-byte 互操作验证（需 `tlcp-gmssl-compat`）
 - ✅ openHiTLS `s_server -tlcp` 互操作验证：ECDHE（默认模式）+ static-ECC SKE + static-ECC PMS decrypt（默认模式，server 侧 R-3 已实现）
+- ✅ R-4 (gm-tlcp 0.5.0): SM9 IBC 静态套件 (E057/E017) 已声明在 cipher_suite registry；SKE/CKE wire format 完整实现 + 单元测试覆盖；server 侧 PMS 解密路径待 R-4.1 补完（handshake 启动时返回明确 "pending R-4.1" 错误）。SM9 IBSDH (E055/E015) 与 RSA (E019/E01C/E059/E05A) 套件分别待 R-4.1 / R-5。
 - ❌ Tongsuo 8.3.0 round-trip — Tongsuo-side NTLS state-machine 拒绝 `0x0101`， 调查见 `interop/tongsuo/upstream/`
 
 ## 特性开关 (Feature flags)
