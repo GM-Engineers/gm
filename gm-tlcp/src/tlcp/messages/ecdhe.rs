@@ -293,8 +293,14 @@ impl TlcpServerKeyExchange {
     ///
     /// The SM2 signature is encoded in DER (ASN.1) form on the wire,
     /// matching the openHiTLS / Tongsuo convention and the format
-    /// accepted by [`crate::tlcp::crypto::verify::verify_ske_signature`]
-    /// when `is_ecc_mode = true`.
+    /// accepted by the private `verify_ske_signature` helper when
+    /// `is_ecc_mode = true`.
+    ///
+    /// (Doc-link to `verify_ske_signature` removed: it is `pub(crate)`
+    /// only, so the public rustdoc build rejects the link as a
+    /// private-intra-doc-link. The semantic content — "this SKE is
+    /// parsed by verify_ske_signature with is_ecc_mode=true" — is
+    /// captured above without the link.)
     ///
     /// # Arguments
     /// * `client_random` — 32-byte client random

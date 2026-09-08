@@ -9,8 +9,8 @@
 //! | `0xE011` | `ECDHE_SM4_CBC_SM3`   | ECDHE            | SM4-CBC + HMAC   |
 //! | `0xE053` | `ECC_SM4_GCM_SM3`     | ECC (static)     | SM4-GCM-128      |
 //! | `0xE013` | `ECC_SM4_CBC_SM3`     | ECC (static)     | SM4-CBC + HMAC   |
-//! | `0xE057` | `IBC_SM4_GCM_SM3`     | IBC (static)     | SM4-GCM-128      |  (R-4)
-//! | `0xE017` | `IBC_SM4_CBC_SM3`     | IBC (static)     | SM4-CBC + HMAC   |  (R-4)
+//! | `0xE057` | `IBC_SM4_GCM_SM3`     | IBC (static)     | SM4-GCM-128      |
+//! | `0xE017` | `IBC_SM4_CBC_SM3`     | IBC (static)     | SM4-CBC + HMAC   |
 //!
 //! (SM9 IBSDH dynamic suites E055/E015 pending R-4.1 / gm-tlcp 0.5.1;
 //! RSA suites E019 / E01C / E059 / E05A pending R-5 / gm-tlcp 0.6.0.)
