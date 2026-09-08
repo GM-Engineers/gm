@@ -167,9 +167,12 @@
 //!   `--features tlcp-gmssl-compat` (this restores the 0.2.x wire
 //!   format on the divergent points). The `tlcp-strict` flag from
 //!   0.2.x is deprecated as a no-op alias for source-compat.
-//! - **Run gm-tlcp as a server** for static-ECC suites: still
-//!   blocked on C-4 (server-side static-ECC PMS decryption returns
-//!   an explicit error). Tracked as R-3 in the SPEC-FIRST roadmap.
+//! - **Run gm-tlcp as a server** for static-ECC suites: now fully
+//!   supported as of gm-tlcp 0.4.0 (R-3 closes audit C-4). The
+//!   server SM2-decrypts the client's `ECCEncryptedPreMasterSecret`
+//!   under the server's encryption keypair (configured via
+//!   `with_dual_certs(..., enc_key)`). RSA suites remain pending
+//!   R-5 / gm-tlcp 0.6.0.
 //!
 //! # 许可证
 //!
@@ -2541,7 +2544,7 @@ impl TlcpAcceptor {
                 cke_type
             )));
         }
-        let cke = TlcpClientKeyExchange::from_body(&cke_body)?;
+        let cke = TlcpClientKeyExchange::from_body(&cke_body, !suite.ecdhe)?;
         server_hs.transcript.extend_from_slice(&cke_payload);
         // Step 8: Compute pre-master secret.
         //
@@ -2715,13 +2718,70 @@ impl TlcpAcceptor {
                 }
                 #[cfg(not(feature = "tlcp-gmssl-compat"))]
                 {
-                    return Err(TlcpError::HandshakeFailed(
-                        "spec-default server-side static-ECC PMS decryption is not \
-                         implemented in this release; use --features tlcp-gmssl-compat \
-                         for static-ECC server interop, or wait for the upcoming R-3 \
-                         (SPEC-FIRST roadmap) that adds SM2 decryption."
-                            .to_string(),
-                    ));
+                    // Spec-default + static-ECC suite (E013 / E053):
+                    // the server's PMS comes from SM2-decrypting the
+                    // client's ECCEncryptedPreMasterSecret under the
+                    // server's encryption keypair. Closes audit C-4
+                    // (gm-tlcp 0.4.0 / R-3).
+                    let server_enc_kp = self.enc_key.as_ref().ok_or_else(|| {
+                        TlcpError::HandshakeFailed(
+                            "spec-default static-ECC server PMS decrypt needs \
+                             `with_dual_certs(..., enc_key)` configured \
+                             (server-side encryption keypair)"
+                                .to_string(),
+                        )
+                    })?;
+                    let ciphertext = cke.as_ecc_ciphertext().ok_or_else(|| {
+                        TlcpError::HandshakeFailed(
+                            "spec-default static-ECC server PMS decrypt: client \
+                             CKE not in ECCEncryptedPreMasterSecret format \
+                             (was the negotiated suite actually static-ECC?)"
+                                .to_string(),
+                        )
+                    })?;
+                    // Sm2KeyPair is not Clone, so reconstruct a local
+                    // Sm2KeyPair from the stored server enc key's
+                    // private-key bytes. The server stores it as
+                    // `Arc<Sm2KeyPair>` in `self.enc_key`; we own the
+                    // reconstructed copy for the duration of the decrypt
+                    // call and it gets zeroized on drop.
+                    let server_enc_priv_bytes = server_enc_kp.private_key_bytes();
+                    let local_enc_kp =
+                        gm_crypto::sm2::Sm2KeyPair::from_private_key(&server_enc_priv_bytes)
+                            .map_err(|e| {
+                                TlcpError::HandshakeFailed(format!(
+                                    "spec-default static-ECC server PMS decrypt: \
+                             server enc key reconstruction: {}",
+                                    e
+                                ))
+                            })?;
+                    let decryptor = gm_crypto::sm2::Sm2Decryptor::new(local_enc_kp);
+                    let pms_plaintext = decryptor.decrypt(ciphertext).map_err(|e| {
+                        TlcpError::HandshakeFailed(format!(
+                            "SM2 decrypt ECCEncryptedPreMasterSecret: {}",
+                            e
+                        ))
+                    })?;
+                    // Per GB/T 38636-2020 §6.4.5.8 c) the plaintext is:
+                    //   `ProtocolVersion client_version (2B) || opaque random[46]`
+                    // Total 48 bytes. GmSSL's `tlcp_check_pre_master_secret`
+                    // enforces this strictly. We follow GmSSL here for
+                    // interop.
+                    //
+                    // Note: the leading `client_version` field is NOT
+                    // verified (spec is silent on its value; GmSSL
+                    // rejects non-0x0101 but openHiTLS / Tongsuo 8.3.0
+                    // emit 0x0303 for legacy reasons). Stay permissive
+                    // here; the master_secret derivation will catch
+                    // any PMS-content mismatch downstream.
+                    if pms_plaintext.len() != 48 {
+                        return Err(TlcpError::HandshakeFailed(format!(
+                            "spec-default static-ECC server PMS decrypt: plaintext \
+                             must be 48 bytes (2B version || 46B random), got {}",
+                            pms_plaintext.len()
+                        )));
+                    }
+                    pms_plaintext
                 }
             }
         };
@@ -3889,6 +3949,109 @@ mod tests {
         assert_eq!(client.session_id(), &[0x01, 0x02, 0x03]);
     }
     // ========================================================================
+    // R-3: server-side static-ECC PMS decrypt (audit C-4)
+    // ========================================================================
+    //
+    // Smoke test: encrypt a synthetic 48-byte PMS under a fresh SM2
+    // keypair, build a CKE body in the ECC variant, run the same
+    // SM2-decrypt + 48-byte-shape-check that the new `accept_with_certs`
+    // step 8 (None arm) does, and assert the plaintext matches.
+    //
+    // This does NOT exercise the full handshake state machine — it
+    // only validates the pure crypto+format contract that step 8
+    // relies on. A full server round-trip with E013 is in
+    // `tests/gm_tlcp_loopback.rs::gm_tlcp_static_ecc_server_round_trip_with_real_keys`
+    // (requires `gmssl` on PATH).
+    #[cfg(not(feature = "tlcp-gmssl-compat"))]
+    #[test]
+    fn test_static_ecc_server_pms_decrypt_smoke() {
+        use gm_crypto::sm2::{Sm2Decryptor, Sm2Encryptor, Sm2KeyPair};
+
+        // Server-side encryption keypair (the long-term enc key).
+        // In TLCP this is the server's enc key, configured via
+        // `with_dual_certs(..., enc_key)`. The client's
+        // ECCEncryptedPreMasterSecret is SM2-encrypted TO this key.
+        let server_enc_kp = Sm2KeyPair::generate().expect("sm2 keypair generate");
+
+        // Per GB/T 38636-2020 §6.4.5.8 c) the PMS plaintext is:
+        //   `ProtocolVersion client_version (2B) || opaque random[46]`.
+        // We pick an arbitrary client_version (the spec is silent; GmSSL
+        // master rejects non-0x0101 but openHiTLS / Tongsuo 8.3.0 emit
+        // 0x0303 for legacy reasons — gm-tlcp is permissive here).
+        let mut pms_plaintext = Vec::with_capacity(48);
+        pms_plaintext.extend_from_slice(&[0x01, 0x01]); // TLCP_VERSION_1_0
+        for i in 0..46u8 {
+            pms_plaintext.push(i.wrapping_mul(7));
+        }
+        assert_eq!(pms_plaintext.len(), 48);
+
+        // Client encrypts the PMS to the SERVER's enc pub (this is
+        // what the TLCP client side does in
+        // `connect_with_certs` step 8 for static-ECC suites). SM2's
+        // C3 = MAC over (x_K ‖ plaintext ‖ recipient_pub_hash), so
+        // the recipient's pubkey must match the encryptor's target.
+        let encryptor =
+            Sm2Encryptor::new(&server_enc_kp.public_key_bytes_uncompressed()).expect("encryptor");
+        let ciphertext = encryptor.encrypt_der(&pms_plaintext).expect("encrypt_der");
+
+        // Build the CKE body in ECC variant.
+        let cke = TlcpClientKeyExchange::new_ecc(ciphertext.clone());
+
+        // Now run the same decrypt path that accept_with_certs step 8
+        // (None arm) uses.
+        let ciphertext_from_cke = cke
+            .as_ecc_ciphertext()
+            .expect("Ecc variant body should be retrievable");
+        assert_eq!(ciphertext_from_cke, ciphertext.as_slice());
+
+        // Reconstruct the local Sm2KeyPair (server stores it as Arc
+        // and Sm2KeyPair is not Clone).
+        let server_enc_priv_bytes = server_enc_kp.private_key_bytes();
+        let local_enc_kp = Sm2KeyPair::from_private_key(&server_enc_priv_bytes)
+            .expect("server enc key reconstruction");
+        let decryptor = Sm2Decryptor::new(local_enc_kp);
+        let decrypted = decryptor.decrypt(ciphertext_from_cke).expect("SM2 decrypt");
+
+        assert_eq!(decrypted.len(), 48, "PMS plaintext must be 48 bytes");
+        assert_eq!(
+            decrypted, pms_plaintext,
+            "server-side static-ECC PMS decrypt must recover the original PMS plaintext"
+        );
+    }
+
+    /// R-3 negative test: ciphertext encrypted with the *wrong* key
+    /// must NOT decrypt successfully. Verifies that the decrypt path
+    /// rejects tampered/wrong-key ciphertexts (catches a wrong-keypair
+    /// wiring regression).
+    #[cfg(not(feature = "tlcp-gmssl-compat"))]
+    #[test]
+    fn test_static_ecc_server_pms_decrypt_rejects_wrong_key() {
+        use gm_crypto::sm2::{Sm2Decryptor, Sm2Encryptor, Sm2KeyPair};
+
+        let server_enc_kp = Sm2KeyPair::generate().expect("server kp");
+        let attacker_kp = Sm2KeyPair::generate().expect("attacker kp");
+
+        let pms = vec![0xAAu8; 48];
+        let enc = Sm2Encryptor::new(&attacker_kp.public_key_bytes_uncompressed()).unwrap();
+        let ciphertext = enc.encrypt_der(&pms).expect("encrypt");
+
+        let server_enc_priv_bytes = server_enc_kp.private_key_bytes();
+        let local = Sm2KeyPair::from_private_key(&server_enc_priv_bytes).unwrap();
+        let dec = Sm2Decryptor::new(local);
+        // Decryption with the wrong key either fails outright or yields
+        // garbage plaintext (SM2 is IND-CCA2, so the result is
+        // indistinguishable from random). We accept either outcome
+        // — what we MUST reject is a clean 48-byte return that
+        // matches the original PMS.
+        match dec.decrypt(&ciphertext) {
+            Err(_) => { /* expected: outright decrypt failure */ }
+            Ok(plaintext) => assert_ne!(
+                plaintext, pms,
+                "decrypt with wrong key must NOT recover the original PMS"
+            ),
+        }
+    }
+    // ========================================================================
     // Handshake message serialization tests
     // ========================================================================
     #[test]
@@ -3926,12 +4089,12 @@ mod tests {
         assert_eq!(bytes[0], HandshakeType::ClientKeyExchange as u8);
         // Handshake body length is 24-bit, spanning bytes 1..=3.
         let body_len = ((bytes[1] as usize) << 16) | ((bytes[2] as usize) << 8) | bytes[3] as usize;
-        let parsed = TlcpClientKeyExchange::from_body(&bytes[4..4 + body_len]).unwrap();
+        let parsed = TlcpClientKeyExchange::from_body(&bytes[4..4 + body_len], false).unwrap();
         // The wire payload is the ECParameters-wrapped blob
         // (`[curve_type][named_curve][pub_len][pub]`). The raw public
         // key is recoverable via `ecdhe_public_key()`.
         assert_eq!(
-            parsed.key_exchange.len(),
+            parsed.as_ecdhe_wire_body().expect("ECDHE variant").len(),
             TLCP_ECH_PARAMS_PREFIX.len() + 1 + 65
         );
         assert_eq!(
@@ -3946,8 +4109,11 @@ mod tests {
         let bytes = cke.to_bytes();
         assert_eq!(bytes[0], HandshakeType::ClientKeyExchange as u8);
         let body_len = ((bytes[1] as usize) << 16) | ((bytes[2] as usize) << 8) | bytes[3] as usize;
-        let parsed = TlcpClientKeyExchange::from_body(&bytes[4..4 + body_len]).unwrap();
-        assert_eq!(parsed.key_exchange, encrypted_pms);
+        let parsed = TlcpClientKeyExchange::from_body(&bytes[4..4 + body_len], true).unwrap();
+        assert_eq!(
+            parsed.as_ecc_ciphertext().expect("Ecc variant"),
+            encrypted_pms.as_slice()
+        );
     }
     #[test]
     fn test_ecdhe_params_roundtrip() {

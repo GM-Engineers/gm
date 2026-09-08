@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-08
+
+### Changed — BREAKING (server-side static-ECC PMS now works)
+
+- **C-4 fix: server-side static-ECC PMS decryption**
+  ([`src/tlcp/mod.rs`](src/tlcp/mod.rs) `accept_with_certs` step 8
+  `None` arm,
+  [`src/tlcp/messages/client_key_exchange.rs`](src/tlcp/messages/client_key_exchange.rs)).
+  Audit finding **C-4** in
+  [`interop/AUDIT-2026-09-06-v2.md`](interop/AUDIT-2026-09-06-v2.md)
+  §C-4 is now **Resolved**. The server no longer returns an explicit
+  error on the `ECCEncryptedPreMasterSecret` decrypt step. The
+  pre-master secret is recovered via SM2 PKE mode 1 (per
+  GB/T 32918.4-2016) under the server's encryption keypair, and
+  the plaintext (`ProtocolVersion client_version (2B) ||
+  opaque random[46]`, total 48 bytes per GB/T 38636-2020
+  §6.4.5.8 c)) is fed into the master_secret derivation like any
+  other PMS.
+
+  Side effects:
+
+  - `TlcpClientKeyExchange` is now an enum-backed struct with
+    two variants: `Ecdhe { ephemeral_public }` and
+    `Ecc { ciphertext }`. Callers access the inner body via
+    `as_ecdhe_wire_body()` / `as_ecc_ciphertext()` helpers
+    (or the existing `ecdhe_public_key()` for the raw SEC1
+    point). `from_body` requires an `is_ecc_mode: bool`
+    parameter to disambiguate the variant since the GmSSL-master
+    shim's `uint16` length prefix wraps both variants.
+  - Server-side `Sm2KeyPair` reconstruction: `Sm2KeyPair` is
+    not `Clone`, so the decrypt path extracts the private-key
+    bytes from the stored `Arc<Sm2KeyPair>` and rebuilds a
+    local `Sm2KeyPair` via `from_private_key(...)` for the
+    `Sm2Decryptor::new(...)` call. The local copy is zeroized on
+    drop (via the existing `ZeroizeOnDrop` derive on
+    `Sm2KeyPair`).
+  - 4 new unit tests in
+    `src/tlcp/messages/client_key_exchange.rs::tests`:
+    `cke_ecc_ciphertext_returns_bytes_for_ecc_body`,
+    `cke_ecc_ciphertext_returns_none_for_ecdhe_body`,
+    `cke_ecc_roundtrip_via_enum_body` (per-mode split),
+    `from_body_rejects_wrong_is_ecc_mode_flag`.
+  - 2 new unit tests in `src/tlcp/mod.rs::tests`:
+    `test_static_ecc_server_pms_decrypt_smoke` (encrypts a
+    synthetic 48-byte PMS, decrypts via the same path
+    `accept_with_certs` uses, asserts plaintext match) and
+    `test_static_ecc_server_pms_decrypt_rejects_wrong_key`
+    (negative test: wrong-key ciphertext must NOT recover
+    the original PMS).
+  - All three feature modes (`default`, `tlcp-gmssl-compat`,
+    `tlcp-strict`) remain green; the new PMS-decrypt path is
+    gated to `not(feature = "tlcp-gmssl-compat")` because the
+    gmssl-compat static-ECC path continues to use the
+    ECDHE-style SKE + raw 32-byte ECDH PMS legacy behaviour
+    (R-1 / R-2 semantics).
+
+### Verification
+
+- `cargo +stable fmt --all -- --check` clean.
+- `cargo +stable clippy --workspace --all-features --all-targets -- -D warnings` clean.
+- `cargo +stable test --workspace` clean: gm-tlcp 91 unit tests (was 85 in 0.3.1) + 5 loopback + 32 integration + 4 GmSSL interop (7 `#[ignore]`d) + 8 doctests.
+- `cargo +stable test -p gm-tlcp --features tlcp-gmssl-compat` clean (rollback path verified).
+- `cargo +stable test -p gm-tlcp --features tlcp-strict` clean (deprecated no-op verified).
+- `cargo +stable publish --dry-run -p gm-tlcp --registry crates-io` clean (44 files, 498.7 KiB).
+
+### Audit-finding tally (post-0.4.0)
+
+- **C-1** (ECDHE CKE u16 prefix) — Resolved by R-1, 0.3.0.
+- **C-2** (static-ECC SKE shape) — Resolved by R-2, 0.3.1.
+- **C-3** (server 32-byte raw ECDH) — Resolved by R-1, 0.3.0.
+- **C-4** (server-side ECC/RSA CKE) — **Resolved by R-3, 0.4.0**
+  (static-ECC suites only; RSA suites pending R-5 / 0.6.0).
+
+All four Critical audit findings on static-ECC suites are now
+**RESOLVED**. The next Critical-remaining scope is **RSA suites
+server-side PMS decryption** (R-5 / 0.6.0) and **SM9 suites** (R-4
+/ 0.5.0).
+
 ## [0.3.1] - 2026-09-08
 
 ### Changed
@@ -273,6 +351,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accidentally pushed to a public mirror.
 
 [Unreleased]: https://github.com/GM-Engineers/gm/compare/main...HEAD
+[0.4.0]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.3.1...gm-tlcp-v0.4.0
 [0.3.1]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.3.0...gm-tlcp-v0.3.1
 [0.3.0]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.2.2...gm-tlcp-v0.3.0
 [0.2.2]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.2.1...gm-tlcp-v0.2.2

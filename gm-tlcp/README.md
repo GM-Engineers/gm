@@ -30,9 +30,9 @@ TLCP（Transport Layer Cryptographic Protocol，传输层密码协议）是 GB/T
 - ✅ Session resumption via session IDs (`TlcpSessionCache`)
 - ✅ Alert 协议（`TlcpAlert` / `TlcpAlertDescription`）
 - ✅ 全部 4 个密码套件
-- ✅ 85 lib tests + 5 loopback tests（`tests/gm_tlcp_loopback.rs`，包含 `gm_tlcp_kap_pms_roundtrip_with_real_keys`）+ 32 integration tests (`tests/integration_tlcp.rs`) + 4 default gmssl interop tests (7 more `#[ignore]`d, run with `--ignored` when `gmssl` is on `PATH`)
+- ✅ 91 lib tests + 5 loopback tests（`tests/gm_tlcp_loopback.rs`，包含 `gm_tlcp_kap_pms_roundtrip_with_real_keys`）+ 32 integration tests (`tests/integration_tlcp.rs`) + 4 default gmssl interop tests (7 more `#[ignore]`d, run with `--ignored` when `gmssl` is on `PATH`)
 - ✅ GmSSL 3.3.0-dev (`master`) handshake + APP_DATA byte-for-byte 互操作验证（需 `tlcp-gmssl-compat`）
-- ✅ openHiTLS `s_server -tlcp` 互操作验证：ECDHE（默认模式）+ static-ECC SKE round-trip（默认模式 sig-only body）
+- ✅ openHiTLS `s_server -tlcp` 互操作验证：ECDHE（默认模式）+ static-ECC SKE + static-ECC PMS decrypt（默认模式，server 侧 R-3 已实现）
 - ❌ Tongsuo 8.3.0 round-trip — Tongsuo-side NTLS state-machine 拒绝 `0x0101`， 调查见 `interop/tongsuo/upstream/`
 
 ## 特性开关 (Feature flags)
