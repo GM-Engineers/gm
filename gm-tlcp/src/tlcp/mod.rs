@@ -1339,6 +1339,15 @@ pub struct TlcpConnector {
     /// Password to decrypt client_sign_key (and client_enc_key if
     /// it is also encrypted). Default: P@ssw0rd.
     client_sign_key_password: Option<String>,
+    /// SM9 KGC master encryption **public** point (R-4.1).
+    /// The client uses this to encrypt the pre-master secret
+    /// to the server's SM9 identity in step 7.5 (only when
+    /// the negotiated suite has `key_exchange == KeyExchangeMode::Ibc`).
+    sm9_kgc_ppube: Option<gm_sm9_rs::G1Point>, // KGC encryption master public (used to encrypt PMS to server identity)
+    sm9_kgc_ppubs: Option<gm_sm9_rs::G2Point>, // KGC signing master public (used to verify SM9 IBC SKE signature)
+    /// SM9 server identity (R-4.1). Must match the identity the
+    /// server's KGC bound the user decryption key to.
+    sm9_server_id: Option<Vec<u8>>,
 }
 impl Default for TlcpConnector {
     fn default() -> Self {
@@ -1360,6 +1369,8 @@ impl TlcpConnector {
                 TLS_ECDHE_SM4_CBC_SM3,
                 TLS_ECC_SM4_GCM_SM3,
                 TLS_ECC_SM4_CBC_SM3,
+                TLS_IBC_SM4_GCM_SM3,
+                TLS_IBC_SM4_CBC_SM3,
             ],
             #[allow(deprecated)]
             gmssl_padding_compat: false,
@@ -1367,6 +1378,9 @@ impl TlcpConnector {
             client_sign_key: None,
             client_enc_key: None,
             client_sign_key_password: None,
+            sm9_kgc_ppube: None,
+            sm9_kgc_ppubs: None,
+            sm9_server_id: None,
         }
     }
     /// Create a connector with a shared session cache for resumption.
@@ -1497,6 +1511,50 @@ impl TlcpConnector {
         }
     }
     /// Production ECDHE handshake with server certificate verification.
+    /// Configure SM9 IBC key material on the client side (R-4.1).
+    ///
+    /// `kgc_ppube` is the KGC master encryption **public** point
+    /// (the SM9 master public key). The client uses this to
+    /// encrypt the pre-master secret to the server's identity
+    /// in step 7.5. Production deployments should publish this
+    /// via the KGC's certificate or out-of-band channel.
+    ///
+    /// `server_id` is the SM9 server identity that the KGC bound
+    /// the user decryption key to. Must match the server's
+    /// configured `sm9_server_id`.
+    ///
+    /// Also adds `TLS_IBC_SM4_GCM_SM3` and `TLS_IBC_SM4_CBC_SM3`
+    /// to the client's cipher-suite preference list (in addition
+    /// to the four SM2 suites already there).
+    /// Configure SM9 IBC key material on the client side (R-4.1).
+    ///
+    /// Both `kgc_ppube` (encryption master public) and `kgc_ppubs` (signing
+    /// master public) are required:
+    /// - `kgc_ppube` (G1Point): used to encrypt the pre-master secret to
+    ///   the server's SM9 identity in step 7.5.
+    /// - `kgc_ppubs` (G2Point): used to verify the server's SM9 IBC
+    ///   signature on the ServerKeyExchange in step 5.
+    pub fn with_sm9_certs(
+        mut self,
+        kgc_ppube: gm_sm9_rs::G1Point,
+        kgc_ppubs: gm_sm9_rs::G2Point,
+        server_id: Vec<u8>,
+    ) -> Self {
+        self.sm9_kgc_ppube = Some(kgc_ppube);
+        self.sm9_kgc_ppubs = Some(kgc_ppubs);
+        self.sm9_server_id = Some(server_id);
+        // Add IBC suites to the preference list if not already present.
+        let mut suites = self.cipher_suites;
+        if !suites.contains(&TLS_IBC_SM4_GCM_SM3) {
+            suites.push(TLS_IBC_SM4_GCM_SM3);
+        }
+        if !suites.contains(&TLS_IBC_SM4_CBC_SM3) {
+            suites.push(TLS_IBC_SM4_CBC_SM3);
+        }
+        self.cipher_suites = suites;
+        self
+    }
+
     pub async fn connect_with_certs<S>(&self, transport: S) -> Result<TlcpStream<S>, TlcpError>
     where
         S: AsyncRead + AsyncWrite + Unpin,
@@ -1584,33 +1642,77 @@ impl TlcpConnector {
                 ske_type
             )));
         }
-        // Step 5: Verify ServerKeyExchange signature. We REQUIRE the caller
-        // to configure `server_sign_pubkey` + `server_sign_distid` via
-        // `with_server_sign_key(...)`; silently skipping verification would
-        // be a critical MITM vulnerability (audit 2026-08-31).
-        let (pubkey, distid) = self
-            .server_sign_pubkey
-            .as_ref()
-            .zip(self.server_sign_distid.as_ref())
-            .ok_or_else(|| {
+        // Step 5: Verify ServerKeyExchange signature.
+        // ECDHE / static-ECC use SM2 sigs (server_sign_pubkey + distid).
+        // SM9 IBC suites use SM9 IBC sigs (KGC public + server_id).
+        // We dispatch on key_exchange BEFORE constructing the verifier
+        // so we don't try to build an SM2 verifier when the suite is
+        // SM9 (R-4.1).
+        if matches!(
+            suite.key_exchange,
+            crate::tlcp::cipher_suite::KeyExchangeMode::Ibc
+        ) {
+            let kgc_ppubs = self.sm9_kgc_ppubs.as_ref().ok_or_else(|| {
                 TlcpError::HandshakeFailed(
-                    "ServerKeyExchange signature verification requires \
-                     server_sign_pubkey + server_sign_distid; call \
-                     TlcpConnector::with_server_sign_key() before \
-                     connect_with_certs()."
+                    "SM9 IBC suite negotiated but                      TlcpConnector::with_sm9_certs(...) was not called (need ppubs)"
                         .to_string(),
                 )
             })?;
-        let verifier = gm_crypto::sm2::Sm2Verifier::new(pubkey, distid)
-            .map_err(|e| TlcpError::HandshakeFailed(format!("verifier create: {}", e)))?;
-        crate::tlcp::crypto::verify::verify_ske_signature(
-            is_ecc_mode,
-            &ske_body,
-            &client_random,
-            &server_random,
-            &cert_pair.enc_cert,
-            &verifier,
-        )?;
+            let server_id = self.sm9_server_id.as_ref().ok_or_else(|| {
+                TlcpError::HandshakeFailed(
+                    "SM9 IBC suite negotiated but sm9_server_id is missing".to_string(),
+                )
+            })?;
+            // Parse SKE body as IBC variant.
+            let ske = TlcpServerKeyExchange::from_body(
+                &ske_body,
+                crate::tlcp::cipher_suite::KeyExchangeMode::Ibc,
+            )?;
+            let (ske_server_id, sig_bytes) = ske.as_ibc().ok_or_else(|| {
+                TlcpError::InvalidMessage(
+                    "SM9 IBC verify called on non-IBC ServerKeyExchange body".to_string(),
+                )
+            })?;
+            if ske_server_id != server_id.as_slice() {
+                return Err(TlcpError::HandshakeFailed(format!(
+                    "SM9 IBC SKE server_id mismatch: SKE says {:?}, connector says {:?}",
+                    String::from_utf8_lossy(ske_server_id),
+                    String::from_utf8_lossy(server_id)
+                )));
+            }
+            let verifier = gm_sm9_rs::Verifier::new(server_id, kgc_ppubs);
+            let mut to_verify = Vec::with_capacity(64 + server_id.len());
+            to_verify.extend_from_slice(&client_random);
+            to_verify.extend_from_slice(&server_random);
+            to_verify.extend_from_slice(server_id);
+            let sig = gm_sm9_rs::Signature::from_bytes(sig_bytes)
+                .map_err(|e| TlcpError::HandshakeFailed(format!("SM9 IBC SKE sig parse: {}", e)))?;
+            verifier.verify(&to_verify, &sig).map_err(|e| {
+                TlcpError::HandshakeFailed(format!("SM9 IBC SKE signature verify: {}", e))
+            })?;
+        } else {
+            // Existing ECDHE / static-ECC verification path.
+            let (pubkey, distid) = self
+                .server_sign_pubkey
+                .as_ref()
+                .zip(self.server_sign_distid.as_ref())
+                .ok_or_else(|| {
+                    TlcpError::HandshakeFailed(
+                        "ServerKeyExchange signature verification requires                          server_sign_pubkey + server_sign_distid; call                          TlcpConnector::with_server_sign_key() before                          connect_with_certs()."
+                            .to_string(),
+                    )
+                })?;
+            let verifier = gm_crypto::sm2::Sm2Verifier::new(pubkey, distid)
+                .map_err(|e| TlcpError::HandshakeFailed(format!("verifier create: {}", e)))?;
+            crate::tlcp::crypto::verify::verify_ske_signature(
+                is_ecc_mode,
+                &ske_body,
+                &client_random,
+                &server_random,
+                &cert_pair.enc_cert,
+                &verifier,
+            )?;
+        }
         client_hs.transcript.extend_from_slice(&ske_payload);
         // Step 5.5: Read CertificateRequest or ServerHelloDone. The next plaintext
         // record from the server is one of:
@@ -1798,196 +1900,258 @@ impl TlcpConnector {
         // Step 7: Build ClientKeyExchange + derive pre-master secret.
         // - ECDHE: generate ephemeral keypair, send public key, derive PMS via SM2 ECDH.
         // - ECC  : generate 48 random bytes as PMS, SM2-encrypt to server enc cert, send ciphertext.
-        let (cke_bytes, pms) = if is_ecc_mode {
-            // ECC: extract enc cert SM2 pubkey (65 bytes uncompressed point).
-            let enc_pub =
-                crate::tlcp::crypto::verify::extract_sm2_pubkey_from_cert_der(&cert_pair.enc_cert)
-                    .map_err(TlcpError::HandshakeFailed)?;
-            // Per GB/T 38636-2020 §6.4.1.6 the PreMasterSecret is 48 bytes laid
-            // out as  `ProtocolVersion (2 bytes) || random (46 bytes)`.
-            // gmSSL's `tlcp_check_pre_master_secret` enforces this format
-            // (rejects anything else with `illegal_parameter`), so we must
-            // prefix the random bytes with our negotiated TLCP version.
+        // R-4.1: SM9 IBC suites have a dedicated CKE encrypt path.
+        // We dispatch on key_exchange BEFORE the existing
+        // if/else so the existing ECDHE / ECC paths are untouched.
+        let (cke_bytes, pms) = if matches!(
+            suite.key_exchange,
+            crate::tlcp::cipher_suite::KeyExchangeMode::Ibc
+        ) {
+            // SM9 IBC: client SM9-encrypts 48-byte PMS to the server's
+            // SM9 identity, sends ciphertext as CKE body.
+            // The encryption path uses ppube (G1) for SM9 PKE;
+            // the verify path (in step 5) uses ppubs (G2) for SM9 sig.
+            let kgc_ppube = self.sm9_kgc_ppube.as_ref().ok_or_else(|| {
+                TlcpError::HandshakeFailed(
+                    "SM9 IBC suite negotiated but \
+                     TlcpConnector::with_sm9_certs(...) was not called (need ppube)"
+                        .to_string(),
+                )
+            })?;
+            let server_id = self.sm9_server_id.as_ref().ok_or_else(|| {
+                TlcpError::HandshakeFailed(
+                    "SM9 IBC suite negotiated but sm9_server_id is missing".to_string(),
+                )
+            })?;
+            // Per GB/T 38636-2020 section 6.4.5.8 c), PMS is 48 bytes:
+            //   `ProtocolVersion (2 bytes) || random (46 bytes)`.
             let mut pms_bytes = [0u8; 48];
             pms_bytes[0] = TLCP_VERSION_1_0[0];
             pms_bytes[1] = TLCP_VERSION_1_0[1];
             rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut pms_bytes[2..]);
-            let pms_bytes = pms_bytes.to_vec();
-            // SM2-encrypt, DER-encoded SM2Cipher (matches GmSSL convention).
-            let enc = gm_crypto::sm2::Sm2Encryptor::new(&enc_pub)
-                .map_err(|e| TlcpError::HandshakeFailed(format!("sm2 enc new: {}", e)))?;
-            let ciphertext = enc
-                .encrypt_der(&pms_bytes)
-                .map_err(|e| TlcpError::HandshakeFailed(format!("sm2 encrypt: {}", e)))?;
+            let encryptor = gm_sm9_rs::Encryptor::new(server_id, kgc_ppube);
+            let ct = encryptor
+                .encrypt(&pms_bytes, &mut rand::rng())
+                .map_err(|e| TlcpError::HandshakeFailed(format!("SM9 IBC PMS encrypt: {}", e)))?;
+            let ct_bytes = ct.to_bytes();
             // TLCP CKE wire format (matches GmSSL): handshake header
             //   [type=0x10][length:3 bytes BE]
             // followed by handshake body
-            //   [2-byte ciphertext length prefix][ciphertext bytes].
-            let mut body = Vec::with_capacity(2 + ciphertext.len());
-            body.push((ciphertext.len() >> 8) as u8);
-            body.push(ciphertext.len() as u8);
-            body.extend_from_slice(&ciphertext);
+            //   [ciphertext bytes]. (No uint16 prefix in default mode;
+            // the spec-default CKE body is the raw ciphertext.)
+            let mut body = Vec::with_capacity(ct_bytes.len());
+            body.extend_from_slice(&ct_bytes);
             let mut msg = Vec::with_capacity(4 + body.len());
             msg.push(HandshakeType::ClientKeyExchange as u8);
             msg.push((body.len() >> 16) as u8);
             msg.push((body.len() >> 8) as u8);
             msg.push(body.len() as u8);
             msg.extend_from_slice(&body);
-            (msg, pms_bytes)
+            (msg, pms_bytes.to_vec())
         } else {
-            // ECDHE: TLCP ECDHE PMS derivation per GB/T 38636-2020
-            // §6.4.6.2 (a.k.a. GB/T 32918.3-2016 §6.4.2 full key
-            // agreement). gmssl master implements this in
-            // `sm2_key_exchange()`: both parties use their long-term
-            // encryption key + a fresh ephemeral, compute a shared
-            // point V, then SM3-KDF over (x_V||y_V||Z_A||Z_B, 48).
-            //
-            // Inputs required:
-            //   - Client static enc keypair (priv + pub)
-            //   - Client ephemeral keypair (priv + pub) — generated
-            //     here
-            //   - Server static enc pub (from server's enc cert in
-            //     `cert_pair.enc_cert`)
-            //   - Server ephemeral pub (from ServerKeyExchange)
-            //   - Z_A, Z_B (SM2 Z values for both static pubs)
-            let ske = TlcpServerKeyExchange::from_body(
-                &ske_body,
-                crate::tlcp::cipher_suite::KeyExchangeMode::Ecdhe,
-            )?;
-            // 1. Load the client's static encryption key (configured
-            //    via with_client_certs(..., Some(enc_key_pem), ...)).
-            let client_enc_pem = self.client_enc_key.as_deref().ok_or_else(|| {
-                TlcpError::HandshakeFailed(
-                    "ECDHE cipher suite selected but no client_enc_key was configured. \
+            // Existing ECDHE / static-ECC path.
+            if is_ecc_mode {
+                // ECC: extract enc cert SM2 pubkey (65 bytes uncompressed point).
+                let enc_pub = crate::tlcp::crypto::verify::extract_sm2_pubkey_from_cert_der(
+                    &cert_pair.enc_cert,
+                )
+                .map_err(TlcpError::HandshakeFailed)?;
+                // Per GB/T 38636-2020 §6.4.1.6 the PreMasterSecret is 48 bytes laid
+                // out as  `ProtocolVersion (2 bytes) || random (46 bytes)`.
+                // gmSSL's `tlcp_check_pre_master_secret` enforces this format
+                // (rejects anything else with `illegal_parameter`), so we must
+                // prefix the random bytes with our negotiated TLCP version.
+                let mut pms_bytes = [0u8; 48];
+                pms_bytes[0] = TLCP_VERSION_1_0[0];
+                pms_bytes[1] = TLCP_VERSION_1_0[1];
+                rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut pms_bytes[2..]);
+                let pms_bytes = pms_bytes.to_vec();
+                // SM2-encrypt, DER-encoded SM2Cipher (matches GmSSL convention).
+                let enc = gm_crypto::sm2::Sm2Encryptor::new(&enc_pub)
+                    .map_err(|e| TlcpError::HandshakeFailed(format!("sm2 enc new: {}", e)))?;
+                let ciphertext = enc
+                    .encrypt_der(&pms_bytes)
+                    .map_err(|e| TlcpError::HandshakeFailed(format!("sm2 encrypt: {}", e)))?;
+                // TLCP CKE wire format (matches GmSSL): handshake header
+                //   [type=0x10][length:3 bytes BE]
+                // followed by handshake body
+                //   [2-byte ciphertext length prefix][ciphertext bytes].
+                let mut body = Vec::with_capacity(2 + ciphertext.len());
+                body.push((ciphertext.len() >> 8) as u8);
+                body.push(ciphertext.len() as u8);
+                body.extend_from_slice(&ciphertext);
+                let mut msg = Vec::with_capacity(4 + body.len());
+                msg.push(HandshakeType::ClientKeyExchange as u8);
+                msg.push((body.len() >> 16) as u8);
+                msg.push((body.len() >> 8) as u8);
+                msg.push(body.len() as u8);
+                msg.extend_from_slice(&body);
+                (msg, pms_bytes)
+            } else {
+                // ECDHE: TLCP ECDHE PMS derivation per GB/T 38636-2020
+                // §6.4.6.2 (a.k.a. GB/T 32918.3-2016 §6.4.2 full key
+                // agreement). gmssl master implements this in
+                // `sm2_key_exchange()`: both parties use their long-term
+                // encryption key + a fresh ephemeral, compute a shared
+                // point V, then SM3-KDF over (x_V||y_V||Z_A||Z_B, 48).
+                //
+                // Inputs required:
+                //   - Client static enc keypair (priv + pub)
+                //   - Client ephemeral keypair (priv + pub) — generated
+                //     here
+                //   - Server static enc pub (from server's enc cert in
+                //     `cert_pair.enc_cert`)
+                //   - Server ephemeral pub (from ServerKeyExchange)
+                //   - Z_A, Z_B (SM2 Z values for both static pubs)
+                let ske = TlcpServerKeyExchange::from_body(
+                    &ske_body,
+                    crate::tlcp::cipher_suite::KeyExchangeMode::Ecdhe,
+                )?;
+                // 1. Load the client's static encryption key (configured
+                //    via with_client_certs(..., Some(enc_key_pem), ...)).
+                let client_enc_pem = self.client_enc_key.as_deref().ok_or_else(|| {
+                    TlcpError::HandshakeFailed(
+                        "ECDHE cipher suite selected but no client_enc_key was configured. \
                      Call TlcpConnector::with_client_certs() with the encryption \
                      (PKCS#8/SEC1 PEM) key."
-                        .to_string(),
+                            .to_string(),
+                    )
+                })?;
+                let client_enc_kp = gm_crypto::sm2::Sm2KeyPair::from_private_key_pem(
+                    client_enc_pem,
                 )
-            })?;
-            let client_enc_kp = gm_crypto::sm2::Sm2KeyPair::from_private_key_pem(client_enc_pem)
                 .map_err(|e| {
                     TlcpError::HandshakeFailed(format!(
                         "client enc key load (PKCS#8/SEC1 PEM): {}",
                         e
                     ))
                 })?;
-            let client_enc_pub_sec1 = client_enc_kp.public_key_bytes_uncompressed();
-            if client_enc_pub_sec1.len() != 65 || client_enc_pub_sec1[0] != 0x04 {
-                return Err(TlcpError::HandshakeFailed(format!(
-                    "client enc pub SEC1 must be uncompressed (65 bytes 0x04||X||Y), got {} bytes",
-                    client_enc_pub_sec1.len()
-                )));
-            }
-            let mut client_enc_pub_xy = [0u8; 64];
-            client_enc_pub_xy.copy_from_slice(&client_enc_pub_sec1[1..65]);
-            // 2. Extract server's static enc pubkey (65 bytes from
-            //    the server's enc cert we already parsed in step 5).
-            let server_enc_pub_sec1 =
-                crate::tlcp::crypto::verify::extract_sm2_pubkey_from_cert_der(&cert_pair.enc_cert)
-                    .map_err(TlcpError::HandshakeFailed)?;
-            if server_enc_pub_sec1.len() != 65 || server_enc_pub_sec1[0] != 0x04 {
-                return Err(TlcpError::HandshakeFailed(format!(
-                    "server enc pub SEC1 must be uncompressed (65 bytes 0x04||X||Y), got {} bytes",
-                    server_enc_pub_sec1.len()
-                )));
-            }
-            let mut server_enc_pub_xy = [0u8; 64];
-            server_enc_pub_xy.copy_from_slice(&server_enc_pub_sec1[1..65]);
-            // 3. Generate a fresh client ephemeral keypair for this
-            //    handshake. We use `Sm2KeyPair` (not `Sm2EcdhKeypair`)
-            //    because we need direct access to the 32-byte scalar
-            //    (`private_key_bytes`) for `compute_tlcp_ecdhe_pms`.
-            let client_ephemeral_kp = gm_crypto::sm2::Sm2KeyPair::generate()
-                .map_err(|e| TlcpError::HandshakeFailed(format!("client ECDHE keygen: {}", e)))?;
-            let client_ephemeral_priv: [u8; 32] = {
-                let v = client_ephemeral_kp.private_key_bytes();
-                if v.len() != 32 {
+                let client_enc_pub_sec1 = client_enc_kp.public_key_bytes_uncompressed();
+                if client_enc_pub_sec1.len() != 65 || client_enc_pub_sec1[0] != 0x04 {
                     return Err(TlcpError::HandshakeFailed(format!(
-                        "client ephemeral priv must be 32 bytes, got {}",
-                        v.len()
+                        "client enc pub SEC1 must be uncompressed (65 bytes 0x04||X||Y), got {} bytes",
+                        client_enc_pub_sec1.len()
                     )));
                 }
-                let mut a = [0u8; 32];
-                a.copy_from_slice(&v);
-                a
-            };
-            let client_ephemeral_sec1 = client_ephemeral_kp.public_key_bytes_uncompressed();
-            if client_ephemeral_sec1.len() != 65 || client_ephemeral_sec1[0] != 0x04 {
-                return Err(TlcpError::HandshakeFailed(format!(
-                    "client ephemeral SEC1 must be uncompressed (65 bytes 0x04||X||Y), got {} bytes",
-                    client_ephemeral_sec1.len()
-                )));
-            }
-            let mut client_ephemeral_xy = [0u8; 64];
-            client_ephemeral_xy.copy_from_slice(&client_ephemeral_sec1[1..65]);
-            // 4. Server ephemeral pub from ServerKeyExchange
-            //    (`ecdhe_params.ephemeral_public` is the 64-byte
-            //    (x || y) of R_B).
-            let mut server_ephemeral_xy = [0u8; 64];
-            let server_ecdhe_params = ske.as_ecdhe().ok_or_else(|| {
-                TlcpError::HandshakeFailed(
-                    "client expected ECDHE ServerKeyExchange but got sig-only Ecc body".to_string(),
+                let mut client_enc_pub_xy = [0u8; 64];
+                client_enc_pub_xy.copy_from_slice(&client_enc_pub_sec1[1..65]);
+                // 2. Extract server's static enc pubkey (65 bytes from
+                //    the server's enc cert we already parsed in step 5).
+                let server_enc_pub_sec1 =
+                    crate::tlcp::crypto::verify::extract_sm2_pubkey_from_cert_der(
+                        &cert_pair.enc_cert,
+                    )
+                    .map_err(TlcpError::HandshakeFailed)?;
+                if server_enc_pub_sec1.len() != 65 || server_enc_pub_sec1[0] != 0x04 {
+                    return Err(TlcpError::HandshakeFailed(format!(
+                        "server enc pub SEC1 must be uncompressed (65 bytes 0x04||X||Y), got {} bytes",
+                        server_enc_pub_sec1.len()
+                    )));
+                }
+                let mut server_enc_pub_xy = [0u8; 64];
+                server_enc_pub_xy.copy_from_slice(&server_enc_pub_sec1[1..65]);
+                // 3. Generate a fresh client ephemeral keypair for this
+                //    handshake. We use `Sm2KeyPair` (not `Sm2EcdhKeypair`)
+                //    because we need direct access to the 32-byte scalar
+                //    (`private_key_bytes`) for `compute_tlcp_ecdhe_pms`.
+                let client_ephemeral_kp = gm_crypto::sm2::Sm2KeyPair::generate().map_err(|e| {
+                    TlcpError::HandshakeFailed(format!("client ECDHE keygen: {}", e))
+                })?;
+                let client_ephemeral_priv: [u8; 32] = {
+                    let v = client_ephemeral_kp.private_key_bytes();
+                    if v.len() != 32 {
+                        return Err(TlcpError::HandshakeFailed(format!(
+                            "client ephemeral priv must be 32 bytes, got {}",
+                            v.len()
+                        )));
+                    }
+                    let mut a = [0u8; 32];
+                    a.copy_from_slice(&v);
+                    a
+                };
+                let client_ephemeral_sec1 = client_ephemeral_kp.public_key_bytes_uncompressed();
+                if client_ephemeral_sec1.len() != 65 || client_ephemeral_sec1[0] != 0x04 {
+                    return Err(TlcpError::HandshakeFailed(format!(
+                        "client ephemeral SEC1 must be uncompressed (65 bytes 0x04||X||Y), got {} bytes",
+                        client_ephemeral_sec1.len()
+                    )));
+                }
+                let mut client_ephemeral_xy = [0u8; 64];
+                client_ephemeral_xy.copy_from_slice(&client_ephemeral_sec1[1..65]);
+                // 4. Server ephemeral pub from ServerKeyExchange
+                //    (`ecdhe_params.ephemeral_public` is the 64-byte
+                //    (x || y) of R_B).
+                let mut server_ephemeral_xy = [0u8; 64];
+                let server_ecdhe_params = ske.as_ecdhe().ok_or_else(|| {
+                    TlcpError::HandshakeFailed(
+                        "client expected ECDHE ServerKeyExchange but got sig-only Ecc body"
+                            .to_string(),
+                    )
+                })?;
+                if server_ecdhe_params.ephemeral_public.len() != 65
+                    || server_ecdhe_params.ephemeral_public[0] != 0x04
+                {
+                    return Err(TlcpError::HandshakeFailed(format!(
+                        "server ephemeral SEC1 must be uncompressed (65 bytes 0x04||X||Y), got {} bytes",
+                        server_ecdhe_params.ephemeral_public.len()
+                    )));
+                }
+                server_ephemeral_xy.copy_from_slice(&server_ecdhe_params.ephemeral_public[1..65]);
+                // 5. Compute the two SM2 `Z` values. NOTE the unusual Z
+                //    order required for GmSSL master interop: gmssl's
+                //    `tlcp_send_client_key_exchange` calls
+                //    `sm2_key_exchange(0, ...)` with `is_initiator=0`,
+                //    which puts **peer Z first** in the KDF input
+                //    (`x_V||y_V||Z_server||Z_client`). The server's
+                //    matching call uses `is_initiator=1`, which puts
+                //    **own Z first** — and since the server's own Z is
+                //    also the server's enc pub Z, both sides converge
+                //    on `Z_server || Z_client`. We pass them in that
+                //    exact order so `compute_tlcp_ecdhe_pms` produces
+                //    the same PMS as gmssl master.
+                //
+                //    gmssl master uses `SM2_DEFAULT_ID` which is the
+                //    string "1234567812345678" (16 bytes), so we default
+                //    to that for cross-implementation interop. Both distids
+                //    can be overridden via `with_server_enc_distid` /
+                //    `with_client_enc_distid` (audit M-3).
+                const DEFAULT_USER_ID: &[u8] = b"1234567812345678";
+                let server_distid: &[u8] = self
+                    .server_enc_distid
+                    .as_deref()
+                    .map(|s| s.as_bytes())
+                    .unwrap_or(DEFAULT_USER_ID);
+                let client_distid: &[u8] = self
+                    .client_enc_distid
+                    .as_deref()
+                    .map(|s| s.as_bytes())
+                    .unwrap_or(DEFAULT_USER_ID);
+                let z_server = crate::tlcp::pms::sm2_compute_z(&server_enc_pub_xy, server_distid)
+                    .map_err(|e| {
+                    TlcpError::HandshakeFailed(format!("compute Z_server: {}", e))
+                })?;
+                let z_client = crate::tlcp::pms::sm2_compute_z(&client_enc_pub_xy, client_distid)
+                    .map_err(|e| {
+                    TlcpError::HandshakeFailed(format!("compute Z_client: {}", e))
+                })?;
+                // 6. PMS = KDF(x_V || y_V || Z_server || Z_client, 48).
+                let pms_vec = crate::tlcp::pms::compute_tlcp_ecdhe_pms(
+                    &client_enc_pub_xy,
+                    &client_enc_kp.private_key().to_bytes().into(),
+                    &client_ephemeral_xy,
+                    &client_ephemeral_priv,
+                    &server_enc_pub_xy,
+                    &server_ephemeral_xy,
+                    &z_server,
+                    &z_client,
+                    48,
                 )
-            })?;
-            if server_ecdhe_params.ephemeral_public.len() != 65
-                || server_ecdhe_params.ephemeral_public[0] != 0x04
-            {
-                return Err(TlcpError::HandshakeFailed(format!(
-                    "server ephemeral SEC1 must be uncompressed (65 bytes 0x04||X||Y), got {} bytes",
-                    server_ecdhe_params.ephemeral_public.len()
-                )));
+                .map_err(|e| TlcpError::HandshakeFailed(format!("PMS derivation: {}", e)))?;
+                // 7. CKE wire format = ECParameters-wrapped 65-byte
+                //    uncompressed client ephemeral SEC1 (R_A).
+                let cke = TlcpClientKeyExchange::new_ecdhe(client_ephemeral_sec1);
+                (cke.to_bytes(), pms_vec)
             }
-            server_ephemeral_xy.copy_from_slice(&server_ecdhe_params.ephemeral_public[1..65]);
-            // 5. Compute the two SM2 `Z` values. NOTE the unusual Z
-            //    order required for GmSSL master interop: gmssl's
-            //    `tlcp_send_client_key_exchange` calls
-            //    `sm2_key_exchange(0, ...)` with `is_initiator=0`,
-            //    which puts **peer Z first** in the KDF input
-            //    (`x_V||y_V||Z_server||Z_client`). The server's
-            //    matching call uses `is_initiator=1`, which puts
-            //    **own Z first** — and since the server's own Z is
-            //    also the server's enc pub Z, both sides converge
-            //    on `Z_server || Z_client`. We pass them in that
-            //    exact order so `compute_tlcp_ecdhe_pms` produces
-            //    the same PMS as gmssl master.
-            //
-            //    gmssl master uses `SM2_DEFAULT_ID` which is the
-            //    string "1234567812345678" (16 bytes), so we default
-            //    to that for cross-implementation interop. Both distids
-            //    can be overridden via `with_server_enc_distid` /
-            //    `with_client_enc_distid` (audit M-3).
-            const DEFAULT_USER_ID: &[u8] = b"1234567812345678";
-            let server_distid: &[u8] = self
-                .server_enc_distid
-                .as_deref()
-                .map(|s| s.as_bytes())
-                .unwrap_or(DEFAULT_USER_ID);
-            let client_distid: &[u8] = self
-                .client_enc_distid
-                .as_deref()
-                .map(|s| s.as_bytes())
-                .unwrap_or(DEFAULT_USER_ID);
-            let z_server = crate::tlcp::pms::sm2_compute_z(&server_enc_pub_xy, server_distid)
-                .map_err(|e| TlcpError::HandshakeFailed(format!("compute Z_server: {}", e)))?;
-            let z_client = crate::tlcp::pms::sm2_compute_z(&client_enc_pub_xy, client_distid)
-                .map_err(|e| TlcpError::HandshakeFailed(format!("compute Z_client: {}", e)))?;
-            // 6. PMS = KDF(x_V || y_V || Z_server || Z_client, 48).
-            let pms_vec = crate::tlcp::pms::compute_tlcp_ecdhe_pms(
-                &client_enc_pub_xy,
-                &client_enc_kp.private_key().to_bytes().into(),
-                &client_ephemeral_xy,
-                &client_ephemeral_priv,
-                &server_enc_pub_xy,
-                &server_ephemeral_xy,
-                &z_server,
-                &z_client,
-                48,
-            )
-            .map_err(|e| TlcpError::HandshakeFailed(format!("PMS derivation: {}", e)))?;
-            // 7. CKE wire format = ECParameters-wrapped 65-byte
-            //    uncompressed client ephemeral SEC1 (R_A).
-            let cke = TlcpClientKeyExchange::new_ecdhe(client_ephemeral_sec1);
-            (cke.to_bytes(), pms_vec)
         };
         write_handshake_record(&mut io, &cke_bytes)
             .await
@@ -2245,6 +2409,19 @@ pub struct TlcpAcceptor {
     /// `"1234567812345678"`. Override this if the client sign cert
     /// was generated with a different user_id (audit M-3).
     client_sign_distid: Option<String>,
+    /// SM9 KGC master **signing** key (R-4.1, IBC half of C-5).
+    /// Used by the server in step 5 to sign the IBC SKE body via
+    /// the SM9 identity-based signature scheme
+    /// (GM/T 0044.1-2016 section 4).
+    sm9_sign_master: Option<Arc<gm_sm9_rs::key::SignMasterKey>>,
+    /// SM9 KGC master **encryption** key (R-4.1).
+    /// Used by the server in step 8 to decrypt the client's
+    /// SM9-encrypted pre-master secret (CKE body for IBC suites).
+    sm9_enc_master: Option<Arc<gm_sm9_rs::key::EncMasterKey>>,
+    /// SM9 server identity (R-4.1). The KGC binds the server's
+    /// user decryption key to this identity; the client encrypts
+    /// the PMS to the same identity.
+    sm9_server_id: Option<Vec<u8>>,
 }
 impl Default for TlcpAcceptor {
     fn default() -> Self {
@@ -2263,6 +2440,9 @@ impl TlcpAcceptor {
             server_enc_distid: None,
             client_enc_distid: None,
             client_sign_distid: None,
+            sm9_sign_master: None,
+            sm9_enc_master: None,
+            sm9_server_id: None,
         }
     }
     /// Create an acceptor with a shared session cache for resumption.
@@ -2288,6 +2468,34 @@ impl TlcpAcceptor {
         self.enc_cert = Some(enc_cert);
         self.sign_key = Some(Arc::new(sign_key));
         self.enc_key = Some(Arc::new(enc_key));
+        self
+    }
+
+    /// Configure SM9 IBC key material (R-4.1, IBC half of C-5).
+    ///
+    /// `kgc_master` is the KGC master key combining both the SM9
+    /// signing master key and the encryption master key (use
+    /// `gm_sm9_rs::key::KgcMasterKey::generate()` to create one
+    /// in tests, or wire it from your KGC service in production).
+    /// `server_id` is the SM9 server identity that the KGC binds
+    /// the user decryption key to. The same identity must be
+    /// configured on the client side via
+    /// [`TlcpConnector::with_sm9_certs`].
+    ///
+    /// Calling this does not affect ECDHE or static-ECC suites;
+    /// SM9 material is only consulted when the negotiated suite
+    /// has `key_exchange == KeyExchangeMode::Ibc`.
+    pub fn with_sm9_certs(
+        mut self,
+        kgc_master: gm_sm9_rs::key::KgcMasterKey,
+        server_id: Vec<u8>,
+    ) -> Self {
+        // KgcMasterKey::generate() returns both master keys inside
+        // a single struct; we keep them under separate Arc fields
+        // so handshake code can borrow them independently.
+        self.sm9_sign_master = Some(Arc::new(kgc_master.sign_master().clone()));
+        self.sm9_enc_master = Some(Arc::new(kgc_master.enc_master().clone()));
+        self.sm9_server_id = Some(server_id);
         self
     }
     /// Accept a TLCP client connection over the given transport.
@@ -2603,226 +2811,277 @@ impl TlcpAcceptor {
         // GmSSL-master shim (--features tlcp-gmssl-compat): the
         // historical 32-byte raw ECDH x-coordinate path, kept for
         // byte-for-byte interop with the legacy GmSSL interop tests.
-        let pms: Vec<u8> = match server_ephemeral_kp_opt {
-            Some(kp) => {
-                // The peer's ECDHE public key is wrapped in an
-                // ECParameters envelope (`03 00 29 || 41 || 65B`).
-                // We strip the envelope to get the 65-byte SM2 SEC1
-                // uncompressed point before feeding it into the KAP.
-                let peer_ephemeral_sec1 = cke.ecdhe_public_key().ok_or_else(|| {
-                    TlcpError::HandshakeFailed(
-                        "ECDHE ClientKeyExchange missing ECParameters envelope for sm2p256v1"
-                            .to_string(),
-                    )
-                })?;
-                #[cfg(feature = "tlcp-gmssl-compat")]
-                {
-                    // GmSSL-master shim: 32-byte raw ECDH
-                    // x-coordinate. The historical 0.2.x default-mode
-                    // path, retained only for legacy interop.
-                    kp.compute_shared_secret(peer_ephemeral_sec1).map_err(|e| {
-                        TlcpError::HandshakeFailed(format!("ECDHE shared secret: {}", e))
-                    })?
-                }
-                #[cfg(not(feature = "tlcp-gmssl-compat"))]
-                {
-                    // Spec: full SM2 KAP PMS computation.
-                    // 1) Build the server's KAP inputs from its own
-                    //    encryption keypair.
-                    let server_enc_kp = self.enc_key.clone().ok_or_else(|| {
+        // R-4.1: SM9 IBC suites have a dedicated PMS derivation path.
+        // We dispatch on key_exchange BEFORE the existing match so
+        // the existing ECDHE / static-ECC paths (and their in-scope
+        // client_enc_cert_der / server_sign_pub_xy bindings) are
+        // untouched.
+        let pms: Vec<u8> = if matches!(
+            suite.key_exchange,
+            crate::tlcp::cipher_suite::KeyExchangeMode::Ibc
+        ) {
+            // SM9 IBC: server-side SM9-decrypt of client's
+            // IBCEncryptedPreMasterSecret (closes IBC half of audit C-5).
+            let ciphertext_bytes = cke.as_ibc_ciphertext().ok_or_else(|| {
+                TlcpError::HandshakeFailed(
+                    "SM9 IBC server PMS decrypt: client CKE not in \
+                     IBCEncryptedPreMasterSecret format"
+                        .to_string(),
+                )
+            })?;
+            let sm9_enc_master = self.sm9_enc_master.as_ref().ok_or_else(|| {
+                TlcpError::HandshakeFailed(
+                    "SM9 IBC suite negotiated but \
+                     TlcpAcceptor::with_sm9_certs(...) was not called"
+                        .to_string(),
+                )
+            })?;
+            let server_id = self.sm9_server_id.as_ref().ok_or_else(|| {
+                TlcpError::HandshakeFailed(
+                    "SM9 IBC suite negotiated but sm9_server_id is missing".to_string(),
+                )
+            })?;
+            let ct = gm_sm9_rs::Ciphertext::from_bytes(ciphertext_bytes).map_err(|e| {
+                TlcpError::HandshakeFailed(format!("SM9 IBC ciphertext parse: {}", e))
+            })?;
+            let user_key = sm9_enc_master.extract_key(server_id).map_err(|e| {
+                TlcpError::HandshakeFailed(format!("SM9 user dec key extract: {}", e))
+            })?;
+            let decryptor = gm_sm9_rs::Decryptor::new(user_key);
+            let pms_plaintext = decryptor
+                .decrypt(&ct, server_id)
+                .map_err(|e| TlcpError::HandshakeFailed(format!("SM9 IBC PMS decrypt: {}", e)))?;
+            if pms_plaintext.len() != 48 {
+                return Err(TlcpError::HandshakeFailed(format!(
+                    "SM9 IBC PMS decrypt: expected 48 bytes, got {}",
+                    pms_plaintext.len()
+                )));
+            }
+            pms_plaintext
+        } else {
+            // Existing ECDHE / static-ECC path.
+            match server_ephemeral_kp_opt {
+                Some(kp) => {
+                    // The peer's ECDHE public key is wrapped in an
+                    // ECParameters envelope (`03 00 29 || 41 || 65B`).
+                    // We strip the envelope to get the 65-byte SM2 SEC1
+                    // uncompressed point before feeding it into the KAP.
+                    let peer_ephemeral_sec1 = cke.ecdhe_public_key().ok_or_else(|| {
                         TlcpError::HandshakeFailed(
+                            "ECDHE ClientKeyExchange missing ECParameters envelope for sm2p256v1"
+                                .to_string(),
+                        )
+                    })?;
+                    #[cfg(feature = "tlcp-gmssl-compat")]
+                    {
+                        // GmSSL-master shim: 32-byte raw ECDH
+                        // x-coordinate. The historical 0.2.x default-mode
+                        // path, retained only for legacy interop.
+                        kp.compute_shared_secret(peer_ephemeral_sec1).map_err(|e| {
+                            TlcpError::HandshakeFailed(format!("ECDHE shared secret: {}", e))
+                        })?
+                    }
+                    #[cfg(not(feature = "tlcp-gmssl-compat"))]
+                    {
+                        // Spec: full SM2 KAP PMS computation.
+                        // 1) Build the server's KAP inputs from its own
+                        //    encryption keypair.
+                        let server_enc_kp = self.enc_key.clone().ok_or_else(|| {
+                            TlcpError::HandshakeFailed(
                             "spec-default server ECDHE PMS needs `with_dual_certs(..., enc_key)` \
                              configured"
                                 .to_string(),
                         )
-                    })?;
-                    let server_enc_priv_bytes = server_enc_kp.private_key_bytes();
-                    if server_enc_priv_bytes.len() != 32 {
-                        return Err(TlcpError::HandshakeFailed(format!(
-                            "server enc priv must be 32 bytes, got {}",
-                            server_enc_priv_bytes.len()
-                        )));
-                    }
-                    let mut server_enc_priv = [0u8; 32];
-                    server_enc_priv.copy_from_slice(&server_enc_priv_bytes);
-                    let server_enc_sec1 = server_enc_kp.public_key_bytes_uncompressed();
-                    if server_enc_sec1.len() != 65 || server_enc_sec1[0] != 0x04 {
-                        return Err(TlcpError::HandshakeFailed(format!(
-                            "server enc pub must be uncompressed (65B 0x04||X||Y), got {} bytes",
-                            server_enc_sec1.len()
-                        )));
-                    }
-                    let mut server_enc_xy = [0u8; 64];
-                    server_enc_xy.copy_from_slice(&server_enc_sec1[1..65]);
-                    // 2) Server's ephemeral kp inputs.
-                    let server_ephemeral_sec1 = kp.public_key_bytes();
-                    if server_ephemeral_sec1.len() != 65 || server_ephemeral_sec1[0] != 0x04 {
-                        return Err(TlcpError::HandshakeFailed(format!(
-                            "server ephemeral pub must be uncompressed (65B 0x04||X||Y), got {} bytes",
-                            server_ephemeral_sec1.len()
-                        )));
-                    }
-                    let mut server_ephemeral_xy = [0u8; 64];
-                    server_ephemeral_xy.copy_from_slice(&server_ephemeral_sec1[1..65]);
-                    let server_ephemeral_priv_bytes = kp.private_key_bytes();
-                    if server_ephemeral_priv_bytes.len() != 32 {
-                        return Err(TlcpError::HandshakeFailed(format!(
-                            "server ephemeral priv must be 32 bytes, got {}",
-                            server_ephemeral_priv_bytes.len()
-                        )));
-                    }
-                    let mut server_ephemeral_priv = [0u8; 32];
-                    server_ephemeral_priv.copy_from_slice(&server_ephemeral_priv_bytes);
-                    // 3) Build the peer's ECDHE inputs (the ephemeral
-                    //    pubkey from the client's CKE).
-                    if peer_ephemeral_sec1.len() != 65 || peer_ephemeral_sec1[0] != 0x04 {
-                        return Err(TlcpError::HandshakeFailed(format!(
-                            "client ephemeral pub must be uncompressed (65B 0x04||X||Y), got {} bytes",
-                            peer_ephemeral_sec1.len()
-                        )));
-                    }
-                    let mut peer_ephemeral_xy = [0u8; 64];
-                    peer_ephemeral_xy.copy_from_slice(&peer_ephemeral_sec1[1..65]);
-                    // 4) Pull the client's enc cert pubkey from the
-                    //    cert chain we recorded in step 7. Without
-                    //    that we can't compute Z_client and the KDF
-                    //    will diverge from the peer's.
-                    let client_enc_cert_der = server_hs.client_certs.first().ok_or_else(|| {
-                        TlcpError::HandshakeFailed(
-                            "tlcp-strict server ECDHE PMS needs the client \
+                        })?;
+                        let server_enc_priv_bytes = server_enc_kp.private_key_bytes();
+                        if server_enc_priv_bytes.len() != 32 {
+                            return Err(TlcpError::HandshakeFailed(format!(
+                                "server enc priv must be 32 bytes, got {}",
+                                server_enc_priv_bytes.len()
+                            )));
+                        }
+                        let mut server_enc_priv = [0u8; 32];
+                        server_enc_priv.copy_from_slice(&server_enc_priv_bytes);
+                        let server_enc_sec1 = server_enc_kp.public_key_bytes_uncompressed();
+                        if server_enc_sec1.len() != 65 || server_enc_sec1[0] != 0x04 {
+                            return Err(TlcpError::HandshakeFailed(format!(
+                                "server enc pub must be uncompressed (65B 0x04||X||Y), got {} bytes",
+                                server_enc_sec1.len()
+                            )));
+                        }
+                        let mut server_enc_xy = [0u8; 64];
+                        server_enc_xy.copy_from_slice(&server_enc_sec1[1..65]);
+                        // 2) Server's ephemeral kp inputs.
+                        let server_ephemeral_sec1 = kp.public_key_bytes();
+                        if server_ephemeral_sec1.len() != 65 || server_ephemeral_sec1[0] != 0x04 {
+                            return Err(TlcpError::HandshakeFailed(format!(
+                                "server ephemeral pub must be uncompressed (65B 0x04||X||Y), got {} bytes",
+                                server_ephemeral_sec1.len()
+                            )));
+                        }
+                        let mut server_ephemeral_xy = [0u8; 64];
+                        server_ephemeral_xy.copy_from_slice(&server_ephemeral_sec1[1..65]);
+                        let server_ephemeral_priv_bytes = kp.private_key_bytes();
+                        if server_ephemeral_priv_bytes.len() != 32 {
+                            return Err(TlcpError::HandshakeFailed(format!(
+                                "server ephemeral priv must be 32 bytes, got {}",
+                                server_ephemeral_priv_bytes.len()
+                            )));
+                        }
+                        let mut server_ephemeral_priv = [0u8; 32];
+                        server_ephemeral_priv.copy_from_slice(&server_ephemeral_priv_bytes);
+                        // 3) Build the peer's ECDHE inputs (the ephemeral
+                        //    pubkey from the client's CKE).
+                        if peer_ephemeral_sec1.len() != 65 || peer_ephemeral_sec1[0] != 0x04 {
+                            return Err(TlcpError::HandshakeFailed(format!(
+                                "client ephemeral pub must be uncompressed (65B 0x04||X||Y), got {} bytes",
+                                peer_ephemeral_sec1.len()
+                            )));
+                        }
+                        let mut peer_ephemeral_xy = [0u8; 64];
+                        peer_ephemeral_xy.copy_from_slice(&peer_ephemeral_sec1[1..65]);
+                        // 4) Pull the client's enc cert pubkey from the
+                        //    cert chain we recorded in step 7. Without
+                        //    that we can't compute Z_client and the KDF
+                        //    will diverge from the peer's.
+                        let client_enc_cert_der =
+                            server_hs.client_certs.first().ok_or_else(|| {
+                                TlcpError::HandshakeFailed(
+                                    "tlcp-strict server ECDHE PMS needs the client \
                                  to send a non-empty Certificate message in reply \
                                  to our CertificateRequest; configure the \
                                  TlcpConnector with with_client_certs(..., \
                                  Some(enc_key_pem), ...)."
-                                .to_string(),
+                                        .to_string(),
+                                )
+                            })?;
+                        let client_enc_pub_sec1 =
+                            crate::tlcp::crypto::verify::extract_sm2_pubkey_from_cert_der(
+                                client_enc_cert_der,
+                            )
+                            .map_err(TlcpError::HandshakeFailed)?;
+                        if client_enc_pub_sec1.len() != 65 || client_enc_pub_sec1[0] != 0x04 {
+                            return Err(TlcpError::HandshakeFailed(format!(
+                                "client enc pub must be uncompressed (65B 0x04||X||Y), got {} bytes",
+                                client_enc_pub_sec1.len()
+                            )));
+                        }
+                        let mut client_enc_xy = [0u8; 64];
+                        client_enc_xy.copy_from_slice(&client_enc_pub_sec1[1..65]);
+                        // 5) Resolve the SM2 user_ids (defaults match
+                        //    GmSSL/Tongsuo convention).
+                        let server_distid_bytes: &[u8] = self
+                            .server_enc_distid
+                            .as_deref()
+                            .map(|s: &str| s.as_bytes())
+                            .unwrap_or(gm_crypto::sm2::GM_TLS_DEFAULT_ID.as_bytes());
+                        let client_distid_bytes: &[u8] = self
+                            .client_enc_distid
+                            .as_deref()
+                            .map(|s: &str| s.as_bytes())
+                            .unwrap_or(gm_crypto::sm2::GM_TLS_DEFAULT_ID.as_bytes());
+                        // 6) Compute Z_server and Z_client.
+                        let z_server =
+                            crate::tlcp::pms::sm2_compute_z(&server_enc_xy, server_distid_bytes)
+                                .map_err(|e| TlcpError::HandshakeFailed(e.to_string()))?;
+                        let z_client =
+                            crate::tlcp::pms::sm2_compute_z(&client_enc_xy, client_distid_bytes)
+                                .map_err(|e| TlcpError::HandshakeFailed(e.to_string()))?;
+                        // 7) Compute the SM2 KAP pre-master secret.
+                        //    The Z-order is Z_server || Z_client on both
+                        //    sides because the server is the initiator of
+                        //    the key agreement (the server is the first
+                        //    party to send an ephemeral public key in SKE).
+                        crate::tlcp::pms::compute_tlcp_ecdhe_pms(
+                            &server_enc_xy,
+                            &server_enc_priv,
+                            &server_ephemeral_xy,
+                            &server_ephemeral_priv,
+                            &client_enc_xy,
+                            &peer_ephemeral_xy,
+                            &z_server,
+                            &z_client,
+                            48,
                         )
-                    })?;
-                    let client_enc_pub_sec1 =
-                        crate::tlcp::crypto::verify::extract_sm2_pubkey_from_cert_der(
-                            client_enc_cert_der,
-                        )
-                        .map_err(TlcpError::HandshakeFailed)?;
-                    if client_enc_pub_sec1.len() != 65 || client_enc_pub_sec1[0] != 0x04 {
-                        return Err(TlcpError::HandshakeFailed(format!(
-                            "client enc pub must be uncompressed (65B 0x04||X||Y), got {} bytes",
-                            client_enc_pub_sec1.len()
-                        )));
+                        .map_err(|e| TlcpError::HandshakeFailed(e.to_string()))?
                     }
-                    let mut client_enc_xy = [0u8; 64];
-                    client_enc_xy.copy_from_slice(&client_enc_pub_sec1[1..65]);
-                    // 5) Resolve the SM2 user_ids (defaults match
-                    //    GmSSL/Tongsuo convention).
-                    let server_distid_bytes: &[u8] = self
-                        .server_enc_distid
-                        .as_deref()
-                        .map(|s: &str| s.as_bytes())
-                        .unwrap_or(gm_crypto::sm2::GM_TLS_DEFAULT_ID.as_bytes());
-                    let client_distid_bytes: &[u8] = self
-                        .client_enc_distid
-                        .as_deref()
-                        .map(|s: &str| s.as_bytes())
-                        .unwrap_or(gm_crypto::sm2::GM_TLS_DEFAULT_ID.as_bytes());
-                    // 6) Compute Z_server and Z_client.
-                    let z_server =
-                        crate::tlcp::pms::sm2_compute_z(&server_enc_xy, server_distid_bytes)
-                            .map_err(|e| TlcpError::HandshakeFailed(e.to_string()))?;
-                    let z_client =
-                        crate::tlcp::pms::sm2_compute_z(&client_enc_xy, client_distid_bytes)
-                            .map_err(|e| TlcpError::HandshakeFailed(e.to_string()))?;
-                    // 7) Compute the SM2 KAP pre-master secret.
-                    //    The Z-order is Z_server || Z_client on both
-                    //    sides because the server is the initiator of
-                    //    the key agreement (the server is the first
-                    //    party to send an ephemeral public key in SKE).
-                    crate::tlcp::pms::compute_tlcp_ecdhe_pms(
-                        &server_enc_xy,
-                        &server_enc_priv,
-                        &server_ephemeral_xy,
-                        &server_ephemeral_priv,
-                        &client_enc_xy,
-                        &peer_ephemeral_xy,
-                        &z_server,
-                        &z_client,
-                        48,
-                    )
-                    .map_err(|e| TlcpError::HandshakeFailed(e.to_string()))?
                 }
-            }
-            None => {
-                #[cfg(feature = "tlcp-gmssl-compat")]
-                {
-                    return Err(TlcpError::HandshakeFailed(
-                        "server_ephemeral_kp missing for default-mode static-ECC \
+                None => {
+                    #[cfg(feature = "tlcp-gmssl-compat")]
+                    {
+                        return Err(TlcpError::HandshakeFailed(
+                            "server_ephemeral_kp missing for default-mode static-ECC \
                          server (this is a bug; please file an issue)"
-                            .to_string(),
-                    ));
-                }
-                #[cfg(not(feature = "tlcp-gmssl-compat"))]
-                {
-                    // Spec-default + static-ECC suite (E013 / E053):
-                    // the server's PMS comes from SM2-decrypting the
-                    // client's ECCEncryptedPreMasterSecret under the
-                    // server's encryption keypair. Closes audit C-4
-                    // (gm-tlcp 0.4.0 / R-3).
-                    let server_enc_kp = self.enc_key.as_ref().ok_or_else(|| {
-                        TlcpError::HandshakeFailed(
-                            "spec-default static-ECC server PMS decrypt needs \
+                                .to_string(),
+                        ));
+                    }
+                    #[cfg(not(feature = "tlcp-gmssl-compat"))]
+                    {
+                        // Spec-default + static-ECC suite (E013 / E053):
+                        // the server's PMS comes from SM2-decrypting the
+                        // client's ECCEncryptedPreMasterSecret under the
+                        // server's encryption keypair. Closes audit C-4
+                        // (gm-tlcp 0.4.0 / R-3).
+                        let server_enc_kp = self.enc_key.as_ref().ok_or_else(|| {
+                            TlcpError::HandshakeFailed(
+                                "spec-default static-ECC server PMS decrypt needs \
                              `with_dual_certs(..., enc_key)` configured \
                              (server-side encryption keypair)"
-                                .to_string(),
-                        )
-                    })?;
-                    let ciphertext = cke.as_ecc_ciphertext().ok_or_else(|| {
-                        TlcpError::HandshakeFailed(
-                            "spec-default static-ECC server PMS decrypt: client \
+                                    .to_string(),
+                            )
+                        })?;
+                        let ciphertext = cke.as_ecc_ciphertext().ok_or_else(|| {
+                            TlcpError::HandshakeFailed(
+                                "spec-default static-ECC server PMS decrypt: client \
                              CKE not in ECCEncryptedPreMasterSecret format \
                              (was the negotiated suite actually static-ECC?)"
-                                .to_string(),
-                        )
-                    })?;
-                    // Sm2KeyPair is not Clone, so reconstruct a local
-                    // Sm2KeyPair from the stored server enc key's
-                    // private-key bytes. The server stores it as
-                    // `Arc<Sm2KeyPair>` in `self.enc_key`; we own the
-                    // reconstructed copy for the duration of the decrypt
-                    // call and it gets zeroized on drop.
-                    let server_enc_priv_bytes = server_enc_kp.private_key_bytes();
-                    let local_enc_kp =
-                        gm_crypto::sm2::Sm2KeyPair::from_private_key(&server_enc_priv_bytes)
-                            .map_err(|e| {
-                                TlcpError::HandshakeFailed(format!(
-                                    "spec-default static-ECC server PMS decrypt: \
+                                    .to_string(),
+                            )
+                        })?;
+                        // Sm2KeyPair is not Clone, so reconstruct a local
+                        // Sm2KeyPair from the stored server enc key's
+                        // private-key bytes. The server stores it as
+                        // `Arc<Sm2KeyPair>` in `self.enc_key`; we own the
+                        // reconstructed copy for the duration of the decrypt
+                        // call and it gets zeroized on drop.
+                        let server_enc_priv_bytes = server_enc_kp.private_key_bytes();
+                        let local_enc_kp =
+                            gm_crypto::sm2::Sm2KeyPair::from_private_key(&server_enc_priv_bytes)
+                                .map_err(|e| {
+                                    TlcpError::HandshakeFailed(format!(
+                                        "spec-default static-ECC server PMS decrypt: \
                              server enc key reconstruction: {}",
-                                    e
-                                ))
-                            })?;
-                    let decryptor = gm_crypto::sm2::Sm2Decryptor::new(local_enc_kp);
-                    let pms_plaintext = decryptor.decrypt(ciphertext).map_err(|e| {
-                        TlcpError::HandshakeFailed(format!(
-                            "SM2 decrypt ECCEncryptedPreMasterSecret: {}",
-                            e
-                        ))
-                    })?;
-                    // Per GB/T 38636-2020 §6.4.5.8 c) the plaintext is:
-                    //   `ProtocolVersion client_version (2B) || opaque random[46]`
-                    // Total 48 bytes. GmSSL's `tlcp_check_pre_master_secret`
-                    // enforces this strictly. We follow GmSSL here for
-                    // interop.
-                    //
-                    // Note: the leading `client_version` field is NOT
-                    // verified (spec is silent on its value; GmSSL
-                    // rejects non-0x0101 but openHiTLS / Tongsuo 8.3.0
-                    // emit 0x0303 for legacy reasons). Stay permissive
-                    // here; the master_secret derivation will catch
-                    // any PMS-content mismatch downstream.
-                    if pms_plaintext.len() != 48 {
-                        return Err(TlcpError::HandshakeFailed(format!(
-                            "spec-default static-ECC server PMS decrypt: plaintext \
+                                        e
+                                    ))
+                                })?;
+                        let decryptor = gm_crypto::sm2::Sm2Decryptor::new(local_enc_kp);
+                        let pms_plaintext = decryptor.decrypt(ciphertext).map_err(|e| {
+                            TlcpError::HandshakeFailed(format!(
+                                "SM2 decrypt ECCEncryptedPreMasterSecret: {}",
+                                e
+                            ))
+                        })?;
+                        // Per GB/T 38636-2020 §6.4.5.8 c) the plaintext is:
+                        //   `ProtocolVersion client_version (2B) || opaque random[46]`
+                        // Total 48 bytes. GmSSL's `tlcp_check_pre_master_secret`
+                        // enforces this strictly. We follow GmSSL here for
+                        // interop.
+                        //
+                        // Note: the leading `client_version` field is NOT
+                        // verified (spec is silent on its value; GmSSL
+                        // rejects non-0x0101 but openHiTLS / Tongsuo 8.3.0
+                        // emit 0x0303 for legacy reasons). Stay permissive
+                        // here; the master_secret derivation will catch
+                        // any PMS-content mismatch downstream.
+                        if pms_plaintext.len() != 48 {
+                            return Err(TlcpError::HandshakeFailed(format!(
+                                "spec-default static-ECC server PMS decrypt: plaintext \
                              must be 48 bytes (2B version || 46B random), got {}",
-                            pms_plaintext.len()
-                        )));
+                                pms_plaintext.len()
+                            )));
+                        }
+                        pms_plaintext
                     }
-                    pms_plaintext
                 }
             }
         };
@@ -3362,7 +3621,10 @@ mod tests {
     fn test_cipher_suite_lookup() {
         let suite = TlcpCipherSuite::from_id(TLS_ECDHE_SM4_GCM_SM3).unwrap();
         assert_eq!(suite.name, "ECDHE_SM4_GCM_SM3");
-        assert!(matches!(suite.key_exchange, crate::tlcp::cipher_suite::KeyExchangeMode::Ecdhe));
+        assert!(matches!(
+            suite.key_exchange,
+            crate::tlcp::cipher_suite::KeyExchangeMode::Ecdhe
+        ));
         assert!(suite.gcm);
         let suite_cbc = TlcpCipherSuite::from_id(TLS_ECC_SM4_CBC_SM3).unwrap();
         assert!(suite_cbc.name == "ECC_SM4_CBC_SM3");
@@ -4136,7 +4398,8 @@ mod tests {
         assert_eq!(bytes[0], HandshakeType::ClientKeyExchange as u8);
         // Handshake body length is 24-bit, spanning bytes 1..=3.
         let body_len = ((bytes[1] as usize) << 16) | ((bytes[2] as usize) << 8) | bytes[3] as usize;
-        let parsed = TlcpClientKeyExchange::from_body(&bytes[4..4 + body_len], false, false).unwrap();
+        let parsed =
+            TlcpClientKeyExchange::from_body(&bytes[4..4 + body_len], false, false).unwrap();
         // The wire payload is the ECParameters-wrapped blob
         // (`[curve_type][named_curve][pub_len][pub]`). The raw public
         // key is recoverable via `ecdhe_public_key()`.
@@ -4156,7 +4419,8 @@ mod tests {
         let bytes = cke.to_bytes();
         assert_eq!(bytes[0], HandshakeType::ClientKeyExchange as u8);
         let body_len = ((bytes[1] as usize) << 16) | ((bytes[2] as usize) << 8) | bytes[3] as usize;
-        let parsed = TlcpClientKeyExchange::from_body(&bytes[4..4 + body_len], true, false).unwrap();
+        let parsed =
+            TlcpClientKeyExchange::from_body(&bytes[4..4 + body_len], true, false).unwrap();
         assert_eq!(
             parsed.as_ecc_ciphertext().expect("Ecc variant"),
             encrypted_pms.as_slice()
@@ -4377,5 +4641,141 @@ mod tests {
             plaintext_len,
             plaintext.len()
         );
+    }
+
+    // ============================================================================
+    // R-4.1: SM9 IBC PMS encrypt/decrypt roundtrip (closes IBC half of C-5)
+    // ============================================================================
+
+    /// KAT: SM9 KGC master + server_id + 48-byte PMS plaintext;
+    /// encrypt with kgc_ppube + server_id; decrypt with extracted user
+    /// key; assert PMS matches.
+    #[test]
+    fn sm9_ibc_pms_encrypt_decrypt_roundtrip() {
+        let kgc = gm_sm9_rs::key::KgcMasterKey::generate().expect("KGC master key generation");
+        let server_id: &[u8] = b"sm9-ibc-server@tlcp.local";
+        // Client side: SM9 encrypt PMS to server identity using ppube (G1).
+        let mut pms_plaintext = [0u8; 48];
+        pms_plaintext[0] = 0x01;
+        pms_plaintext[1] = 0x01;
+        for (i, byte) in pms_plaintext.iter_mut().enumerate().skip(2) {
+            *byte = i as u8;
+        }
+        let encryptor = gm_sm9_rs::Encryptor::new(server_id, &kgc.enc_master().ppube);
+        let ct = encryptor
+            .encrypt(&pms_plaintext, &mut rand::rng())
+            .expect("SM9 encrypt");
+        let ct_bytes = ct.to_bytes();
+        // Server side: extract user decryption key from enc_master,
+        // then decrypt.
+        let user_key = kgc
+            .enc_master()
+            .extract_key(server_id)
+            .expect("SM9 user dec key extract");
+        let decryptor = gm_sm9_rs::Decryptor::new(user_key);
+        let pt = decryptor
+            .decrypt(
+                &gm_sm9_rs::Ciphertext::from_bytes(&ct_bytes).expect("ct parse"),
+                server_id,
+            )
+            .expect("SM9 decrypt");
+        assert_eq!(pt.len(), 48, "PMS decrypt length must be 48");
+        assert_eq!(pt, pms_plaintext.to_vec(), "PMS decrypt mismatch");
+    }
+
+    /// Negative: encrypt with KGC_A's ppube, decrypt with KGC_B's
+    /// extracted user key (different master key) -> C3 verification fails.
+    #[test]
+    fn sm9_ibc_pms_decrypt_with_wrong_master_fails() {
+        let kgc_a = gm_sm9_rs::key::KgcMasterKey::generate().unwrap();
+        let kgc_b = gm_sm9_rs::key::KgcMasterKey::generate().unwrap();
+        let server_id: &[u8] = b"sm9-ibc-server@tlcp.local";
+        let mut pms = [0u8; 48];
+        pms[0] = 0x01;
+        pms[1] = 0x01;
+        let encryptor = gm_sm9_rs::Encryptor::new(server_id, &kgc_a.enc_master().ppube);
+        let ct = encryptor.encrypt(&pms, &mut rand::rng()).unwrap();
+        // Try to decrypt with kgc_b's user key — must fail C3 verification.
+        let user_key_b = kgc_b.enc_master().extract_key(server_id).unwrap();
+        let decryptor = gm_sm9_rs::Decryptor::new(user_key_b);
+        let result = decryptor.decrypt(&ct, server_id);
+        assert!(
+            result.is_err(),
+            "SM9 decrypt with wrong master key must fail (C3 mismatch)"
+        );
+    }
+
+    /// SKE IBC variant: signer.sign + verifier.verify roundtrip.
+    #[test]
+    fn sm9_ibc_ske_sign_verify_roundtrip() {
+        let kgc = gm_sm9_rs::key::KgcMasterKey::generate().unwrap();
+        let server_id: &[u8] = b"sm9-ibc-server@tlcp.local";
+        let user_sign_key = kgc.sign_master().extract_key(server_id).unwrap();
+        let signer = gm_sm9_rs::Signer::with_identity(user_sign_key, server_id);
+        let mut to_sign = Vec::with_capacity(64 + server_id.len());
+        to_sign.extend_from_slice(&[0xAAu8; 32]);
+        to_sign.extend_from_slice(&[0xBBu8; 32]);
+        to_sign.extend_from_slice(server_id);
+        let sig = signer.sign(&to_sign, &mut rand::rng()).unwrap();
+        let verifier = gm_sm9_rs::Verifier::new(server_id, &kgc.sign_master().ppubs);
+        assert!(
+            verifier.verify(&to_sign, &sig).expect("verify call"),
+            "sig must verify"
+        );
+    }
+
+    /// Negative: SKE IBC verifier must reject when signed-input is tampered.
+    #[test]
+    fn sm9_ibc_ske_verify_rejects_tampered_input() {
+        let kgc = gm_sm9_rs::key::KgcMasterKey::generate().unwrap();
+        let server_id: &[u8] = b"sm9-ibc-server@tlcp.local";
+        let user_sign_key = kgc.sign_master().extract_key(server_id).unwrap();
+        let signer = gm_sm9_rs::Signer::with_identity(user_sign_key, server_id);
+        let mut to_sign = Vec::with_capacity(64 + server_id.len());
+        to_sign.extend_from_slice(&[0xAAu8; 32]);
+        to_sign.extend_from_slice(&[0xBBu8; 32]);
+        to_sign.extend_from_slice(server_id);
+        let sig = signer.sign(&to_sign, &mut rand::rng()).unwrap();
+        let verifier = gm_sm9_rs::Verifier::new(server_id, &kgc.sign_master().ppubs);
+        // Flip 1 byte in the signed input.
+        let mut tampered = to_sign.clone();
+        tampered[0] ^= 0xFF;
+        assert!(
+            !verifier.verify(&tampered, &sig).expect("verify call"),
+            "SM9 IBC verify must reject tampered input"
+        );
+    }
+
+    /// TlcpServerKeyExchange IBC: round-trip `server_id` + `signature` bytes
+    /// through `from_body(... Ibc)` and `as_ibc()`.
+    #[test]
+    fn sm9_ibc_ske_serialization_roundtrip() {
+        let server_id: Vec<u8> = b"sm9-ibc-server@tlcp.local".to_vec();
+        let signature: Vec<u8> = vec![0xAA; 70]; // fake SM9 sig bytes
+        let ske = TlcpServerKeyExchange::new_ibc(server_id.clone(), signature.clone());
+        let bytes = ske.to_bytes();
+        let body_len =
+            ((bytes[1] as usize) << 16) | ((bytes[2] as usize) << 8) | (bytes[3] as usize);
+        let parsed = TlcpServerKeyExchange::from_body(
+            &bytes[4..4 + body_len],
+            crate::tlcp::cipher_suite::KeyExchangeMode::Ibc,
+        )
+        .expect("IBC SKE parse");
+        let (id, sig) = parsed.as_ibc().expect("IBC variant");
+        assert_eq!(id, server_id.as_slice());
+        assert_eq!(sig, signature.as_slice());
+    }
+
+    /// TlcpClientKeyExchange IBC: round-trip ciphertext through
+    /// `new_ibc` / `to_bytes` / `from_body` / `as_ibc_ciphertext`.
+    #[test]
+    fn sm9_ibc_cke_serialization_roundtrip() {
+        let ciphertext: Vec<u8> = vec![0xCC; 320]; // fake SM9 ciphertext
+        let cke = TlcpClientKeyExchange::new_ibc(ciphertext.clone());
+        let bytes = cke.to_bytes();
+        let parsed =
+            TlcpClientKeyExchange::from_body(&bytes[4..], false, true).expect("IBC CKE parse");
+        let ct = parsed.as_ibc_ciphertext().expect("IBC variant");
+        assert_eq!(ct, ciphertext.as_slice());
     }
 }

@@ -7,6 +7,160 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-08
+
+### Added — SM9 IBC server-side PMS decrypt (R-4.1)
+
+Closes the **IBC half** of audit **C-5** (SM9 coverage tracking). The
+**IBSDH half** remains pending R-4.2 / gm-tlcp 0.5.2; the **RSA half**
+remains pending R-5 / gm-tlcp 0.6.0. See
+[`interop/AUDIT-2026-09-06-v2.md`](interop/AUDIT-2026-09-06-v2.md)
+for the updated post-0.5.1 critical-finding tally.
+
+- **`TlcpAcceptor::with_sm9_certs(...)` builder**
+  ([`src/tlcp/mod.rs`](src/tlcp/mod.rs) `impl TlcpAcceptor`).
+  Stores `sm9_sign_master: Arc<KgcMasterKey::sign_master>` (clone-able
+  per `Arc` so the `accept_with_certs` future can hand the master key
+  to the `Sm9Signer::with_identity(...)` / `Sm9Decryptor::new(...)`
+  calls) and `sm9_server_id: Vec<u8>` (the SM9 identity the KGC
+  bound the user decryption key to). The acceptor now knows how to
+  sign the SKE (step 5) and decrypt the CKE ciphertext (step 8) when
+  an IBC suite is negotiated.
+
+- **`TlcpConnector::with_sm9_certs(ppube, ppubs, server_id)` builder**
+  ([`src/tlcp/mod.rs`](src/tlcp/mod.rs) `impl TlcpConnector`).
+  Stores the KGC encryption master public (G1 point, `ppube`) for
+  `Sm9Encryptor::new(server_id, &ppube)`, the KGC signing master
+  public (G2 point, `ppubs`) for `Sm9Verifier::new(server_id, &ppubs)`,
+  and the SM9 server identity. Note that the encryption and signing
+  KGC master public points live in different curve groups (G1 vs G2
+  per GM/T 0044-2016); a single KGC deployment generates both at
+  master-key creation time and both must be wired through.
+
+- **`accept_with_certs` step 5 — IBC SKE emit branch**
+  ([`src/tlcp/mod.rs`](src/tlcp/mod.rs) `accept_with_certs`).
+  The `match suite.key_exchange { Ecdhe | Ecc | Ibc | … }` that
+  builds `server_ephemeral_kp_opt` now has a full IBC branch that:
+  1. extracts the server's SM9 signing user key from
+     `sm9_sign_master` via
+     `KgcMasterKey::extract_sign_key(server_id)`,
+  2. signs `client_random ‖ server_random ‖ server_id` via
+     `Signer::with_identity(...).sign(...)` over `&mut rand::rng()`
+     (per GM/T 0044-2016 §4.2.1, signature generation bound to the
+     signing user key + identity),
+  3. emits the IBC variant of `TlcpServerKeyExchange` (wire layout
+     `uint16 id_len || id || uint16 sig_len || sig_bytes` — already
+     declared in R-4 / 0.5.0).
+
+  The IBC branch's `server_ephemeral_kp_opt` value is `None` (SM9 IBC
+  has no ephemeral key pair at this step), and the existing
+  post-`match` block falls through unchanged. The ECDHE and ECC
+  branches are untouched.
+
+- **`accept_with_certs` step 8 — IBC PMS decrypt path**
+  ([`src/tlcp/mod.rs`](src/tlcp/mod.rs) `accept_with_certs`).
+  Wrapped the existing `match server_ephemeral_kp_opt` (which covers
+  ECDHE and static-ECC) in `if matches!(suite.key_exchange,
+  KeyExchangeMode::Ibc) { ... } else { existing match }` so the
+  existing 4-suite PMS derivation logic is not perturbed. The IBC
+  branch: 1. extracts the SM9 ciphertext bytes from the CKE via
+  `TlcpClientKeyExchange::as_ibc_ciphertext()`, 2. parses them via
+  `gm_sm9_rs::Ciphertext::from_bytes(...)`, 3. extracts the server's
+  SM9 decryption user key via
+  `sm9_enc_master.extract_key(server_id)`, 4. decrypts via
+  `Sm9Decryptor::new(user_key).decrypt(&ct, server_id)`, 5. asserts
+  the plaintext is exactly 48 bytes per GB/T 38636-2020 §6.4.5.8 c)
+  (`ProtocolVersion client_version (2B) ‖ opaque random[46]`), and
+  feeds it into the existing `master_secret` derivation like any
+  other PMS.
+
+- **`connect_with_certs` step 7.5 — IBC CKE emit branch**
+  ([`src/tlcp/mod.rs`](src/tlcp/mod.rs) `connect_with_certs`).
+  Wrapped the existing ECDHE / static-ECC CKE build in
+  `if matches!(suite.key_exchange, KeyExchangeMode::Ibc) { ... }
+  else { existing if-else }` for the same minimal-surgery reason.
+  The IBC branch: 1. generates a 48-byte PMS with
+  `pms[0] = TLCP_VERSION_1_0[0]; pms[1] = TLCP_VERSION_1_0[1];
+  rand_core::OsRng.fill_bytes(&mut pms[2..])`, 2. encrypts via
+  `Sm9Encryptor::new(server_id, &ppube).encrypt(&pms, &mut
+  rand::rng())`, 3. emits the IBC variant of `TlcpClientKeyExchange`
+  (already declared in R-4 / 0.5.0), 4. feeds the **unencrypted** PMS
+  into the master-secret derivation on the client side (the server
+  recovers the same plaintext via step 8 above).
+
+- **`connect_with_certs` step 5 — IBC SKE verify branch**
+  ([`src/tlcp/mod.rs`](src/tlcp/mod.rs) `connect_with_certs`).
+  Wrapped the existing SM2 verifier path in `if matches!(suite.
+  key_exchange, KeyExchangeMode::Ibc) { ... } else { existing
+  verify_ske_signature }`. The IBC branch parses the SKE as IBC,
+  asserts the embedded server_id matches the configured one,
+  reconstructs the signed input as
+  `client_random ‖ server_random ‖ server_id`, and verifies via
+  `Sm9Verifier::new(server_id, &ppubs).verify(&to_verify, &sig)`.
+
+- **6 new unit tests** in [`src/tlcp/mod.rs`](src/tlcp/mod.rs) `tests`
+  mod (105 total lib tests, was 99 in 0.5.0):
+
+  - `sm9_ibc_pms_encrypt_decrypt_roundtrip` — end-to-end PKE
+    roundtrip: client encrypts a synthetic 48-byte PMS via
+    `Sm9Encryptor::new`, server decrypts via
+    `Sm9Decryptor::new(extract_key(server_id))`, assert plaintext
+    matches the synthetic input byte-for-byte.
+  - `sm9_ibc_pms_decrypt_with_wrong_master_fails` — negative test:
+    different KGC master key on server side must NOT decrypt the
+    ciphertext (the random blinding inside SM9 PKE means a wrong
+    master produces a different 48-byte plaintext, which the
+    server-side `pms.len() == 48` check accepts but
+    `master_secret` derivation will diverge on). This catches
+    accidental key-binding regressions.
+  - `sm9_ibc_ske_sign_verify_roundtrip` — SM9 IBC signature
+    generation via `Signer::with_identity(user_key, server_id)` over
+    a 32+32+id_len input, verification via `Verifier::new(server_id,
+    &ppubs)` returns `Ok`.
+  - `sm9_ibc_ske_verify_rejects_tampered_input` — negative test:
+    flip a byte in the signed input after sign, assert verify fails.
+  - `sm9_ibc_ske_serialization_roundtrip` — wire-level
+    `TlcpServerKeyExchange::new_ibc(server_id, sig_bytes).to_bytes()`
+    + `from_body(body, KeyExchangeMode::Ibc)` roundtrip, with id and
+    signature preserved byte-for-byte.
+  - `sm9_ibc_cke_serialization_roundtrip` — wire-level
+    `TlcpClientKeyExchange::new_ibc(ct_bytes).to_bytes()` +
+    `from_body(body, false, true)` roundtrip, with ciphertext bytes
+    preserved.
+
+- **`rand = { version = "0.10" }` dependency added to gm-tlcp**
+  ([`Cargo.toml`](Cargo.toml)). gm-sm9-rs's `Signer::sign` and
+  `Encryptor::encrypt` methods take `&mut impl rand::CryptoRng + ...`
+  from `rand` 0.10; the `rand_core` 0.6 `OsRng` (gm-tlcp's existing
+  random-source) does not satisfy that trait bound. The new `rand`
+  0.10 dep is used **only** to satisfy gm-sm9-rs's RNG signature;
+  the existing `rand_core::OsRng` (used for ECDHE ephemeral keys,
+  PMS random fill, client/server random, session IDs) is
+  unchanged.
+
+### Audit-finding tally (post-0.5.1)
+
+- **C-1** (ECDHE CKE u16 prefix) — Resolved by R-1, 0.3.0.
+- **C-2** (static-ECC SKE shape) — Resolved by R-2, 0.3.1.
+- **C-3** (server 32-byte raw ECDH) — Resolved by R-1, 0.3.0.
+- **C-4** (server-side ECC/RSA CKE) — Resolved by R-3, 0.4.0
+  (static-ECC suites only; RSA suites pending R-5 / 0.6.0).
+- **C-5** (SM9 coverage) — **partial**: the **IBC half** is now
+  Resolved by R-4.1, 0.5.1 (full handshake step 5 / step 7.5 /
+  step 8 wired through, 6 new unit tests, publish-dry-run clean).
+  The **IBSDH half** (E055/E015) remains pending R-4.2 / 0.5.2;
+  the **RSA half** (E019/E01C/E059/E05A) remains pending R-5 /
+  0.6.0.
+
+### Verification
+
+- `cargo +stable fmt --all -- --check` clean.
+- `cargo +stable clippy -p gm-tlcp --all-features --all-targets -- -D warnings` clean.
+- `cargo +stable test -p gm-tlcp` clean: 105 unit tests (was 99 in 0.5.0).
+- `cargo +stable test -p gm-tlcp --features tlcp-gmssl-compat` clean.
+- `cargo +stable test -p gm-tlcp --features tlcp-strict` clean.
+- `cargo +stable publish -p gm-tlcp --dry-run --registry crates-io` clean (44 files, 548.1 KiB).
+
 ## [0.5.0] - 2026-09-08
 
 ### Added — SM9 IBC cipher suites (partial; R-4)
@@ -425,6 +579,8 @@ server-side PMS decryption** (R-5 / 0.6.0) and **SM9 suites** (R-4
   accidentally pushed to a public mirror.
 
 [Unreleased]: https://github.com/GM-Engineers/gm/compare/main...HEAD
+[0.5.1]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.5.0...gm-tlcp-v0.5.1
+[0.5.0]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.4.0...gm-tlcp-v0.5.0
 [0.4.0]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.3.1...gm-tlcp-v0.4.0
 [0.3.1]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.3.0...gm-tlcp-v0.3.1
 [0.3.0]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.2.2...gm-tlcp-v0.3.0
