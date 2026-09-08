@@ -1,7 +1,7 @@
 [package]
 authors = ["Eric Zhang"]
 name = "gm-tlcp"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "TLCP (Transport Layer Cryptographic Protocol, GB/T 38636-2020) core library in pure Rust with SM2/SM3/SM4 support"
@@ -76,19 +76,39 @@ metrics = "0.23"
 [features]
 default = []
 
-# Strict GB/T 38636-2020 conformance mode.
+# DEPRECATED — kept as a no-op for source-level compatibility with
+# 0.2.x callers' build scripts. (See CHANGELOG 0.3.0.)
 #
-# When enabled, gm-tlcp emits and accepts ONLY the standard-conformant
-# wire format on the parts of the handshake where the deployed GmSSL/Tongsuo
-# ecosystem diverges from the spec (currently: ECDHE ClientKeyExchange
-# length prefix, static-ECC ServerKeyExchange handling). The default
-# (no feature) preserves byte-for-byte interop with GmSSL master and
-# Tongsuo NTLS, which is the project's primary deployment target.
-#
-# Audit references: gm-tlcp/interop/AUDIT-2026-09-06.md
-#   C-1 — ClientKeyExchange: GmSSL-specific `uint16` length prefix
-#   C-2 — ServerKeyExchange: unconditional emit/expect on static-ECC
+# In 0.2.x, `--features tlcp-strict` selected GB/T 38636-2020
+# spec-conformant behaviour (drop CKE u16 prefix, skip SKE for
+# static-ECC, SM2-KAP PMS, etc.). In 0.3.0 that behaviour IS the
+# default; this entry is preserved only so that existing
+# `Cargo.toml` lines like
+#     gm-tlcp = { version = "0.3", features = ["tlcp-strict"] }
+# continue to compile without a "feature not found" error. The
+# flag has no effect. Use no feature (or `tlcp-gmssl-compat`
+# below) instead.
 tlcp-strict = []
+
+# GmSSL-master wire-compatibility shim.
+#
+# When enabled, gm-tlcp restores the historical deviations that the
+# 0.2.x default build carried for byte-for-byte interop with GmSSL
+# 2026-06+ master (the legacy PRC TLCP deployment target):
+#   * ClientKeyExchange body has a redundant `uint16` length prefix
+#     that the spec (RFC 5246 §7.4.7 / GB/T 38636-2020 §6.4.1.6)
+#     does not require.
+#   * Server emits an ECDHE-style ServerKeyExchange for static-ECC
+#     suites (E013/E053) instead of skipping SKE per RFC 5246 §7.4.3.
+#   * Server-side ECDHE PMS computes the raw 32-byte ECDH
+#     x-coordinate instead of the 48-byte SM2-KAP output.
+#   * Server does NOT send CertificateRequest / read client CV.
+#
+# New deployments targeting openHiTLS / Tongsuo / any standards-strict
+# peer should NOT enable it. Legacy GmSSL-master deployments should
+# opt in explicitly:
+#     gm-tlcp = { version = "0.3", features = ["tlcp-gmssl-compat"] }
+tlcp-gmssl-compat = []
 
 # 预留 feature 开关
 # grpc   = []   # tonic / gRPC over TLCP（待实现）

@@ -22,6 +22,11 @@ use crate::tlcp::handshake_type::HandshakeType;
 /// The original is a private free function in `tlcp::mod` and not
 /// re-exported. CV verification only needs the `type || body` shape;
 /// the inlined copy keeps this helper module self-contained.
+///
+/// Only used under spec-default builds (`#[cfg(not(feature =
+/// "tlcp-gmssl-compat"))]`); the gmssl-master shim skips CV entirely,
+/// so this function is dead code under `tlcp-gmssl-compat`.
+#[allow(dead_code)]
 fn parse_handshake_message_local(
     payload: &[u8],
 ) -> Result<(HandshakeType, Vec<u8>, &[u8]), TlcpError> {
@@ -47,7 +52,7 @@ fn parse_handshake_message_local(
     ))
 }
 
-#[cfg(feature = "tlcp-strict")]
+#[cfg(not(feature = "tlcp-gmssl-compat"))]
 pub(crate) fn process_certificate_verify(
     cv_probe_payload: &[u8],
     server_hs: &mut crate::tlcp::handshake::server::TlcpServerHandshake,

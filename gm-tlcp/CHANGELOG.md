@@ -7,6 +7,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-08
+
+### Changed — BREAKING (default mode flip)
+
+- **Default mode is now GB/T 38636-2020 spec-compliant**.
+  `tlcp-strict` is **deprecated** (kept as a no-op for source-level
+  compatibility with 0.2.x callers' `Cargo.toml`/`build.rs` — see
+  [Migration from 0.2.x to 0.3.0](#migration-from-02x-to-030) below).
+  A new opt-in feature `tlcp-gmssl-compat` (default off) restores the
+  pre-0.3.0 default-mode wire deviations for byte-for-byte interop with
+  GmSSL 2026-06+ master and Tongsuo NTLS. Strategic pivot per user
+  directive 2026-09-08: *"务必以完全实现最新 tlcp 规范为目标，而不是为了
+  兼容 GmSSL 等"*.
+
+  Behaviour matrix (which path is taken when):
+
+  | Handshake step | Default (0.3.0) | `tlcp-gmssl-compat` (opt-in) |
+  |---|---|---|
+  | Client ECDHE `ClientKeyExchange` body | spec — no `uint16` length prefix (RFC 5246 §7.4.7) | GmSSL master — `uint16 payload_length ∥ payload` |
+  | Static-ECC `ServerKeyExchange` | skip SKE entirely (RFC 5246 §7.4.3) | always read SKE (GmSSL ECDHE-style on static-ECC) |
+  | Server ECDHE pre-master secret | SM2 KAP per GB/T 32918.3-2016 §6.4.2 (48-byte KDF output) | raw 32-byte ECDH x-coordinate (legacy 0.2.x default) |
+  | `CertificateRequest` after ECDHE SKE | emitted by server (server also reads client's `Certificate` reply) | not emitted |
+  | Client `CertificateVerify` after ECDHE SKE | emitted + verified against server sign cert | not emitted |
+  | Server sign cert selection | used for SKE/CV signature verification | skipped |
+
+  Audit findings resolved by this release:
+  - **C-1** (non-spec `uint16` CKE prefix) — **resolved**: spec is now
+    default; GmSSL deviation is opt-in.
+  - **C-3** (server-side 32-byte raw ECDH PMS) — **resolved**: SM2 KAP
+    is now default; raw ECDH is opt-in.
+  - **C-2** (static-ECC SKE handling) — **partial**: default mode now
+    skips SKE on static-ECC (RFC 5246 §7.4.3), but the spec-perfect
+    sig-only SKE (`cr ∥ sr ∥ enc_cert` body, interpretation B) is
+    **not yet implemented** and is the scope of **R-2** (gm-tlcp
+    0.3.1). 0.3.0's default is still RFC-5246-strict (no SKE), not
+    spec-perfect (sig-only SKE). See
+    [`interop/AUDIT-2026-09-06-v2.md`](interop/AUDIT-2026-09-06-v2.md)
+    §C-2 for the three interpretations.
+  - **C-4** (server-side static-ECC / RSA CKE decryption) — **still
+    blocked**: pending **R-3** (gm-tlcp 0.4.0).
+
+- **Removed cfg gate from `cv_helper` module**.
+  [`src/tlcp/cv_helper.rs`](src/tlcp/cv_helper.rs) was previously
+  `#[cfg(feature = "tlcp-strict")]`. It is now unconditional and
+  internally gates its single function on `#[cfg(not(feature =
+  "tlcp-gmssl-compat"))]`, since the GmSSL-master shim path does not
+  parse the server's `CertificateVerify`. `parse_handshake_message_local`
+  gained a `#[allow(dead_code)]` because it is only reachable under
+  the spec-default path (the gmssl-compat path reads CV inline from
+  the wire).
+
+- **Top-level docstring table inverted**.
+  [`src/tlcp/mod.rs`](src/tlcp/mod.rs) "Limitations and interop
+  boundaries" now leads with the spec-default column and lists the
+  GmSSL deviations as opt-in.
+
+- **Test naming updated**.
+  [`src/tlcp/messages/client_key_exchange.rs`](src/tlcp/messages/client_key_exchange.rs):
+  `default_*` → `gmssl_compat_*`, `strict_*` → `spec_default_*`.
+
+### Migration from 0.2.x to 0.3.0
+
+1. **If you were using default mode (no feature flag)** and connecting
+   to GmSSL 2026-06+ master or Tongsuo NTLS: add
+   `features = ["tlcp-gmssl-compat"]` to your `gm-tlcp` dependency in
+   `Cargo.toml`. The wire deviations are restored, byte-for-byte.
+
+2. **If you were using `features = ["tlcp-strict"]`** and connecting to
+   openHiTLS / standards-strict peers: just remove the `tlcp-strict`
+   feature flag from `Cargo.toml` — strict behaviour is now the
+   default. (Leaving `tlcp-strict` in place still compiles; it is a
+   deprecated no-op and emits a `cargo:warning=` if you run with
+   `--warnings-as-errors`, but that is a build-script concern only.)
+
+3. **Public API**: no signature changes. Only the wire-format and
+   feature-flag names changed.
+
+4. **No other crates need to bump**: `gm-tlcp`'s cascade consumers
+   (`gm-crypto ^0.3`, `gm-tls ^0.2.1`, `gm-sm9-rs ^0.1.1`, `gm-ca ^0.1.2`)
+   are unaffected — R-1 is gm-tlcp-internal.
+
+### Verification
+
+- `cargo +stable fmt --all -- --check` clean.
+- `cargo +stable clippy --workspace --all-features --all-targets -- -D warnings` clean.
+- `cargo +stable test --workspace` clean: gm-tlcp 74 unit tests + 5 loopback tests
+  (incl. `gm_tlcp_kap_pms_roundtrip_with_real_keys`) pass under default mode.
+- `cargo +stable test -p gm-tlcp --features tlcp-gmssl-compat` clean (rollback path verified).
+- `cargo +stable test -p gm-tlcp --features tlcp-strict` clean (deprecated no-op verified).
+- `cargo +stable publish --dry-run -p gm-tlcp --registry crates-io` clean.
+
 ## [0.2.2] - 2026-09-07
 
 ### Changed
@@ -98,6 +189,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accidentally pushed to a public mirror.
 
 [Unreleased]: https://github.com/GM-Engineers/gm/compare/main...HEAD
+[0.3.0]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.2.2...gm-tlcp-v0.3.0
 [0.2.2]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.2.1...gm-tlcp-v0.2.2
 [0.2.1]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.2.0...gm-tlcp-v0.2.1
 [0.2.0]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.1.0...gm-tlcp-v0.2.0

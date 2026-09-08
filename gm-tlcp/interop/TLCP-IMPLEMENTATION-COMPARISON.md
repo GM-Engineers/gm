@@ -362,7 +362,16 @@ The ECDHE CKE body has no outer u16 prefix. Its inner bytes are `03 00 29 || pub
 > (which is redundant), otherwise handshake will fail..."
 The author left this comment on the encrypted-PMS u16 wrapper for interop with GmSSL master and the other major implementations.
 
-### 2.4 gm-tlcp 0.2.0 (this tree, gm/gm-tlcp/)
+### 2.4 gm-tlcp (this tree, gm/gm-tlcp/)
+
+> **Note (gm-tlcp 0.3.0 / R-1, 2026-09-08):** The original text below
+> describes gm-tlcp 0.2.0 as a historical snapshot. **gm-tlcp 0.3.0** is
+> the current release and is the version evaluated in §3.5 below. The
+> 0.2.0 text is preserved verbatim to document what was true before R-1
+> flipped the default mode. For the post-R-1 behaviour, see §3.5 entry
+> "gm-tlcp 0.3.0".
+
+#### 2.4.1 gm-tlcp 0.2.0 (historical snapshot, pre-R-1)
 
 **Size:** `src/tlcp/` totals ~12.4k LOC across 22 files. The handshake
 logic is split into `handshake/client.rs` and `handshake/server.rs`;
@@ -751,22 +760,34 @@ If we rank purely on spec conformance (ignoring the interop cluster):
 1. **openHiTLS** — closest. CKE wire format matches spec exactly
    (no outer u16 prefix on the ECDHE CKE body, ECParameters is a u16
    named_curve). Server uses the spec formula. The KDF order is the
-   spec-conformant `ZA ∥ ZB`.
+   spec-conformant `ZA ∥ ZB`. Static-ECC SKE uses interpretation B
+   (signature-only over `cr ∥ sr ∥ enc_cert`).
 2. **Tongsuo** — second-closest. PMS formula matches spec. RSA
    suites are wired up. The encrypted static-ECC / RSA CKE body has a
    spec-deviating outer u16 prefix; the ECDHE CKE body has none.
-   KDF order is spec-conformant.
-3. **GmSSL master** — third. KDF order is spec-conformant. Wire-format
-   deviation: both ECDHE and ECC CKE bodies are wrapped in an outer u16
-   length prefix. Smaller code base, fewer features, but the parts that
-   exist match spec.
-4. **gm-tlcp 0.2.0** — fourth (last) for end-to-end interop. The
-   `pms.rs` formula is spec-correct, and the client call site already
-   uses the spec-conformant `(z_server, z_client)` order. The server
-   still uses raw `compute_shared_secret` (32-byte x-coordinate),
-   which is a fundamentally different algorithm. Result: gm-tlcp
-   interops with none of {GmSSL, openHiTLS, Tongsuo} end-to-end without
-   fixes, even though all three of those interop with each other.
+   KDF order is spec-conformant. Static-ECC SKE uses interpretation B.
+3. **gm-tlcp 0.3.0** (post-R-1, 2026-09-08) — tied with openHiTLS on
+   the ECDHE wire-format axis: default mode emits the spec-conformant
+   CKE body (no u16 prefix), the server uses SM2 KAP (48-byte KDF,
+   spec-conformant), and the static-ECC suite skips SKE per RFC 5246
+   §7.4.3 (interpretation A). **Spec-perfect static-ECC (interpretation
+   B, sig-only SKE) is pending R-2 / gm-tlcp 0.3.1.** Until R-2 lands,
+   gm-tlcp cannot complete a static-ECC handshake with openHiTLS /
+   Tongsuo even though it now completes an ECDHE one. Server-side
+   static-ECC / RSA CKE decryption (interpretation B + RSA suites) is
+   pending R-3 / gm-tlcp 0.4.0. See `AUDIT-2026-09-06-v2.md` for the
+   updated post-0.3.0 critical-finding tally.
+4. **GmSSL master** — wire-format deviation on the ECDHE CKE body
+   (outer u16 prefix; same as gm-tlcp ≤ 0.2.x default). KDF order is
+   spec-conformant. Static-ECC SKE uses interpretation C (ECDHE-style
+   SKE body, not sig-only). Smaller code base, fewer features, but
+   the parts that exist match spec.
+5. **gm-tlcp 0.2.0** — historical, superseded by 0.3.0. Listed here
+   only for reference: the server still uses raw `compute_shared_secret`
+   (32-byte x-coordinate), which is a fundamentally different algorithm
+   from the spec's SM2 KAP, and default mode emits the u16 CKE prefix.
+   See [gm-tlcp-v0.2.2](https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.2.2...gm-tlcp-v0.3.0)
+   for the diff that fixed both.
 
 ### 3.6 Findings and (non-binding) follow-up
 

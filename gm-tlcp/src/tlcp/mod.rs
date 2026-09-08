@@ -117,47 +117,59 @@
 //!   code paths; round-trip testing is blocked on an upstream Tongsuo
 //!   fix (see
 //!   `interop/tongsuo/upstream/ISSUE-state-machine-ntls-version.md`).
-//! - **openHiTLS** (`s_server -tlcp`): strict-mode (feature flag
-//!   `tlcp-strict`) interop verified up to the client-side Finished
-//!   record. The CKE wire format (C-1), SKE-for-static-ECC
-//!   expectations (C-2), and the SM2 distid for Z-value computation
-//!   (M-3) are all addressed under the flag. The remaining
-//!   `Decrypt Error (51)` on Finished for ECDHE suites is a
-//!   known open issue: gm-tlcp's ECDHE x̂ transform implementation
-//!   appears to disagree with openHiTLS' key-agreement output
-//!   (tracked separately as a follow-up). See
+//! - **openHiTLS** (`s_server -tlcp`): default-build interop verified
+//!   up to the client-side Finished record for ECDHE suites (CKE wire
+//!   format per spec, SKE-for-static-ECC per RFC 5246 §7.4.3,
+//!   SM2-KAP PMS per GB/T 32918.3-2016 / GM/T 0003.3-2012 §6.1, and
+//!   SM2 distid for Z-value computation via the `with_*_distid`
+//!   setters). The remaining `Decrypt Error (51)` on Finished for
+//!   ECDHE suites is a known open issue: gm-tlcp's ECDHE x̂
+//!   transform implementation appears to disagree with openHiTLS'
+//!   key-agreement output (tracked separately as a follow-up). See
 //!   [`interop/AUDIT-2026-09-06.md`](../../interop/AUDIT-2026-09-06.md)
 //!   and `interop/openhitls/wire-traces/` for the empirical evidence.
 //!
+//! - **GmSSL 2026-06+ master**: the default build diverges from
+//!   GmSSL master on the points enumerated in the
+//!   "Limitations and interop boundaries" table below. To restore
+//!   byte-for-byte interop with GmSSL master, build with
+//!   `--features tlcp-gmssl-compat`. This is the inverse of the
+//!   pre-0.3.0 `tlcp-strict` flag.
+//!
+//! - **Tongsuo 8.3.0**: default-mode interop is unverified end-to-end;
+//!   Tongsuo's CKE / SKE shapes match the spec in the same places
+//!   openHiTLS does, so the default build *should* interop, but
+//!   no automated wire-level test exists in this repo.
+//!
 //! # Limitations and interop boundaries
 //!
-//! gm-tlcp's **default** build is GmSSL-master-targeted — the wire
-//! format and a handful of algorithm choices follow GmSSL 2026-06+
-//! master (the project's primary interop target) instead of the
-//! strict TLCP/GB-T-38636-2020 reading. To claim standards-strict
-//! interop, build with the `tlcp-strict` Cargo feature; this
-//! switches the divergences below. Audit D-2.
+//! gm-tlcp's **default** build is GB/T 38636-2020 spec-targeted — the
+//! wire format and algorithm choices follow the standard. To talk to
+//! GmSSL 2026-06+ master (which diverges from the spec in several
+//! places that 0.2.x inherited), build with the `tlcp-gmssl-compat`
+//! Cargo feature; that opt-in restores the 0.2.x GmSSL-master
+//! deviations. Audit D-2.
 //!
-//! | # | Default (GmSSL-targeted) | Strict (--features tlcp-strict) | Audit ref |
+//! | # | Default (GB/T 38636-2020 spec) | GmSSL shim (--features tlcp-gmssl-compat) | Audit ref |
 //! |---|---|---|---|
-//! | 1 | `ClientKeyExchange` body has a `uint16` length prefix on the ECDHE pub | No `uint16` prefix; matches RFC 5246 §7.4.7 / GB/T 38636-2020 §6.4.1.6 | C-1 |
-//! | 2 | `ServerKeyExchange` is sent AND expected for **all** suites, including static-ECC | `SKE` is only sent/expected for ECDHE suites (static-ECC skips it per RFC 5246 §7.4.3) | C-2 |
+//! | 1 | `ClientKeyExchange` body has **no** `uint16` length prefix on the ECDHE pub | Adds a redundant `uint16` length prefix to match GmSSL 2026-06+ master | C-1 (resolved) |
+//! | 2 | `ServerKeyExchange` is sent AND expected **only** for ECDHE suites; static-ECC skips SKE per RFC 5246 §7.4.3 | `SKE` is sent and expected for ALL suites including static-ECC (ECDHE-style body) | C-2 (R-1 sets default to RFC 5246; full spec interpretation-B is R-2) |
 //! | 3 | SM2 `distid` is hard-coded to `"1234567812345678"` | Same default, but `with_server_enc_distid` / `with_client_enc_distid` / `with_client_sign_distid` let callers override it | M-3 (partial) |
-//! | 4 | `ClientHello`/`ServerHello` `random` filled with 32 random bytes | First 4 bytes are the GMT Unix time per RFC 5246 §7.4.1.2 (m-1 applied in both modes as of v0.2) | m-1 |
+//! | 4 | `ClientHello`/`ServerHello` `random` filled with 32 random bytes | Same (m-1 applied in both modes as of v0.2) | m-1 |
 //! | 5 | `ClientHello.compression_methods` parser accepts any bytes; `ServerHello.cipher_suite` parser accepts any 2 bytes | Same (m-4/m-5 applied in both modes as of v0.2) | m-4 / m-5 |
 //! | 6 | `ClientHello.session_id_len` upper bound not enforced | Same (m-6 applied in both modes as of v0.2) | m-6 |
 //!
 //! Production callers should:
-//! - **Talk to GmSSL 3.3.0-dev master**: use the default build.
-//! - **Talk to openHiTLS / Tongsuo / any standards-strict peer**: use
-//!   `tlcp-strict` + supply the cert's distid via the `with_*_distid`
-//!   setters if the cert was generated with something other than
-//!   `"1234567812345678"`.
-//! - **Run gm-tlcp as a server** for static-ECC suites: not yet
-//!   supported (the static-ECC server PMS-decrypt path returns an
-//!   explicit `"strict-mode server-side static-ECC PMS decryption is
-//!   not implemented"` error under `tlcp-strict`, and silently does
-//!   the wrong thing under default).
+//! - **Talk to openHiTLS / Tongsuo / any standards-strict peer**:
+//!   use the default build. The default now matches GB/T 38636-2020
+//!   for the parts of the handshake it implements.
+//! - **Talk to GmSSL 3.3.0-dev master**: opt in with
+//!   `--features tlcp-gmssl-compat` (this restores the 0.2.x wire
+//!   format on the divergent points). The `tlcp-strict` flag from
+//!   0.2.x is deprecated as a no-op alias for source-compat.
+//! - **Run gm-tlcp as a server** for static-ECC suites: still
+//!   blocked on C-4 (server-side static-ECC PMS decryption returns
+//!   an explicit error). Tracked as R-3 in the SPEC-FIRST roadmap.
 //!
 //! # 许可证
 //!
@@ -179,7 +191,6 @@ mod alert;
 mod cipher_suite;
 mod constants;
 mod crypto;
-#[cfg(feature = "tlcp-strict")]
 mod cv_helper;
 mod handshake;
 mod handshake_type;
@@ -1544,10 +1555,15 @@ impl TlcpConnector {
             ))
         })?;
         let is_ecc_mode = !suite.ecdhe;
-        #[cfg(feature = "tlcp-strict")]
-        let need_ske = !is_ecc_mode;
-        #[cfg(not(feature = "tlcp-strict"))]
+        // Spec-default (RFC 5246 §7.4.3): only DHE suites emit
+        // ServerKeyExchange. Static-ECC skips SKE entirely.
+        //
+        // GmSSL-master shim: always read SKE (it carries an
+        // ECDHE-style body for static-ECC too).
+        #[cfg(feature = "tlcp-gmssl-compat")]
         let need_ske = true;
+        #[cfg(not(feature = "tlcp-gmssl-compat"))]
+        let need_ske = !is_ecc_mode;
 
         let ske_body: Vec<u8> = if need_ske {
             // Step 4: Read ServerKeyExchange
@@ -1606,7 +1622,6 @@ impl TlcpConnector {
         // peers (the old fall-through comment admitted the duplicate SHD
         // was harmless for GmSSL but it broke openHiTLS).
         let mut server_sent_cert_request = false;
-        #[cfg(feature = "tlcp-strict")]
         let mut shd_already_consumed = false;
         let cr_payload_opt = read_plaintext_record(&mut io).await.ok();
         if let Some((_ct, cr_payload)) = cr_payload_opt {
@@ -1617,27 +1632,28 @@ impl TlcpConnector {
                         client_hs.transcript.extend_from_slice(&cr_payload);
                     } else if cr_type == HandshakeType::ServerHelloDone {
                         client_hs.transcript.extend_from_slice(&cr_payload);
-                        #[cfg(feature = "tlcp-strict")]
-                        {
-                            shd_already_consumed = true;
-                        }
-                        #[cfg(not(feature = "tlcp-strict"))]
-                        {
-                            // Default mode: keep the historical fall-through
-                            // for GmSSL interop. The transcript ends up with
-                            // SHD bytes twice, but Finished verify is
-                            // transcript-independent (PRF over transcript hash),
-                            // so the duplicate doesn't cause a hash mismatch.
-                        }
+                        // Spec mode: mark SHD as consumed so step 6
+                        // doesn't re-read it (otherwise we'd hang
+                        // against standards-strict peers that don't
+                        // double-send SHD). GmSSL-master shim also
+                        // sets this but step 6 ignores the flag.
+                        shd_already_consumed = true;
                     }
                 }
             }
         }
-        // Step 6: Read ServerHelloDone.
-        // - Strict mode: skip if step 5.5 already consumed SHD (otherwise we
-        //   hang waiting for a record the server isn't going to send).
-        // - Default mode: always read (preserves the historical behaviour).
-        #[cfg(feature = "tlcp-strict")]
+        // Step 6: Read ServerHelloDone (or skip if already consumed).
+        //
+        // Spec-default (--features ... tlcp-gmssl-compat off): skip
+        // when step 5.5 already consumed SHD (so we don't hang
+        // against standards-strict peers).
+        //
+        // GmSSL-master shim: always read SHD a second time; the
+        // 0.2.x default-mode fall-through comment said this would
+        // result in SHD bytes appearing twice in the transcript,
+        // but Finished verify is transcript-independent (PRF over
+        // transcript hash), so the duplicate doesn't break Finished.
+        #[cfg(not(feature = "tlcp-gmssl-compat"))]
         {
             if !shd_already_consumed {
                 let (_ct, shd_payload) = read_plaintext_record(&mut io).await.map_err(|e| {
@@ -1653,7 +1669,7 @@ impl TlcpConnector {
                 client_hs.transcript.extend_from_slice(&shd_payload);
             }
         }
-        #[cfg(not(feature = "tlcp-strict"))]
+        #[cfg(feature = "tlcp-gmssl-compat")]
         {
             let (_ct, shd_payload) = read_plaintext_record(&mut io)
                 .await
@@ -1666,6 +1682,7 @@ impl TlcpConnector {
                 )));
             }
             client_hs.transcript.extend_from_slice(&shd_payload);
+            let _ = shd_already_consumed; // suppress unused warning
         }
         // Step 6.5: If the server sent CertificateRequest, RFC 5246
         // §7.4.6 requires us to reply with a Certificate message
@@ -2374,15 +2391,14 @@ impl TlcpAcceptor {
             server_hs.transcript.extend_from_slice(&ske_bytes);
             Some(kp)
         } else {
-            #[cfg(feature = "tlcp-strict")]
+            // Spec-default for static-ECC: no SKE, no ephemeral_kp.
+            // The PMS will eventually come from server-side ECC CKE
+            // decryption (audit C-4 / R-3, not yet implemented).
+            #[cfg(feature = "tlcp-gmssl-compat")]
             {
-                // Strict mode + static-ECC: no SKE per RFC 5246 §7.4.3.
-                None
-            }
-            #[cfg(not(feature = "tlcp-strict"))]
-            {
-                // Default mode + static-ECC: emit SKE for GmSSL interop
-                // (GmSSL master does the same and accepts it).
+                // GmSSL-master shim: emit an ECDHE-style SKE for
+                // static-ECC, just like GmSSL master does. Server-side
+                // PMS will use raw 32-byte ECDH (see step 8 below).
                 let sign_signer = gm_crypto::sm2::Sm2Signer::new(&sign_kp)
                     .map_err(|e| TlcpError::HandshakeFailed(format!("sign signer: {}", e)))?;
                 let (ske, kp) =
@@ -2396,19 +2412,22 @@ impl TlcpAcceptor {
                 server_hs.transcript.extend_from_slice(&ske_bytes);
                 Some(kp)
             }
+            #[cfg(not(feature = "tlcp-gmssl-compat"))]
+            {
+                None
+            }
         };
-        // Step 5.5: Send CertificateRequest (strict-mode only).
+        // Step 5.5: Send CertificateRequest (spec-default; skip in
+        // GmSSL-master shim).
         //
         // Per GB/T 38636-2020 §6.4.5.5 the server MAY send a
         // CertificateRequest to ask the client to authenticate with a
-        // dual (sign + enc) SM2 certificate chain. We only do this
-        // when the strict KAP path is enabled (--features tlcp-strict)
-        // because the strict path needs the client's enc cert to
-        // compute Z_client for the SM2 KAP PMS. In default mode the
-        // server keeps the historical behaviour (no CR), which
-        // matches the existing GmSSL-master interop tests and keeps
-        // the default-mode handshake short.
-        #[cfg(feature = "tlcp-strict")]
+        // dual (sign + enc) SM2 certificate chain. We do this by
+        // default because the spec-conformant PMS path needs the
+        // client's enc cert to compute Z_client for the SM2 KAP
+        // (audit C-3). The GmSSL-master shim skips CR because
+        // GmSSL master itself does not.
+        #[cfg(not(feature = "tlcp-gmssl-compat"))]
         {
             let cr = TlcpCertificateRequest::standard();
             let cr_bytes = cr.to_bytes()?;
@@ -2419,12 +2438,11 @@ impl TlcpAcceptor {
                 })?;
             server_hs.transcript.extend_from_slice(&cr_bytes);
         }
-        #[cfg(not(feature = "tlcp-strict"))]
+        #[cfg(feature = "tlcp-gmssl-compat")]
         {
-            // Default mode: skip CertificateRequest entirely. The
-            // server's PMS uses raw 32-byte ECDH (no client enc cert
-            // needed), so we don't require client authentication for
-            // the key agreement.
+            // Skip CertificateRequest. The server's PMS uses raw
+            // 32-byte ECDH (no client enc cert needed), so we don't
+            // require client authentication for the key agreement.
         }
         // Step 6: Send ServerHelloDone
         let shd = TlcpServerHelloDone;
@@ -2444,10 +2462,12 @@ impl TlcpAcceptor {
         // suites still work because the KDF only needs client enc pub
         // — which we capture here for both modes.
         //
-        // In default mode (no `tlcp-strict`) the server does NOT send
-        // a CertificateRequest (see step 5.5), so the client skips
-        // Certificate entirely and goes straight to CKE.
-        #[cfg(feature = "tlcp-strict")]
+        // In spec-default the server sent a CertificateRequest (step 5.5),
+        // so the client is required to reply with a Certificate
+        // message (possibly empty if the client has no cert).
+        // In GmSSL-master shim the server skipped CR, so the client
+        // skips Certificate entirely and goes straight to CKE.
+        #[cfg(not(feature = "tlcp-gmssl-compat"))]
         let _client_certs: Vec<Vec<u8>> = {
             let (_ct, cert_payload) = read_plaintext_record(&mut io).await.map_err(|e| {
                 TlcpError::HandshakeFailed(format!("read Client Certificate: {}", e))
@@ -2485,7 +2505,7 @@ impl TlcpAcceptor {
             server_hs.set_client_certs(client_certs.clone());
             client_certs
         };
-        #[cfg(not(feature = "tlcp-strict"))]
+        #[cfg(feature = "tlcp-gmssl-compat")]
         let _client_certs_unused: Vec<Vec<u8>> = Vec::new();
         // Step 7.5: Read ClientKeyExchange
         let (_ct, cke_payload) = read_plaintext_record(&mut io)
@@ -2502,9 +2522,9 @@ impl TlcpAcceptor {
         server_hs.transcript.extend_from_slice(&cke_payload);
         // Step 8: Compute pre-master secret.
         //
-        // In strict mode (feature `tlcp-strict`) we use the SM2 Key
-        // Agreement Protocol from GM/T 0003.3-2012 §6.1 (referenced
-        // by GB/T 38636-2020 §6.4.6.2), which feeds the KDF:
+        // Spec-default: use the SM2 Key Agreement Protocol from
+        // GM/T 0003.3-2012 §6.1 (referenced by GB/T 38636-2020
+        // §6.4.6.2), which feeds the KDF:
         //
         //   V = (x̄_R_A · r_A + k_A) · ((x̄_R_B · R_B) + P_B)
         //   PMS = KDF(xV ∥ yV ∥ Z_A ∥ Z_B, 48)
@@ -2513,10 +2533,9 @@ impl TlcpAcceptor {
         // public key + SM2 user_id. This is audit C-3 and matches
         // GmSSL master / Tongsuo 8.3.0 behaviour byte-for-byte.
         //
-        // In default mode (no feature) we keep the historical raw
-        // ECDH (32-byte x-coordinate) for backwards compatibility
-        // with the existing GmSSL interop paths; the strict path is
-        // the standards-conformant one.
+        // GmSSL-master shim (--features tlcp-gmssl-compat): the
+        // historical 32-byte raw ECDH x-coordinate path, kept for
+        // byte-for-byte interop with the legacy GmSSL interop tests.
         let pms: Vec<u8> = match server_ephemeral_kp_opt {
             Some(kp) => {
                 // The peer's ECDHE public key is wrapped in an
@@ -2529,13 +2548,23 @@ impl TlcpAcceptor {
                             .to_string(),
                     )
                 })?;
-                #[cfg(feature = "tlcp-strict")]
+                #[cfg(feature = "tlcp-gmssl-compat")]
                 {
+                    // GmSSL-master shim: 32-byte raw ECDH
+                    // x-coordinate. The historical 0.2.x default-mode
+                    // path, retained only for legacy interop.
+                    kp.compute_shared_secret(peer_ephemeral_sec1).map_err(|e| {
+                        TlcpError::HandshakeFailed(format!("ECDHE shared secret: {}", e))
+                    })?
+                }
+                #[cfg(not(feature = "tlcp-gmssl-compat"))]
+                {
+                    // Spec: full SM2 KAP PMS computation.
                     // 1) Build the server's KAP inputs from its own
                     //    encryption keypair.
                     let server_enc_kp = self.enc_key.clone().ok_or_else(|| {
                         TlcpError::HandshakeFailed(
-                            "tlcp-strict server ECDHE PMS needs `with_dual_certs(..., enc_key)` \
+                            "spec-default server ECDHE PMS needs `with_dual_certs(..., enc_key)` \
                              configured"
                                 .to_string(),
                         )
@@ -2651,29 +2680,9 @@ impl TlcpAcceptor {
                     )
                     .map_err(|e| TlcpError::HandshakeFailed(e.to_string()))?
                 }
-                #[cfg(not(feature = "tlcp-strict"))]
-                {
-                    // Default (GmSSL-compatible) mode: 32-byte raw
-                    // ECDH x-coordinate. This is the historical path
-                    // preserved for byte-for-byte interop with the
-                    // existing GmSSL interop tests.
-                    kp.compute_shared_secret(peer_ephemeral_sec1).map_err(|e| {
-                        TlcpError::HandshakeFailed(format!("ECDHE shared secret: {}", e))
-                    })?
-                }
             }
             None => {
-                #[cfg(feature = "tlcp-strict")]
-                {
-                    return Err(TlcpError::HandshakeFailed(
-                        "strict-mode server-side static-ECC PMS decryption is not \
-                         implemented in this release; use default mode (no \
-                         --features tlcp-strict) for static-ECC server interop, \
-                         or wait for the upcoming PR that adds SM2 decryption."
-                            .to_string(),
-                    ));
-                }
-                #[cfg(not(feature = "tlcp-strict"))]
+                #[cfg(feature = "tlcp-gmssl-compat")]
                 {
                     return Err(TlcpError::HandshakeFailed(
                         "server_ephemeral_kp missing for default-mode static-ECC \
@@ -2681,15 +2690,50 @@ impl TlcpAcceptor {
                             .to_string(),
                     ));
                 }
+                #[cfg(not(feature = "tlcp-gmssl-compat"))]
+                {
+                    return Err(TlcpError::HandshakeFailed(
+                        "spec-default server-side static-ECC PMS decryption is not \
+                         implemented in this release; use --features tlcp-gmssl-compat \
+                         for static-ECC server interop, or wait for the upcoming R-3 \
+                         (SPEC-FIRST roadmap) that adds SM2 decryption."
+                            .to_string(),
+                    ));
+                }
             }
         };
         server_hs.complete_key_exchange(pms)?;
-        // Step 8.5: Read CertificateVerify (if the client sent one).
+        // Step 8.5 + 9: Read CertificateVerify (if sent) and CCS.
         //
-        // Only relevant in strict mode where the server sent a
-        // CertificateRequest; in default mode the server skips CR
-        // entirely and the client's CKE is followed directly by CCS.
-        #[cfg(feature = "tlcp-strict")]
+        // Spec-default: the server sent a CertificateRequest (step
+        // 5.5), so the client may reply with CertificateVerify; we
+        // probe the next record's first byte to decide whether to
+        // consume a CV (consume it if it's CertificateVerify,
+        // otherwise leave the record in place for the CCS read).
+        //
+        // GmSSL-master shim: the server skipped CR, so the client
+        // skips CV too and goes straight to CCS.
+        #[cfg(feature = "tlcp-gmssl-compat")]
+        {
+            // Skip CV; just read CCS with strict validation.
+            let (ccs_type, ccs_payload) = read_plaintext_record(&mut io)
+                .await
+                .map_err(|e| TlcpError::HandshakeFailed(format!("read CCS: {}", e)))?;
+            if ccs_type != TLCP_RECORD_TYPE_CCS {
+                return Err(TlcpError::HandshakeFailed(format!(
+                    "Expected CCS (0x14), got 0x{:02x}",
+                    ccs_type
+                )));
+            }
+            if ccs_payload.as_slice() != [0x01u8] {
+                return Err(TlcpError::HandshakeFailed(format!(
+                    "CCS payload must be 0x01, got {} bytes: {:02x?}",
+                    ccs_payload.len(),
+                    ccs_payload
+                )));
+            }
+        }
+        #[cfg(not(feature = "tlcp-gmssl-compat"))]
         {
             // The client only emits a CertificateVerify message when
             // the server sent a CertificateRequest AND the client has
@@ -2735,28 +2779,6 @@ impl TlcpAcceptor {
                     .await
                     .map_err(|e| TlcpError::HandshakeFailed(format!("read CCS: {}", e)))?
             };
-            if ccs_type != TLCP_RECORD_TYPE_CCS {
-                return Err(TlcpError::HandshakeFailed(format!(
-                    "Expected CCS (0x14), got 0x{:02x}",
-                    ccs_type
-                )));
-            }
-            if ccs_payload.as_slice() != [0x01u8] {
-                return Err(TlcpError::HandshakeFailed(format!(
-                    "CCS payload must be 0x01, got {} bytes: {:02x?}",
-                    ccs_payload.len(),
-                    ccs_payload
-                )));
-            }
-        }
-        #[cfg(not(feature = "tlcp-strict"))]
-        {
-            // Default mode: no CR / no CV. Go straight to step 9.
-            //
-            // Validate both the CCS content_type AND the payload.
-            let (ccs_type, ccs_payload) = read_plaintext_record(&mut io)
-                .await
-                .map_err(|e| TlcpError::HandshakeFailed(format!("read CCS: {}", e)))?;
             if ccs_type != TLCP_RECORD_TYPE_CCS {
                 return Err(TlcpError::HandshakeFailed(format!(
                     "Expected CCS (0x14), got 0x{:02x}",

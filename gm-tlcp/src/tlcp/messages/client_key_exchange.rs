@@ -10,18 +10,18 @@
 //! 4-byte handshake header):
 //!
 //! ```text
-//!   /* strict mode (feature `tlcp-strict`):
+//!   /* spec-default mode:
 //!    * body = opaque body[length]
 //!    * (no overall length prefix; the 24-bit HS length field covers it) */
 //!   opaque body[length]
-//!   /* default (GmSSL-compatible) mode:
+//!   /* GmSSL-master shim (--features tlcp-gmssl-compat):
 //!    * body = uint16 payload_length || opaque payload[payload_length]
 //!    * (matches GmSSL 2026-06+ master `tls_uint16array_to_bytes` format) */
 //!   uint16      payload_length
 //!   opaque      payload[payload_length]
 //! ```
 //!
-//! `payload` (or `body`, in strict mode) is either the ECParameters-wrapped
+//! `payload` (or `body`, in spec mode) is either the ECParameters-wrapped
 //! ephemeral public key (ECDHE) or the encrypted pre-master secret (ECC).
 
 use crate::error::TlcpError;
@@ -39,15 +39,15 @@ use crate::tlcp::constants::TLCP_ECH_PARAMS_PREFIX;
 /// 4-byte handshake header):
 ///
 /// ```text
-///   /* strict mode (feature `tlcp-strict`):
+///   /* spec-default mode:
 ///    * body = opaque body[length] (no length prefix)
 ///    *
-///    * default (GmSSL-compatible) mode:
+///    * GmSSL-master shim (--features tlcp-gmssl-compat):
 ///    * body = uint16 payload_length || opaque payload[payload_length]
-///    * (matches GmSSL 2026-06+ master `tls_uint16array_to_bytes`)
+///    * (matches GmSSL 2026-06+ master `tls_uint16array_to_bytes`) */
 /// ```
 ///
-/// `payload` (or `body`, in strict mode) is either the ECParameters-wrapped
+/// `payload` (or `body`, in spec mode) is either the ECParameters-wrapped
 /// ephemeral public key (ECDHE) or the encrypted pre-master secret (ECC).
 #[derive(Debug, Clone)]
 pub struct TlcpClientKeyExchange {
@@ -101,29 +101,31 @@ impl TlcpClientKeyExchange {
     /// Serialize to TLS handshake message bytes
     /// (`type=0x10 || 24-bit length || body`).
     ///
-    /// In default (GmSSL-compatible) mode, the body is prefixed with a
-    /// 16-bit length to match GmSSL 2026-06+ master's
-    /// `tls_uint16array_to_bytes` format.
+    /// Spec-default mode emits the body without any length prefix;
+    /// the 24-bit HS length field above the body is the only
+    /// framing (RFC 5246 §7.4.7 / GB/T 38636-2020 §6.4.1.6).
     ///
-    /// In strict mode (feature `tlcp-strict`), the body is emitted without
-    /// that prefix, per RFC 5246 §7.4.7 / GB/T 38636-2020 §6.4.1.6.
+    /// GmSSL-master shim (`--features tlcp-gmssl-compat`) adds a
+    /// redundant `uint16` length prefix to match GmSSL 2026-06+
+    /// master's `tls_uint16array_to_bytes` format.
     pub fn to_bytes(&self) -> Vec<u8> {
         let payload_len = self.key_exchange.len();
-        // Pre-allocate for the worst case (default mode: 4-byte HS header
-        // + 2-byte uint16 + body). Strict mode wastes 2 bytes of capacity.
+        // Pre-allocate for the worst case (GmSSL shim: 4-byte HS
+        // header + 2-byte uint16 + body). Spec mode wastes 2 bytes
+        // of capacity.
         let mut buf = Vec::with_capacity(4 + 2 + payload_len);
         buf.push(HandshakeType::ClientKeyExchange as u8);
 
-        #[cfg(not(feature = "tlcp-strict"))]
+        #[cfg(feature = "tlcp-gmssl-compat")]
         let body_len: usize = 2 + payload_len;
-        #[cfg(feature = "tlcp-strict")]
+        #[cfg(not(feature = "tlcp-gmssl-compat"))]
         let body_len: usize = payload_len;
 
         buf.push((body_len >> 16) as u8);
         buf.push((body_len >> 8) as u8);
         buf.push(body_len as u8);
 
-        #[cfg(not(feature = "tlcp-strict"))]
+        #[cfg(feature = "tlcp-gmssl-compat")]
         {
             // 16-bit payload length prefix (matches GmSSL 2026-06+
             // tls_uint16array_to_bytes format). The previous version of
@@ -131,8 +133,8 @@ impl TlcpClientKeyExchange {
             // and rejected by GmSSL master.
             buf.extend_from_slice(&(payload_len as u16).to_be_bytes());
         }
-        // strict mode (feature `tlcp-strict`): no uint16 prefix; the
-        // HS header's 24-bit length field is the only framing.
+        // spec-default mode: no uint16 prefix; the HS header's
+        // 24-bit length field is the only framing.
         buf.extend_from_slice(&self.key_exchange);
         buf
     }
@@ -141,11 +143,11 @@ impl TlcpClientKeyExchange {
     /// 4-byte `type || 24-bit length` prefix has already been
     /// stripped).
     ///
-    /// In default mode the body is `uint16 payload_length || payload`.
-    /// In strict mode (feature `tlcp-strict`) the body is the raw
-    /// ECDH params / encrypted PMS — no uint16 prefix.
+    /// GmSSL-master shim: body is `uint16 payload_length || payload`.
+    /// Spec-default mode: body is the raw ECDH params / encrypted
+    /// PMS — no uint16 prefix.
     pub fn from_body(body: &[u8]) -> Result<Self, TlcpError> {
-        #[cfg(not(feature = "tlcp-strict"))]
+        #[cfg(feature = "tlcp-gmssl-compat")]
         {
             if body.len() < 2 {
                 return Err(TlcpError::InvalidMessage(format!(
@@ -165,11 +167,12 @@ impl TlcpClientKeyExchange {
                 key_exchange: body[2..2 + payload_len].to_vec(),
             })
         }
-        #[cfg(feature = "tlcp-strict")]
+        #[cfg(not(feature = "tlcp-gmssl-compat"))]
         {
-            // Strict mode: body is the raw ECDH params or encrypted PMS,
-            // exactly as it sits in the HS body. The 24-bit HS length
-            // field above this body already covered the framing.
+            // Spec-default mode: body is the raw ECDH params or
+            // encrypted PMS, exactly as it sits in the HS body. The
+            // 24-bit HS length field above this body already covered
+            // the framing.
             Ok(Self {
                 key_exchange: body.to_vec(),
             })
@@ -203,12 +206,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Default mode (GmSSL-compatible): uint16 prefix is emitted/expected
+    // GmSSL-master shim (--features tlcp-gmssl-compat): uint16 prefix
     // -----------------------------------------------------------------
 
-    #[cfg(not(feature = "tlcp-strict"))]
+    #[cfg(feature = "tlcp-gmssl-compat")]
     #[test]
-    fn default_to_bytes_emits_uint16_length_prefix() {
+    fn gmssl_compat_to_bytes_emits_uint16_length_prefix() {
         let cke = make_ecdhe_cke();
         let bytes = cke.to_bytes();
         // HS header: 4 bytes. After that: uint16 payload_len = 69.
@@ -222,18 +225,18 @@ mod tests {
         assert_eq!(&bytes[6..6 + ECDHE_BODY_LEN], &cke.key_exchange[..]);
     }
 
-    #[cfg(not(feature = "tlcp-strict"))]
+    #[cfg(feature = "tlcp-gmssl-compat")]
     #[test]
-    fn default_from_body_roundtrip() {
+    fn gmssl_compat_from_body_roundtrip() {
         let cke = make_ecdhe_cke();
         let bytes = cke.to_bytes();
         let parsed = TlcpClientKeyExchange::from_body(&bytes[4..]).unwrap();
         assert_eq!(parsed.key_exchange, cke.key_exchange);
     }
 
-    #[cfg(not(feature = "tlcp-strict"))]
+    #[cfg(feature = "tlcp-gmssl-compat")]
     #[test]
-    fn default_from_body_rejects_truncated_input() {
+    fn gmssl_compat_from_body_rejects_truncated_input() {
         // Need at least 2 bytes for the uint16 prefix.
         assert!(TlcpClientKeyExchange::from_body(&[]).is_err());
         assert!(TlcpClientKeyExchange::from_body(&[0x00]).is_err());
@@ -244,12 +247,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Strict mode (GB/T 38636-2020): NO uint16 prefix
+    // Spec-default (GB/T 38636-2020): NO uint16 prefix
     // -----------------------------------------------------------------
 
-    #[cfg(feature = "tlcp-strict")]
+    #[cfg(not(feature = "tlcp-gmssl-compat"))]
     #[test]
-    fn strict_to_bytes_emits_no_uint16_prefix() {
+    fn spec_default_to_bytes_emits_no_uint16_prefix() {
         let cke = make_ecdhe_cke();
         let bytes = cke.to_bytes();
         // Total: 4-byte HS header + body (no 2-byte prefix).
@@ -264,18 +267,18 @@ mod tests {
         assert_eq!(&bytes[4..4 + ECDHE_BODY_LEN], &cke.key_exchange[..]);
     }
 
-    #[cfg(feature = "tlcp-strict")]
+    #[cfg(not(feature = "tlcp-gmssl-compat"))]
     #[test]
-    fn strict_from_body_roundtrip() {
+    fn spec_default_from_body_roundtrip() {
         let cke = make_ecdhe_cke();
         let bytes = cke.to_bytes();
         let parsed = TlcpClientKeyExchange::from_body(&bytes[4..]).unwrap();
         assert_eq!(parsed.key_exchange, cke.key_exchange);
     }
 
-    #[cfg(feature = "tlcp-strict")]
+    #[cfg(not(feature = "tlcp-gmssl-compat"))]
     #[test]
-    fn strict_from_body_accepts_standard_conformant_peer_wire() {
+    fn spec_default_from_body_accepts_standard_conformant_peer_wire() {
         // Simulate a peer that follows RFC 5246 §7.4.7 exactly: body is
         // the raw ClientECDHParams, no uint16 prefix.
         let mut body = vec![0x03, 0x00, 0x29, 65]; // ECParams + pub_len
