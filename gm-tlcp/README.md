@@ -25,10 +25,10 @@ TLCP（Transport Layer Cryptographic Protocol，传输层密码协议）是 GB/T
 
 | ID | 名称 | 状态 |
 |----|------|------|
-| `0xE057` | `TLS_IBC_SM4_GCM_SM3` | ✅ 0.5.1（R-4.1）：SM9 IBC + SM4-GCM + SM3 |
-| `0xE017` | `TLS_IBC_SM4_CBC_SM3` | ✅ 0.5.1（R-4.1）：SM9 IBC + SM4-CBC + HMAC-SM3 |
-| `0xE055` | `TLS_IBSDH_SM4_GCM_SM3` | ⏳ R-4.2 / 0.5.2：SM9 IBSDH 动态密钥交换待实现 |
-| `0xE015` | `TLS_IBSDH_SM4_CBC_SM3` | ⏳ R-4.2 / 0.5.2 |
+| `0xE057` | `TLS_IBC_SM4_GCM_SM3` | ⚠️ 0.5.1 broken / ✅ 0.5.2 fixed (R-4.1 / R-4.1-hotfix)：SM9 IBC + SM4-GCM + SM3 |
+| `0xE017` | `TLS_IBC_SM4_CBC_SM3` | ⚠️ 0.5.1 broken / ✅ 0.5.2 fixed (R-4.1 / R-4.1-hotfix)：SM9 IBC + SM4-CBC + HMAC-SM3 |
+| `0xE055` | `TLS_IBSDH_SM4_GCM_SM3` | ⏳ R-4.2 / 0.5.3：SM9 IBSDH 动态密钥交换待实现 |
+| `0xE015` | `TLS_IBSDH_SM4_CBC_SM3` | ⏳ R-4.2 / 0.5.3 |
 | `0xE059` | `TLS_RSA_SM4_GCM_SM3` | ⏳ R-5 / 0.6.0 |
 | `0xE019` | `TLS_RSA_SM4_CBC_SM3` | ⏳ R-5 / 0.6.0 |
 | `0xE05A` | `TLS_RSA_SM4_GCM_SHA256` | ⏳ R-5 / 0.6.0 |
@@ -43,12 +43,13 @@ TLCP（Transport Layer Cryptographic Protocol，传输层密码协议）是 GB/T
 - ✅ Session resumption via session IDs (`TlcpSessionCache`)
 - ✅ Alert 协议（`TlcpAlert` / `TlcpAlertDescription`）
 - ✅ 全部 4 个密码套件
-- ✅ 105 lib tests + 5 loopback tests（`tests/gm_tlcp_loopback.rs`，包含 `gm_tlcp_kap_pms_roundtrip_with_real_keys`）+ 32 integration tests (`tests/integration_tlcp.rs`) + 4 default gmssl interop tests (7 more `#[ignore]`d, run with `--ignored` when `gmssl` is on `PATH`)
+- ✅ 107 lib tests + 7 loopback tests（`tests/gm_tlcp_loopback.rs`，包含 `gm_tlcp_kap_pms_roundtrip_with_real_keys` + 2 个新增的 `gm_tlcp_sm9_ibc_loopback_with_real_keys_{gcm,cbc}`） + 32 integration tests (`tests/integration_tlcp.rs`) + 4 default gmssl interop tests (7 more `#[ignore]`d, run with `--ignored` when `gmssl` is on `PATH`)
 - ✅ GmSSL 3.3.0-dev (`master`) handshake + APP_DATA byte-for-byte 互操作验证（需 `tlcp-gmssl-compat`）
 - ✅ openHiTLS `s_server -tlcp` 互操作验证：ECDHE（默认模式）+ static-ECC SKE + static-ECC PMS decrypt（默认模式，server 侧 R-3 已实现）
 - ✅ R-4 / gm-tlcp 0.5.0: SM9 IBC 静态套件 (E057/E017) cipher_suite registry 已声明，SKE/CKE wire format 完整实现 + 单元测试覆盖。
-- ✅ R-4.1 / gm-tlcp 0.5.1: SM9 IBC 握手 step 5 (server SKE 用 SM9 IBC 签名) + step 7.5 (client CKE 用 SM9 PKE 加密 PMS) + step 8 (server SM9 decrypt 恢复 PMS) 全部接通。`TlcpAcceptor::with_sm9_certs(...)` / `TlcpConnector::with_sm9_certs(...)` 为新增构造器。6 个新单测 (`sm9_ibc_*`)。C-5 IBC half 已 RESOLVED。
-- ⏳ R-4.2 / gm-tlcp 0.5.2: SM9 IBSDH 动态套件 (E055/E015) — 2 轮 initiator/responder 握手。
+- ✅ R-4.1 / gm-tlcp 0.5.2: SM9 IBC 握手 step 5 (server SKE 用 SM9 IBC 签名) + step 7.5 (client CKE 用 SM9 PKE 加密 PMS) + step 8 (server SM9 decrypt 恢复 PMS) 全部接通。`TlcpAcceptor::with_sm9_certs(...)` / `TlcpConnector::with_sm9_certs(...)` 为新增构造器。2 个 loopback 回归门禁（`gm_tlcp_sm9_ibc_loopback_with_real_keys_{gcm,cbc}`）在 `tests/gm_tlcp_loopback.rs` 。C-5 IBC half 已 RESOLVED。
+- ⚠️ R-4.1 (0.5.1)发布 版本: SM9 IBC wire path 实际上坏（server 早返 + ServerHello parse 白名单漏 IBC + server 对 IBC 发 CR）—— 请跳过 0.5.1 使用 0.5.2。ECDHE/ECC 路径不受影响。
+- ⏳ R-4.2 / gm-tlcp 0.5.3: SM9 IBSDH 动态套件 (E055/E015) — 2 轮 initiator/responder 握手。
 - ⏳ R-5 / gm-tlcp 0.6.0: RSA 套件 (E019/E01C/E059/E05A) — RustCrypto `rsa` crate 直集成（RSA 不属于国密，故不放在 gm-crypto）。
 - ❌ Tongsuo 8.3.0 round-trip — Tongsuo-side NTLS state-machine 拒绝 `0x0101`， 调查见 `interop/tongsuo/upstream/`
 

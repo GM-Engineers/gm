@@ -18,6 +18,7 @@ use crate::error::TlcpError;
 use crate::tlcp::HandshakeType;
 use crate::tlcp::constants::{
     TLS_ECC_SM4_CBC_SM3, TLS_ECC_SM4_GCM_SM3, TLS_ECDHE_SM4_CBC_SM3, TLS_ECDHE_SM4_GCM_SM3,
+    TLS_IBC_SM4_CBC_SM3, TLS_IBC_SM4_GCM_SM3,
 };
 
 /// TLCP ServerHello message
@@ -61,19 +62,23 @@ impl TlcpServerHello {
         let offset = 35 + session_id_len;
 
         let cipher_suite = [data[offset], data[offset + 1]];
-        // GB/T 38636-2020 §6.4.1.2 only defines the four TLCP
-        // cipher suites. Reject anything else at parse time so the
-        // caller gets a clear error rather than a generic "unknown
-        // cipher suite" later (audit m-5).
+        // GB/T 38636-2020 §6.4.5.2.1 表 2 defines 12 cipher suites (4
+        // ECDHE/ECC + 4 SM9 IBSDH/IBC + 4 RSA). gm-tlcp 0.5.x wires the
+        // 4 SM2 suites + the 2 SM9 IBC suites (R-4 / R-4.1-hotfix). The
+        // remaining 6 (SM9 IBSDH + RSA) are still pending R-4.2 / R-5 and
+        // are intentionally rejected here so callers get a clear error.
         if !matches!(
             cipher_suite,
             TLS_ECDHE_SM4_GCM_SM3
                 | TLS_ECDHE_SM4_CBC_SM3
                 | TLS_ECC_SM4_GCM_SM3
                 | TLS_ECC_SM4_CBC_SM3
+                | TLS_IBC_SM4_GCM_SM3
+                | TLS_IBC_SM4_CBC_SM3
         ) {
             return Err(TlcpError::InvalidMessage(format!(
-                "ServerHello cipher_suite {:02X?} is not a known TLCP suite",
+                "ServerHello cipher_suite {:02X?} is not a known TLCP suite \
+                 (gm-tlcp 0.5.2 supports ECDHE/ECC + IBC; IBSDH + RSA pending R-4.2 / R-5)",
                 cipher_suite
             )));
         }

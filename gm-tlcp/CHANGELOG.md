@@ -7,9 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-09-08
+
+### Fixed — SM9 IBC handshake wire path (R-4.1-hotfix)
+
+`gm-tlcp 0.5.1` declared the SM9 IBC suite wire format and added SM9 crypto helpers, but the server-side wire path was still broken (`accept_with_certs` returned an explicit "pending R-4.1" error the moment an IBC suite was negotiated, and `TlcpServerHello::from_bytes` rejected IBC suites as "not a known TLCP suite"). This release closes both gaps and adds loopback regression gates.
+
+**Three bugs fixed**:
+
+| # | Bug | File | Symptom |
+|---|---|---|---|
+| 1 | Server-side early-return | `src/tlcp/mod.rs::accept_with_certs` step 4/5 (R-4 explicit error) | Returns `Err("...pending R-4.1...")` when an IBC suite is negotiated. All R-4.1 SM9 server-side code was dead code. |
+| 2 | ServerHello parse whitelist | `src/tlcp/messages/server_hello.rs:68` | Only the 4 SM2 suites were accepted; `[0xE0, 0x57]` / `[0xE0, 0x17]` rejected at parse time. |
+| 3 | CertificateRequest for IBC | `src/tlcp/mod.rs::accept_with_certs` step 5.5 + step 7 | SM9 IBC is server-identity-authenticated; per GB/T 38636-2020 §6.4.5.4 it does not require client authentication. Server now skips both CR emission (step 5.5) and Client Certificate read (step 7) when `key_exchange == Ibc`. |
+
+**Regression gates added** (`tests/gm_tlcp_loopback.rs`):
+
+- `gm_tlcp_sm9_ibc_loopback_with_real_keys_gcm` — full handshake for E057 (`IBC_SM4_GCM_SM3`) via `tokio::io::duplex`, including app-data round-trip to prove record layer works post-handshake.
+- `gm_tlcp_sm9_ibc_loopback_with_real_keys_cbc` — same for E017 (`IBC_SM4_CBC_SM3`).
+
+Both tests run unconditionally (no `gmssl` CLI dependency). The previous diagnostic tests only verified the SM9 crypto primitives in isolation (`Sm9Signer` / `Sm9Encryptor` / `Sm9Decryptor`); the new loopback tests are the actual regression gate for the wire-protocol integration.
+
+### Supersession note (0.5.1 wire path)
+
+`gm-tlcp 0.5.1` is **not yanked** — its ECDHE / static-ECC / RSA-not-yet-wired behaviour is unchanged. Only the SM9 IBC path was broken in 0.5.1; users who do not use SM9 IBC suites (E057 / E017) are unaffected. Users who need SM9 IBC must upgrade to 0.5.2.
+
+### Lessons learned
+
+The unit tests all passed in 0.5.1 because they exercise the SM9 crypto helpers directly, bypassing the wire-protocol state machine. Going forward, **any PR that touches a handshake state-machine path must include at least one loopback regression test** (the existing `tests/gm_tlcp_loopback.rs` provides the template). This is the same gate that would have caught the bug at PR-review time if it had been written for R-4.1 originally.
+
+### Verification
+
+- `cargo +stable fmt --all -- --check` clean
+- `cargo +stable clippy -p gm-tlcp --all-features --all-targets -- -D warnings` clean
+- `cargo +stable test -p gm-tlcp` clean (105 lib tests + 7 loopback tests + 32 integration tests + 8 doctests)
+- `cargo +stable test -p gm-tlcp --features tlcp-gmssl-compat` clean (103 lib tests)
+- `cargo +stable test -p gm-tlcp --features tlcp-strict` clean (105 lib tests)
+- `cargo +stable publish -p gm-tlcp --dry-run --registry crates-io` clean (44 files, 560.2 KiB)
+- Both new SM9 IBC loopback tests pass end-to-end with `tokio::io::duplex`, proving the full handshake works and the record layer derives the same key material on both sides.
+
 ## [0.5.1] - 2026-09-08
 
 ### Added — SM9 IBC server-side PMS decrypt (R-4.1)
+
+⚠️ **WARNING**: `gm-tlcp 0.5.1` SM9 IBC wire path is broken — server returns explicit "pending R-4.1" error, and `TlcpServerHello::from_bytes` rejects IBC suites. ECDHE / static-ECC paths are unaffected. **Use 0.5.2 for SM9 IBC.**
 
 Closes the **IBC half** of audit **C-5** (SM9 coverage tracking). The
 **IBSDH half** remains pending R-4.2 / gm-tlcp 0.5.2; the **RSA half**
@@ -579,6 +620,7 @@ server-side PMS decryption** (R-5 / 0.6.0) and **SM9 suites** (R-4
   accidentally pushed to a public mirror.
 
 [Unreleased]: https://github.com/GM-Engineers/gm/compare/main...HEAD
+[0.5.2]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.5.1...gm-tlcp-v0.5.2
 [0.5.1]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.5.0...gm-tlcp-v0.5.1
 [0.5.0]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.4.0...gm-tlcp-v0.5.0
 [0.4.0]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.3.1...gm-tlcp-v0.4.0

@@ -153,3 +153,120 @@ async fn gm_tlcp_kap_pms_roundtrip_with_real_keys() {
 // Note: the R-2 spec-B SKE roundtrip tests live as unit tests in
 // `src/tlcp/messages/ecdhe.rs::tests` and `src/tlcp/crypto/verify.rs::tests`
 // because they require crate-private access to `verify_ske_signature`.
+
+// ============================================================================
+// SM9 IBC loopback regression tests (R-4.1-hotfix, gm-tlcp 0.5.2)
+// ============================================================================
+//
+// These are the regression gate for the R-4.1 wire-protocol gap documented
+// in AUDIT-2026-09-06-v2.md v2-rev6 (Bug 1 + Bug 2). They wire
+// `TlcpAcceptor` + `TlcpConnector` through `tokio::io::duplex`, complete a
+// full SM9 IBC handshake (E057 or E017), and exchange a single app-data
+// record round-trip to prove the record layer also works post-handshake.
+//
+// These tests do NOT require the `gmssl` CLI. The SM2 dual-certs are dummy
+// DER blobs (the IBC path doesn't consume them — see Bug 3 below) and
+// the SM9 keys are generated locally via `KgcMasterKey::generate()`.
+//
+// Bug 3 in this fix: the server must skip CertificateRequest emission
+// (step 5.5) AND the Client Certificate read (step 7) for IBC suites,
+// per GB/T 38636-2020 §6.4.5.4. Without these skips the connector
+// would error out with "Server sent CertificateRequest but no client
+// certificate was configured".
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gm_tlcp_sm9_ibc_loopback_with_real_keys_gcm() {
+    run_sm9_ibc_loopback([0xE0, 0x57]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gm_tlcp_sm9_ibc_loopback_with_real_keys_cbc() {
+    run_sm9_ibc_loopback([0xE0, 0x17]).await;
+}
+
+async fn run_sm9_ibc_loopback(suite: [u8; 2]) {
+    use gm_tlcp::tlcp::*;
+
+    // 1. SM9 KGC + identity.
+    let kgc = gm_sm9_rs::key::KgcMasterKey::generate().expect("kgc master");
+    let ppube = kgc.enc_master().ppube;
+    let ppubs = kgc.sign_master().ppubs;
+    let server_id = b"sm9-ibc-server@tlcp.local".to_vec();
+
+    // 2. SM2 dual-cert keypairs for the acceptor's cert pair. The IBC
+    //    path does not consume these (no SM2 PKE / no SM2 sig), but
+    //    `accept_with_certs` requires them to be configured.
+    let sign_kp = gm_crypto::sm2::Sm2KeyPair::generate().expect("sign kp");
+    let enc_kp = gm_crypto::sm2::Sm2KeyPair::generate().expect("enc kp");
+
+    // 3. Configure both sides.
+    let acceptor = TlcpAcceptor::new()
+        .with_dual_certs(
+            vec![0x01; 100], // dummy sign cert DER
+            vec![0x02; 100], // dummy enc cert DER
+            sign_kp,
+            enc_kp,
+        )
+        .with_sm9_certs(kgc, server_id.clone());
+
+    let connector = TlcpConnector::new()
+        .with_cipher_suites(vec![suite])
+        .with_sm9_certs(ppube, ppubs, server_id);
+
+    // 4. tokio::io::duplex transport.
+    let (client_io, server_io) = tokio::io::duplex(16384);
+
+    // 5. Spawn server.
+    let server_handle = tokio::spawn(async move {
+        acceptor
+            .accept_with_certs(server_io)
+            .await
+            .expect("server: SM9 IBC handshake must succeed in 0.5.2+")
+    });
+
+    // 6. Spawn client.
+    let client_handle = tokio::spawn(async move {
+        connector
+            .connect_with_certs(client_io)
+            .await
+            .expect("client: SM9 IBC handshake must succeed in 0.5.2+")
+    });
+
+    // 7. Wait for handshake to complete.
+    let mut server_stream = tokio::time::timeout(std::time::Duration::from_secs(5), server_handle)
+        .await
+        .expect("server task timed out (>5s)")
+        .expect("server task panicked");
+
+    let mut client_stream = tokio::time::timeout(std::time::Duration::from_secs(5), client_handle)
+        .await
+        .expect("client task timed out (>5s)")
+        .expect("client task panicked");
+
+    // 8. Exchange a single app-data record to prove the record layer
+    //    works post-handshake (proves master_secret derivation was
+    //    correct on both sides).
+    let msg: &[u8] = b"hello-ibc";
+    client_stream.write_all(msg).await.expect("client write");
+    client_stream.flush().await.expect("client flush");
+
+    let mut buf = vec![0u8; 256];
+    let n = server_stream.read(&mut buf).await.expect("server read");
+    assert_eq!(
+        &buf[..n],
+        msg,
+        "server received wrong bytes — IBC PMS derivation diverged"
+    );
+
+    // Server → Client round-trip.
+    server_stream.write_all(msg).await.expect("server write");
+    server_stream.flush().await.expect("server flush");
+    let n = client_stream.read(&mut buf).await.expect("client read");
+    assert_eq!(
+        &buf[..n],
+        msg,
+        "client received wrong bytes — IBC PMS derivation diverged"
+    );
+}

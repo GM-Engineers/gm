@@ -2584,28 +2584,11 @@ impl TlcpAcceptor {
             .map_err(|e| TlcpError::HandshakeFailed(format!("write Certificate: {}", e)))?;
         server_hs.transcript.extend_from_slice(&cert_msg);
         server_hs.set_server_certs(cert_pair);
-        // R-4: SM9 IBC (E017/E057) suites are declared and have
-        // SKE/CKE wire format support, but the full server-side PMS
-        // decryption path is tracked in R-4.1 / gm-tlcp 0.5.1.
-        // IBSDH (E015/E055) and RSA suites are pending R-4.1 / R-5.
-        // Return an explicit error rather than silently going through
-        // ECDHE/ECC code paths.
-        match suite.key_exchange {
-            crate::tlcp::cipher_suite::KeyExchangeMode::Ecdhe
-            | crate::tlcp::cipher_suite::KeyExchangeMode::Ecc => {}
-            crate::tlcp::cipher_suite::KeyExchangeMode::Ibc => {
-                return Err(TlcpError::HandshakeFailed(
-                    "SM9 IBC suites (E017/E057) declared in gm-tlcp 0.5.0 (R-4) but full handshake PMS path is not yet wired; pending R-4.1 / gm-tlcp 0.5.1. The SKE / CKE wire format is implemented and unit-tested; only the server-side Ibc body variant decryption in step 8 is missing.".to_string(),
-                ));
-            }
-            crate::tlcp::cipher_suite::KeyExchangeMode::Ibsdh
-            | crate::tlcp::cipher_suite::KeyExchangeMode::Rsa => {
-                return Err(TlcpError::HandshakeFailed(format!(
-                    "cipher suite {} uses key exchange {:?} which is not yet implemented; pending R-4.1 / R-5.",
-                    suite.name, suite.key_exchange
-                )));
-            }
-        }
+        // Suite dispatch lives in step 5 (server SKE emit) below:
+        //   Ecdhe / Ecc → emit EC params / sig-only SKE
+        //   Ibc         → emit SM9 IBC SKE (R-4.1-hotfix)
+        //   Ibsdh / Rsa → still pending R-4.2 / R-5 — keep the existing
+        //                 error returns in step 5 / step 8 below.
         // Step 5: ServerKeyExchange.        //
         // - ECDHE suites (E011/E051): emit `Ecdhe(Sm2EcdheParams)` body
         //   (full RFC 4492 ECParameters blob). Captures the ephemeral
@@ -2621,28 +2604,10 @@ impl TlcpAcceptor {
         //   - GmSSL-master shim (--features tlcp-gmssl-compat): emit
         //     ECDHE-style body (interpretation-C). Captures ephemeral
         //     keypair for raw 32-byte ECDH PMS derivation in step 8.
-        let server_ephemeral_kp_opt: Option<gm_crypto::sm2::Sm2EcdhKeypair> = if matches!(
-            suite.key_exchange,
-            crate::tlcp::cipher_suite::KeyExchangeMode::Ecdhe
-        ) {
-            let sign_signer = gm_crypto::sm2::Sm2Signer::new(&sign_kp)
-                .map_err(|e| TlcpError::HandshakeFailed(format!("sign signer: {}", e)))?;
-            let (ske, kp) =
-                TlcpServerKeyExchange::generate(&client_random, &server_random, &sign_signer)?;
-            let ske_bytes = ske.to_bytes();
-            write_handshake_record(&mut io, &ske_bytes)
-                .await
-                .map_err(|e| {
-                    TlcpError::HandshakeFailed(format!("write ServerKeyExchange: {}", e))
-                })?;
-            server_hs.transcript.extend_from_slice(&ske_bytes);
-            Some(kp)
-        } else {
-            #[cfg(feature = "tlcp-gmssl-compat")]
-            {
-                // GmSSL-master shim: emit an ECDHE-style SKE for
-                // static-ECC (interpretation-C). Server-side PMS will
-                // use raw 32-byte ECDH (see step 8 below).
+        let server_ephemeral_kp_opt: Option<gm_crypto::sm2::Sm2EcdhKeypair> = match suite
+            .key_exchange
+        {
+            crate::tlcp::cipher_suite::KeyExchangeMode::Ecdhe => {
                 let sign_signer = gm_crypto::sm2::Sm2Signer::new(&sign_kp)
                     .map_err(|e| TlcpError::HandshakeFailed(format!("sign signer: {}", e)))?;
                 let (ske, kp) =
@@ -2656,32 +2621,97 @@ impl TlcpAcceptor {
                 server_hs.transcript.extend_from_slice(&ske_bytes);
                 Some(kp)
             }
-            #[cfg(not(feature = "tlcp-gmssl-compat"))]
-            {
-                // Spec interpretation-B (openHiTLS / Tongsuo style):
-                // emit sig-only SKE over cr ∥ sr ∥ enc_cert_header ∥
-                // enc_cert. No ephemeral keypair; the server's PMS
-                // will come from ECCEncryptedPreMasterSecret decryption
-                // (R-3, not yet implemented).
-                let sign_signer = gm_crypto::sm2::Sm2Signer::new(&sign_kp)
-                    .map_err(|e| TlcpError::HandshakeFailed(format!("sign signer: {}", e)))?;
-                let ske = TlcpServerKeyExchange::generate_ecc(
-                    &client_random,
-                    &server_random,
-                    &enc_cert,
-                    &sign_signer,
-                )?;
+            crate::tlcp::cipher_suite::KeyExchangeMode::Ecc => {
+                #[cfg(feature = "tlcp-gmssl-compat")]
+                {
+                    // GmSSL-master shim: emit an ECDHE-style SKE for
+                    // static-ECC (interpretation-C). Server-side PMS will
+                    // use raw 32-byte ECDH (see step 8 below).
+                    let sign_signer = gm_crypto::sm2::Sm2Signer::new(&sign_kp)
+                        .map_err(|e| TlcpError::HandshakeFailed(format!("sign signer: {}", e)))?;
+                    let (ske, kp) = TlcpServerKeyExchange::generate(
+                        &client_random,
+                        &server_random,
+                        &sign_signer,
+                    )?;
+                    let ske_bytes = ske.to_bytes();
+                    write_handshake_record(&mut io, &ske_bytes)
+                        .await
+                        .map_err(|e| {
+                            TlcpError::HandshakeFailed(format!("write ServerKeyExchange: {}", e))
+                        })?;
+                    server_hs.transcript.extend_from_slice(&ske_bytes);
+                    Some(kp)
+                }
+                #[cfg(not(feature = "tlcp-gmssl-compat"))]
+                {
+                    // Spec interpretation-B (openHiTLS / Tongsuo style):
+                    // emit sig-only SKE over cr ∥ sr ∥ enc_cert_header ∥
+                    // enc_cert. No ephemeral keypair; the server's PMS
+                    // will come from ECCEncryptedPreMasterSecret decryption
+                    // (R-3, not yet implemented).
+                    let sign_signer = gm_crypto::sm2::Sm2Signer::new(&sign_kp)
+                        .map_err(|e| TlcpError::HandshakeFailed(format!("sign signer: {}", e)))?;
+                    let ske = TlcpServerKeyExchange::generate_ecc(
+                        &client_random,
+                        &server_random,
+                        &enc_cert,
+                        &sign_signer,
+                    )?;
+                    let ske_bytes = ske.to_bytes();
+                    write_handshake_record(&mut io, &ske_bytes)
+                        .await
+                        .map_err(|e| {
+                            TlcpError::HandshakeFailed(format!("write ServerKeyExchange: {}", e))
+                        })?;
+                    server_hs.transcript.extend_from_slice(&ske_bytes);
+                    None
+                }
+            }
+            crate::tlcp::cipher_suite::KeyExchangeMode::Ibc => {
+                // SM9 IBC (R-4.1-hotfix): sign cr ∥ sr ∥ server_id with
+                // the server's SM9 IBC signing user key, emit the IBC
+                // variant of ServerKeyExchange.
+                let sm9_sign_master = self.sm9_sign_master.as_ref().ok_or_else(|| {
+                        TlcpError::HandshakeFailed(
+                            "SM9 IBC suite negotiated but TlcpAcceptor::with_sm9_certs(...) was not called"
+                                .to_string(),
+                        )
+                    })?;
+                let server_id = self.sm9_server_id.as_ref().ok_or_else(|| {
+                    TlcpError::HandshakeFailed(
+                        "SM9 IBC suite negotiated but sm9_server_id is missing".to_string(),
+                    )
+                })?;
+                let user_sign_key = sm9_sign_master.extract_key(server_id).map_err(|e| {
+                    TlcpError::HandshakeFailed(format!("SM9 IBC sign user key extract: {}", e))
+                })?;
+                let signer = gm_sm9_rs::Signer::with_identity(user_sign_key, server_id);
+                let mut to_sign = Vec::with_capacity(64 + server_id.len());
+                to_sign.extend_from_slice(&client_random);
+                to_sign.extend_from_slice(&server_random);
+                to_sign.extend_from_slice(server_id);
+                let signature = signer
+                    .sign(&to_sign, &mut rand::rng())
+                    .map_err(|e| TlcpError::HandshakeFailed(format!("SM9 IBC SKE sign: {}", e)))?;
+                let ske = TlcpServerKeyExchange::new_ibc(server_id.clone(), signature.to_bytes());
                 let ske_bytes = ske.to_bytes();
                 write_handshake_record(&mut io, &ske_bytes)
                     .await
                     .map_err(|e| {
-                        TlcpError::HandshakeFailed(format!("write ServerKeyExchange: {}", e))
+                        TlcpError::HandshakeFailed(format!("write ServerKeyExchange (IBC): {}", e))
                     })?;
                 server_hs.transcript.extend_from_slice(&ske_bytes);
                 None
             }
-        };
-        // Step 5.5: Send CertificateRequest (spec-default; skip in
+            crate::tlcp::cipher_suite::KeyExchangeMode::Ibsdh
+            | crate::tlcp::cipher_suite::KeyExchangeMode::Rsa => {
+                return Err(TlcpError::HandshakeFailed(format!(
+                    "cipher suite {} uses key exchange {:?} which is not yet implemented; pending R-4.2 / R-5.",
+                    suite.name, suite.key_exchange
+                )));
+            }
+        }; // Step 5.5: Send CertificateRequest (spec-default; skip in
         // GmSSL-master shim).
         //
         // Per GB/T 38636-2020 §6.4.5.5 the server MAY send a
@@ -2693,14 +2723,24 @@ impl TlcpAcceptor {
         // GmSSL master itself does not.
         #[cfg(not(feature = "tlcp-gmssl-compat"))]
         {
-            let cr = TlcpCertificateRequest::standard();
-            let cr_bytes = cr.to_bytes()?;
-            write_handshake_record(&mut io, &cr_bytes)
-                .await
-                .map_err(|e| {
-                    TlcpError::HandshakeFailed(format!("write CertificateRequest: {}", e))
-                })?;
-            server_hs.transcript.extend_from_slice(&cr_bytes);
+            // SM9 IBC suites (R-4.1-hotfix): server authenticates via
+            // SM9 IBC identity (step 5 SKE), not via SM2 cert chain.
+            // Per GB/T 38636-2020 §6.4.5.4 the IBC suites do not require
+            // client authentication, so skip the CertificateRequest and
+            // the corresponding Client Certificate read in step 7.
+            if !matches!(
+                suite.key_exchange,
+                crate::tlcp::cipher_suite::KeyExchangeMode::Ibc
+            ) {
+                let cr = TlcpCertificateRequest::standard();
+                let cr_bytes = cr.to_bytes()?;
+                write_handshake_record(&mut io, &cr_bytes)
+                    .await
+                    .map_err(|e| {
+                        TlcpError::HandshakeFailed(format!("write CertificateRequest: {}", e))
+                    })?;
+                server_hs.transcript.extend_from_slice(&cr_bytes);
+            }
         }
         #[cfg(feature = "tlcp-gmssl-compat")]
         {
@@ -2732,7 +2772,15 @@ impl TlcpAcceptor {
         // In GmSSL-master shim the server skipped CR, so the client
         // skips Certificate entirely and goes straight to CKE.
         #[cfg(not(feature = "tlcp-gmssl-compat"))]
-        let _client_certs: Vec<Vec<u8>> = {
+        let _client_certs: Vec<Vec<u8>> = if matches!(
+            suite.key_exchange,
+            crate::tlcp::cipher_suite::KeyExchangeMode::Ibc
+        ) {
+            // SM9 IBC suites (R-4.1-hotfix): server skipped
+            // CertificateRequest in step 5.5, so the client sends no
+            // Certificate. No client certs to consume here.
+            Vec::new()
+        } else {
             let (_ct, cert_payload) = read_plaintext_record(&mut io).await.map_err(|e| {
                 TlcpError::HandshakeFailed(format!("read Client Certificate: {}", e))
             })?;
