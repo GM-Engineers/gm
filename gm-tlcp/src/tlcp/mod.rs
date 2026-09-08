@@ -1555,63 +1555,57 @@ impl TlcpConnector {
             ))
         })?;
         let is_ecc_mode = !suite.ecdhe;
-        // Spec-default (RFC 5246 §7.4.3): only DHE suites emit
-        // ServerKeyExchange. Static-ECC skips SKE entirely.
+        // Spec-default (RFC 5246 §7.4.3 + GB/T 38636-2020 §6.4.5.4
+        // interpretation-B): both ECDHE and static-ECC suites emit
+        // ServerKeyExchange. The two variants differ in body shape
+        // (ECDHE: full ECParameters blob; ECC: sig-only over
+        // cr ∥ sr ∥ enc_cert_header ∥ enc_cert) and the verifier
+        // dispatches on `is_ecc_mode`.
         //
-        // GmSSL-master shim: always read SKE (it carries an
-        // ECDHE-style body for static-ECC too).
-        #[cfg(feature = "tlcp-gmssl-compat")]
-        let need_ske = true;
-        #[cfg(not(feature = "tlcp-gmssl-compat"))]
-        let need_ske = !is_ecc_mode;
+        // GmSSL-master shim (--features tlcp-gmssl-compat) also
+        // always reads SKE; for static-ECC, GmSSL master emits an
+        // ECDHE-style body (interpretation-C) which the same
+        // ECDHE-parser path handles.
 
-        let ske_body: Vec<u8> = if need_ske {
-            // Step 4: Read ServerKeyExchange
-            let (_ct, ske_payload) = read_plaintext_record(&mut io).await.map_err(|e| {
-                TlcpError::HandshakeFailed(format!("read ServerKeyExchange: {}", e))
+        // Step 4: Read ServerKeyExchange
+        let (_ct, ske_payload) = read_plaintext_record(&mut io)
+            .await
+            .map_err(|e| TlcpError::HandshakeFailed(format!("read ServerKeyExchange: {}", e)))?;
+        let (ske_type, ske_body, _rem) = parse_handshake_message(&ske_payload)?;
+        if ske_type != HandshakeType::ServerKeyExchange {
+            return Err(TlcpError::HandshakeFailed(format!(
+                "Expected ServerKeyExchange, got {:?}",
+                ske_type
+            )));
+        }
+        // Step 5: Verify ServerKeyExchange signature. We REQUIRE the caller
+        // to configure `server_sign_pubkey` + `server_sign_distid` via
+        // `with_server_sign_key(...)`; silently skipping verification would
+        // be a critical MITM vulnerability (audit 2026-08-31).
+        let (pubkey, distid) = self
+            .server_sign_pubkey
+            .as_ref()
+            .zip(self.server_sign_distid.as_ref())
+            .ok_or_else(|| {
+                TlcpError::HandshakeFailed(
+                    "ServerKeyExchange signature verification requires \
+                     server_sign_pubkey + server_sign_distid; call \
+                     TlcpConnector::with_server_sign_key() before \
+                     connect_with_certs()."
+                        .to_string(),
+                )
             })?;
-            let (ske_type, body, _rem) = parse_handshake_message(&ske_payload)?;
-            if ske_type != HandshakeType::ServerKeyExchange {
-                return Err(TlcpError::HandshakeFailed(format!(
-                    "Expected ServerKeyExchange, got {:?}",
-                    ske_type
-                )));
-            }
-            // Step 5: Verify ServerKeyExchange signature. We REQUIRE the caller
-            // to configure `server_sign_pubkey` + `server_sign_distid` via
-            // `with_server_sign_key(...)`; silently skipping verification would
-            // be a critical MITM vulnerability (audit 2026-08-31).
-            let (pubkey, distid) = self
-                .server_sign_pubkey
-                .as_ref()
-                .zip(self.server_sign_distid.as_ref())
-                .ok_or_else(|| {
-                    TlcpError::HandshakeFailed(
-                        "ServerKeyExchange signature verification requires \
-                         server_sign_pubkey + server_sign_distid; call \
-                         TlcpConnector::with_server_sign_key() before \
-                         connect_with_certs()."
-                            .to_string(),
-                    )
-                })?;
-            let verifier = gm_crypto::sm2::Sm2Verifier::new(pubkey, distid)
-                .map_err(|e| TlcpError::HandshakeFailed(format!("verifier create: {}", e)))?;
-            crate::tlcp::crypto::verify::verify_ske_signature(
-                is_ecc_mode,
-                &body,
-                &client_random,
-                &server_random,
-                &cert_pair.enc_cert,
-                &verifier,
-            )?;
-            client_hs.transcript.extend_from_slice(&ske_payload);
-            body
-        } else {
-            // Strict mode + static-ECC: no ServerKeyExchange on the wire (per
-            // RFC 5246 §7.4.3 / GB/T 38636-2020 §6.4.1.5). Skip directly to the
-            // CertificateRequest/ServerHelloDone step below.
-            Vec::new()
-        };
+        let verifier = gm_crypto::sm2::Sm2Verifier::new(pubkey, distid)
+            .map_err(|e| TlcpError::HandshakeFailed(format!("verifier create: {}", e)))?;
+        crate::tlcp::crypto::verify::verify_ske_signature(
+            is_ecc_mode,
+            &ske_body,
+            &client_random,
+            &server_random,
+            &cert_pair.enc_cert,
+            &verifier,
+        )?;
+        client_hs.transcript.extend_from_slice(&ske_payload);
         // Step 5.5: Read CertificateRequest or ServerHelloDone. The next plaintext
         // record from the server is one of:
         //   - CertificateRequest (GmSSL/Tongsuo for ECDHE)
@@ -1921,15 +1915,20 @@ impl TlcpConnector {
             //    (`ecdhe_params.ephemeral_public` is the 64-byte
             //    (x || y) of R_B).
             let mut server_ephemeral_xy = [0u8; 64];
-            if ske.ecdhe_params.ephemeral_public.len() != 65
-                || ske.ecdhe_params.ephemeral_public[0] != 0x04
+            let server_ecdhe_params = ske.as_ecdhe().ok_or_else(|| {
+                TlcpError::HandshakeFailed(
+                    "client expected ECDHE ServerKeyExchange but got sig-only Ecc body".to_string(),
+                )
+            })?;
+            if server_ecdhe_params.ephemeral_public.len() != 65
+                || server_ecdhe_params.ephemeral_public[0] != 0x04
             {
                 return Err(TlcpError::HandshakeFailed(format!(
                     "server ephemeral SEC1 must be uncompressed (65 bytes 0x04||X||Y), got {} bytes",
-                    ske.ecdhe_params.ephemeral_public.len()
+                    server_ecdhe_params.ephemeral_public.len()
                 )));
             }
-            server_ephemeral_xy.copy_from_slice(&ske.ecdhe_params.ephemeral_public[1..65]);
+            server_ephemeral_xy.copy_from_slice(&server_ecdhe_params.ephemeral_public[1..65]);
             // 5. Compute the two SM2 `Z` values. NOTE the unusual Z
             //    order required for GmSSL master interop: gmssl's
             //    `tlcp_send_client_key_exchange` calls
@@ -2368,15 +2367,22 @@ impl TlcpAcceptor {
             .map_err(|e| TlcpError::HandshakeFailed(format!("write Certificate: {}", e)))?;
         server_hs.transcript.extend_from_slice(&cert_msg);
         server_hs.set_server_certs(cert_pair);
-        // Step 5: ServerKeyExchange (only for ECDHE in strict mode).
+        // Step 5: ServerKeyExchange.
         //
-        // In strict mode + static-ECC we skip SKE entirely — the spec
-        // doesn't define it for static-ECC suites. Note: gm-tlcp's server
-        // does not yet implement the static-ECC PMS decryption path, so
-        // strict-mode + static-ECC server-side will return an explicit error
-        // at step 8 (see below). A future PR will add the SM2-decrypt path.
-        // In default mode we keep emitting SKE for ALL suites to preserve
-        // GmSSL/Tongsuo interop, even though that's a deviation from spec.
+        // - ECDHE suites (E011/E051): emit `Ecdhe(Sm2EcdheParams)` body
+        //   (full RFC 4492 ECParameters blob). Captures the ephemeral
+        //   keypair for step 8 PMS derivation.
+        // - Static-ECC suites (E013/E053):
+        //   - Spec-default (interpretation-B, used by openHiTLS /
+        //     Tongsuo): emit `Ecc { signature }` body (sig-only over
+        //     `cr ∥ sr ∥ enc_cert_header ∥ enc_cert`). No ephemeral
+        //     keypair needed; the PMS comes from server-side
+        //     `ECCEncryptedPreMasterSecret` decryption in step 8
+        //     (audit C-4 / R-3, not yet implemented — see step 8 error
+        //     path).
+        //   - GmSSL-master shim (--features tlcp-gmssl-compat): emit
+        //     ECDHE-style body (interpretation-C). Captures ephemeral
+        //     keypair for raw 32-byte ECDH PMS derivation in step 8.
         let server_ephemeral_kp_opt: Option<gm_crypto::sm2::Sm2EcdhKeypair> = if suite.ecdhe {
             let sign_signer = gm_crypto::sm2::Sm2Signer::new(&sign_kp)
                 .map_err(|e| TlcpError::HandshakeFailed(format!("sign signer: {}", e)))?;
@@ -2391,14 +2397,11 @@ impl TlcpAcceptor {
             server_hs.transcript.extend_from_slice(&ske_bytes);
             Some(kp)
         } else {
-            // Spec-default for static-ECC: no SKE, no ephemeral_kp.
-            // The PMS will eventually come from server-side ECC CKE
-            // decryption (audit C-4 / R-3, not yet implemented).
             #[cfg(feature = "tlcp-gmssl-compat")]
             {
                 // GmSSL-master shim: emit an ECDHE-style SKE for
-                // static-ECC, just like GmSSL master does. Server-side
-                // PMS will use raw 32-byte ECDH (see step 8 below).
+                // static-ECC (interpretation-C). Server-side PMS will
+                // use raw 32-byte ECDH (see step 8 below).
                 let sign_signer = gm_crypto::sm2::Sm2Signer::new(&sign_kp)
                     .map_err(|e| TlcpError::HandshakeFailed(format!("sign signer: {}", e)))?;
                 let (ske, kp) =
@@ -2414,6 +2417,26 @@ impl TlcpAcceptor {
             }
             #[cfg(not(feature = "tlcp-gmssl-compat"))]
             {
+                // Spec interpretation-B (openHiTLS / Tongsuo style):
+                // emit sig-only SKE over cr ∥ sr ∥ enc_cert_header ∥
+                // enc_cert. No ephemeral keypair; the server's PMS
+                // will come from ECCEncryptedPreMasterSecret decryption
+                // (R-3, not yet implemented).
+                let sign_signer = gm_crypto::sm2::Sm2Signer::new(&sign_kp)
+                    .map_err(|e| TlcpError::HandshakeFailed(format!("sign signer: {}", e)))?;
+                let ske = TlcpServerKeyExchange::generate_ecc(
+                    &client_random,
+                    &server_random,
+                    &enc_cert,
+                    &sign_signer,
+                )?;
+                let ske_bytes = ske.to_bytes();
+                write_handshake_record(&mut io, &ske_bytes)
+                    .await
+                    .map_err(|e| {
+                        TlcpError::HandshakeFailed(format!("write ServerKeyExchange: {}", e))
+                    })?;
+                server_hs.transcript.extend_from_slice(&ske_bytes);
                 None
             }
         };
@@ -3880,8 +3903,11 @@ mod tests {
         // Parse: skip 4-byte header (type + 3-byte length)
         let body_len = ((bytes[2] as usize) << 8) | bytes[3] as usize;
         let parsed = TlcpServerKeyExchange::from_body(&bytes[4..4 + body_len]).unwrap();
-        assert_eq!(parsed.ecdhe_params.ephemeral_public, ephemeral_pub);
-        assert_eq!(parsed.ecdhe_params.signature, signature);
+        let parsed_ecdhe = parsed
+            .as_ecdhe()
+            .expect("expected ECDHE variant in test_server_key_exchange_roundtrip");
+        assert_eq!(parsed_ecdhe.ephemeral_public, ephemeral_pub);
+        assert_eq!(parsed_ecdhe.signature, signature);
     }
     #[test]
     fn test_server_hello_done_roundtrip() {

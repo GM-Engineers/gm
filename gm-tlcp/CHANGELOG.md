@@ -7,6 +7,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-08
+
+### Changed
+
+- **C-2 fix: static-ECC suites (E013 / E053) now emit and accept
+  the spec interpretation-B `ServerKeyExchange`** (sig-only over
+  `cr ∥ sr ∥ enc_cert_header ∥ enc_cert_der`).
+  Audit finding **C-2** in
+  [`interop/AUDIT-2026-09-06-v2.md`](interop/AUDIT-2026-09-06-v2.md)
+  §C-2 (the C-2 status moves from PARTIAL to RESOLVED on the
+  client side; server-side static-ECC PMS decryption remains
+  pending R-3 / 0.4.0). This is the wire format openHiTLS and
+  Tongsuo 8.3.0 emit on the wire for E013 / E053, so the gm-tlcp
+  client can now complete a static-ECC handshake against those
+  peers (up to the server-PMS step).
+
+  Changes ([`src/tlcp/messages/ecdhe.rs`](src/tlcp/messages/ecdhe.rs),
+  [`src/tlcp/mod.rs`](src/tlcp/mod.rs) `connect_with_certs` step 4 +
+  `accept_with_certs` step 5,
+  [`src/tlcp/crypto/verify.rs`](src/tlcp/crypto/verify.rs)):
+
+  - `TlcpServerKeyExchange` is now an enum-backed struct with two
+    variants: `Ecdhe(Sm2EcdheParams)` (existing) and `Ecc {
+    signature }` (new — interpretation-B). Callers access the
+    inner params via `as_ecdhe()` / `as_ecc_signature()` helpers.
+  - New `TlcpServerKeyExchange::generate_ecc(cr, sr, enc_cert_der,
+    &sign_signer)` produces the interpretation-B body (DER-encoded
+    sig, matching openHiTLS / Tongsuo wire convention).
+  - `from_body` auto-detects the variant: if the body starts with
+    the ECParameters prefix (`0x03 0x00 0x29`) it's parsed as
+    ECDHE; otherwise it's parsed as `Ecc`. This lets the same
+    parser handle both ECDHE and static-ECC peers without mode
+    branching at the call site.
+  - Client step 4 now always reads `ServerKeyExchange` for all
+    four cipher suites (previously default-mode skipped SKE for
+    static-ECC per RFC 5246 §7.4.3). The verifier dispatches on
+    `is_ecc_mode` to pick the right signed-input reconstruction.
+  - Server step 5 default-mode for static-ECC now emits the
+    interpretation-B sig-only SKE (previously skipped under
+    default; previously emitted ECDHE-style under
+    `tlcp-gmssl-compat`). The `tlcp-gmssl-compat` path keeps the
+    legacy ECDHE-style emit for GmSSL master interop.
+
+  Behaviour matrix (post-0.3.1):
+
+  | Suite | Default mode | `tlcp-gmssl-compat` |
+  |---|---|---|
+  | ECDHE (E011 / E051) | spec ECDHE-style SKE ✅ | GmSSL ECDHE-style SKE ✅ |
+  | static-ECC (E013 / E053) **client** | spec sig-only SKE ✅ | GmSSL ECDHE-style SKE ✅ |
+  | static-ECC (E013 / E053) **server** | spec sig-only SKE emit; PMS decrypt still R-3 / 0.4.0 | GmSSL ECDHE-style SKE emit; raw ECDH PMS ✅ |
+
+  Side effects:
+
+  - 5 new unit tests in `src/tlcp/messages/ecdhe.rs::tests`:
+    `ske_ecc_to_bytes_writes_uint16_sig_len_prefix`,
+    `ske_ecc_from_body_parses_back`,
+    `ske_ecc_from_body_rejects_truncated_input`,
+    `ske_from_body_autodetects_ecdhe_by_ecparameters_prefix`,
+    `ske_from_body_autodetects_ecc_when_prefix_absent`,
+    `generate_ecc_then_verify_roundtrip_succeeds`,
+    `generate_ecc_to_bytes_matches_interp_b_layout`.
+  - 3 new unit tests in `src/tlcp/crypto/verify.rs::tests` (this
+    file had no tests prior to 0.3.1):
+    `verify_ske_signature_ecc_path_accepts_correct_sig`,
+    `verify_ske_signature_ecc_path_rejects_bad_sig`,
+    `verify_ske_signature_ecc_path_rejects_truncated_body`.
+
+### Verification
+
+- `cargo +stable fmt --all -- --check` clean.
+- `cargo +stable clippy --workspace --all-features --all-targets -- -D warnings` clean.
+- `cargo +stable test -p gm-tlcp` clean: gm-tlcp 85 unit tests (was 80 in 0.3.0) + 5 loopback tests + 32 integration tests + 4 GmSSL interop (7 `#[ignore]`d) + 8 doctests.
+- `cargo +stable test -p gm-tlcp --features tlcp-gmssl-compat` clean (rollback path verified).
+- `cargo +stable test -p gm-tlcp --features tlcp-strict` clean (deprecated no-op verified).
+- `cargo +stable publish --dry-run -p gm-tlcp --registry crates-io` clean (44 files, 477.5 KiB).
+
+### Audit-finding tally (post-0.3.1)
+
+- **C-1** (ECDHE CKE u16 prefix) — Resolved by 0.3.0.
+- **C-2** (static-ECC SKE shape) — **Resolved (client side)** by 0.3.1.
+  Server-side static-ECC PMS decryption remains pending R-3 / 0.4.0.
+- **C-3** (server 32-byte raw ECDH) — Resolved by 0.3.0.
+- **C-4** (server-side ECC/RSA CKE) — Still blocked; R-3 / 0.4.0.
+
 ## [0.3.0] - 2026-09-08
 
 ### Changed — BREAKING (default mode flip)
@@ -189,6 +273,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accidentally pushed to a public mirror.
 
 [Unreleased]: https://github.com/GM-Engineers/gm/compare/main...HEAD
+[0.3.1]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.3.0...gm-tlcp-v0.3.1
 [0.3.0]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.2.2...gm-tlcp-v0.3.0
 [0.2.2]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.2.1...gm-tlcp-v0.2.2
 [0.2.1]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.2.0...gm-tlcp-v0.2.1

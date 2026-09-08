@@ -72,12 +72,17 @@ pub(crate) fn verify_ske_signature(
         // compatible with peers that emit DER (e.g. openHiTLS, the
         // Tongsuo built-in verifier).
         let ske = TlcpServerKeyExchange::from_body(ske_body)?;
-        let raw_sig: [u8; 64] = if ske.ecdhe_params.signature.len() == 64 {
+        let ecdhe_params = ske.as_ecdhe().ok_or_else(|| {
+            TlcpError::InvalidMessage(
+                "ECDHE verify called on non-ECDHE ServerKeyExchange body".to_string(),
+            )
+        })?;
+        let raw_sig: [u8; 64] = if ecdhe_params.signature.len() == 64 {
             let mut a = [0u8; 64];
-            a.copy_from_slice(&ske.ecdhe_params.signature);
+            a.copy_from_slice(&ecdhe_params.signature);
             a
         } else {
-            gm_crypto::sm2::sm2_signature_der_to_raw(&ske.ecdhe_params.signature).map_err(|e| {
+            gm_crypto::sm2::sm2_signature_der_to_raw(&ecdhe_params.signature).map_err(|e| {
                 TlcpError::HandshakeFailed(format!("ECDHE SKE signature DER decode: {}", e))
             })?
         };
@@ -86,16 +91,154 @@ pub(crate) fn verify_ske_signature(
         // public key). GmSSL 2026-06+ master signs the ECParameters
         // envelope, so we must reproduce those exact bytes when verifying.
         let mut msg = Vec::with_capacity(
-            32 + 32 + TLCP_ECH_PARAMS_PREFIX.len() + 1 + ske.ecdhe_params.ephemeral_public.len(),
+            32 + 32 + TLCP_ECH_PARAMS_PREFIX.len() + 1 + ecdhe_params.ephemeral_public.len(),
         );
         msg.extend_from_slice(client_random);
         msg.extend_from_slice(server_random);
         msg.extend_from_slice(&TLCP_ECH_PARAMS_PREFIX);
-        msg.push(ske.ecdhe_params.ephemeral_public.len() as u8);
-        msg.extend_from_slice(&ske.ecdhe_params.ephemeral_public);
+        msg.push(ecdhe_params.ephemeral_public.len() as u8);
+        msg.extend_from_slice(&ecdhe_params.ephemeral_public);
         verifier
             .verify(&msg, &raw_sig)
             .map_err(|e| TlcpError::HandshakeFailed(format!("ECDHE SKE signature verify: {}", e)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gm_crypto::sm2::Sm2KeyPair;
+
+    /// Build the standard signed-input byte string for the ECC SKE variant:
+    ///   `cr ∥ sr ∥ (3-byte big-endian len(enc_cert_der)) ∥ enc_cert_der`.
+    fn ecc_signed_input(cr: &[u8; 32], sr: &[u8; 32], enc_cert: &[u8]) -> Vec<u8> {
+        let mut msg = Vec::with_capacity(32 + 32 + 3 + enc_cert.len());
+        msg.extend_from_slice(cr);
+        msg.extend_from_slice(sr);
+        let cert_len = enc_cert.len() as u32;
+        msg.push((cert_len >> 16) as u8);
+        msg.push((cert_len >> 8) as u8);
+        msg.push(cert_len as u8);
+        msg.extend_from_slice(enc_cert);
+        msg
+    }
+
+    /// Build the body bytes for the ECC SKE variant:
+    ///   `uint16 sig_len ∥ sig_der`.
+    fn ecc_ske_body(sig_der: &[u8]) -> Vec<u8> {
+        let mut body = Vec::with_capacity(2 + sig_der.len());
+        body.extend_from_slice(&(sig_der.len() as u16).to_be_bytes());
+        body.extend_from_slice(sig_der);
+        body
+    }
+
+    #[test]
+    fn verify_ske_signature_ecc_path_accepts_correct_sig() {
+        // Generate a real sign keypair; sign the standard ECC SKE input.
+        let sign_kp = Sm2KeyPair::generate().expect("sm2 keypair generate");
+        let sign_signer = gm_crypto::sm2::Sm2Signer::new(&sign_kp).expect("signer");
+        let distid = sign_kp.distid();
+        let verifier = gm_crypto::sm2::Sm2Verifier::new(&sign_kp.public_key_bytes(), distid)
+            .expect("verifier");
+
+        let client_random = [0xAAu8; 32];
+        let server_random = [0xBBu8; 32];
+        // Use a fake but well-formed enc_cert (just bytes — the verifier
+        // hashes them as part of the signed input but doesn't validate the
+        // DER structure).
+        let enc_cert: Vec<u8> = (0u8..=200).collect();
+
+        let signed_input = ecc_signed_input(&client_random, &server_random, &enc_cert);
+        // Sign produces raw r||s (64 bytes). The verify_ske_signature ECC
+        // path expects DER; convert raw to DER.
+        let raw_sig = sign_signer.sign(&signed_input).expect("sign");
+        let raw_arr: [u8; 64] = raw_sig.as_slice().try_into().expect("64-byte raw sig");
+        let sig_der = gm_crypto::sm2::sm2_signature_raw_to_der(&raw_arr);
+
+        let body = ecc_ske_body(&sig_der);
+        verify_ske_signature(
+            true, /* is_ecc_mode */
+            &body,
+            &client_random,
+            &server_random,
+            &enc_cert,
+            &verifier,
+        )
+        .expect("verification should succeed for correctly-signed ECC SKE");
+    }
+
+    #[test]
+    fn verify_ske_signature_ecc_path_rejects_bad_sig() {
+        let sign_kp = Sm2KeyPair::generate().expect("sm2 keypair generate");
+        let sign_signer = gm_crypto::sm2::Sm2Signer::new(&sign_kp).expect("signer");
+        let verifier =
+            gm_crypto::sm2::Sm2Verifier::new(&sign_kp.public_key_bytes(), sign_kp.distid())
+                .expect("verifier");
+
+        let client_random = [0xAAu8; 32];
+        let server_random = [0xBBu8; 32];
+        let enc_cert: Vec<u8> = (0u8..=200).collect();
+
+        // Sign the correct input then flip 1 byte in the signature.
+        let signed_input = ecc_signed_input(&client_random, &server_random, &enc_cert);
+        let raw_sig = sign_signer.sign(&signed_input).expect("sign");
+        let raw_arr: [u8; 64] = raw_sig.as_slice().try_into().expect("64-byte raw sig");
+        let mut sig_der = gm_crypto::sm2::sm2_signature_raw_to_der(&raw_arr);
+        let last = sig_der.len() - 1;
+        sig_der[last] ^= 0xFF;
+        let body = ecc_ske_body(&sig_der);
+        assert!(
+            verify_ske_signature(
+                true,
+                &body,
+                &client_random,
+                &server_random,
+                &enc_cert,
+                &verifier
+            )
+            .is_err(),
+            "ECC SKE with tampered signature byte must be rejected"
+        );
+    }
+
+    #[test]
+    fn verify_ske_signature_ecc_path_rejects_truncated_body() {
+        let client_random = [0u8; 32];
+        let server_random = [0u8; 32];
+        let enc_cert = vec![0u8; 16];
+        // Sign a dummy verifier just so the call doesn't fail at the
+        // verifier-construction step. We test only the body-length guard.
+        let sign_kp = Sm2KeyPair::generate().expect("sm2 keypair generate");
+        let verifier =
+            gm_crypto::sm2::Sm2Verifier::new(&sign_kp.public_key_bytes(), sign_kp.distid())
+                .expect("verifier");
+
+        // body = 1 byte (less than the 2-byte sig_len prefix)
+        assert!(
+            verify_ske_signature(
+                true,
+                &[0x00],
+                &client_random,
+                &server_random,
+                &enc_cert,
+                &verifier
+            )
+            .is_err(),
+            "ECC SKE body shorter than 2 bytes must be rejected"
+        );
+        // body = uint16(10) || (no payload bytes)
+        assert!(
+            verify_ske_signature(
+                true,
+                &[0x00, 0x0A],
+                &client_random,
+                &server_random,
+                &enc_cert,
+                &verifier
+            )
+            .is_err(),
+            "ECC SKE body whose declared sig_len exceeds actual length must be rejected"
+        );
     }
 }
 

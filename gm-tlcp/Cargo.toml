@@ -1,7 +1,7 @@
 [package]
 authors = ["Eric Zhang"]
 name = "gm-tlcp"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "TLCP (Transport Layer Cryptographic Protocol, GB/T 38636-2020) core library in pure Rust with SM2/SM3/SM4 support"
@@ -99,7 +99,8 @@ tlcp-strict = []
 #     that the spec (RFC 5246 §7.4.7 / GB/T 38636-2020 §6.4.1.6)
 #     does not require.
 #   * Server emits an ECDHE-style ServerKeyExchange for static-ECC
-#     suites (E013/E053) instead of skipping SKE per RFC 5246 §7.4.3.
+#     suites (E013/E053) instead of the spec interpretation-B
+#     sig-only SKE that openHiTLS / Tongsuo 8.3.0 expect.
 #   * Server-side ECDHE PMS computes the raw 32-byte ECDH
 #     x-coordinate instead of the 48-byte SM2-KAP output.
 #   * Server does NOT send CertificateRequest / read client CV.
@@ -108,6 +109,11 @@ tlcp-strict = []
 # peer should NOT enable it. Legacy GmSSL-master deployments should
 # opt in explicitly:
 #     gm-tlcp = { version = "0.3", features = ["tlcp-gmssl-compat"] }
+#
+# Note (gm-tlcp 0.3.1, R-2): spec-B SKE is now the default for
+# static-ECC suites. `tlcp-gmssl-compat` keeps the legacy
+# ECDHE-style SKE emit on those suites for byte-for-byte interop
+# with GmSSL master (interpretation-C).
 tlcp-gmssl-compat = []
 
 # 预留 feature 开关

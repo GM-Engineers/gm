@@ -150,3 +150,6 @@ async fn gm_tlcp_kap_pms_roundtrip_with_real_keys() {
          PR-A C-3 fix is broken"
     );
 }
+// Note: the R-2 spec-B SKE roundtrip tests live as unit tests in
+// `src/tlcp/messages/ecdhe.rs::tests` and `src/tlcp/crypto/verify.rs::tests`
+// because they require crate-private access to `verify_ske_signature`.
