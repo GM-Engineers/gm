@@ -669,18 +669,24 @@ time, which is what PR3-1 documented and fixed.
 | Element | All four implementations |
 | --- | --- |
 | SKE sig (ECDHE) over | `client_random ‖ server_random ‖ server_ecdh_params` |
-| SKE sig (ECC) over | `client_random ‖ server_random ‖ enc_cert` (GmSSL — sig only; no params in body) vs. ECDHE-style (gm-tlcp default — params + sig) |
+| SKE sig (ECC) over | Three interpretations coexist in the ecosystem: (A) skip SKE entirely per RFC 5246 §7.4.3; (B) `client_random ‖ server_random ‖ enc_cert` (sig-only body — openHiTLS / Tongsuo); (C) ECDHE-style body `client_random ‖ server_random ‖ server_ecdh_params` (GmSSL master 2026-09+ and gm-tlcp default mode). gm-tlcp `tlcp-strict` mode implements (A); gm-tlcp default mode implements (C). See `AUDIT-2026-09-06-v2.md §C-2` for the full three-interpretation analysis. |
 | CKE sig | n/a |
-| SKE envelope | `ECParameters` (3 bytes: u8 curve_type + u16 named_curve) ‖ u8 pub_len ‖ pubkey ‖ u16 sig_len ‖ sig |
+| SKE envelope (ECDHE) | `ECParameters` (3 bytes: u8 curve_type + u16 named_curve) ‖ u8 pub_len ‖ pubkey ‖ u16 sig_len ‖ sig |
 
-Note on ECC SKE: GmSSL master sends body = `u16 sig_len ‖ sig`
-(no ephemeral public key), but gm-tlcp's default mode emits an
-ECDHE-style body for ECC suites (3-byte envelope + pubkey + signature).
-This is a **separate interop issue** from the CKE u16-prefix one, and
-it was not addressed by PR3-1. Practical impact: gm-tlcp ↔ GmSSL
-default-mode ECDHE interop works; gm-tlcp ↔ GmSSL default-mode ECC
-interop does NOT, because the bodies have different shapes and gm-tlcp
-does not parse a body that contains only a signature.
+Note on ECC SKE: three interpretations coexist (see §3.2 row above).
+GmSSL master actually emits ECDHE-style body for static-ECC too
+(re-checked 2026-09-07 against `Guanzhi/GmSSL` HEAD `a8f4d3b`); the
+earlier claim that GmSSL emits sig-only over `enc_cert` was wrong.
+openHiTLS / Tongsuo emit sig-only over `enc_cert`; gm-tlcp strict mode
+**skips** SKE per RFC 5246 §7.4.3; gm-tlcp default mode emits
+ECDHE-style (matches GmSSL master). The body shapes therefore disagree
+in three different ways across the four implementations. Practical
+impact: gm-tlcp ↔ GmSSL master static-ECC interop works in both
+directions (both ECDHE-style); gm-tlcp ↔ openHiTLS / Tongsuo static-ECC
+interop fails in both directions in both modes. Fixing openHiTLS /
+Tongsuo static-ECC interop requires implementing interpretation (B)
+in gm-tlcp and is deferred (couples with C-4 server-side CKE
+decryption; see `AUDIT-2026-09-06-v2.md §C-2`).
 
 ### 3.3 Crypto-algorithm deviations from spec
 
