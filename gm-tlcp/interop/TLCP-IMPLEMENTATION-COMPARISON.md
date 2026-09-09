@@ -810,37 +810,69 @@ If we rank purely on spec conformance (ignoring the interop cluster):
    [gm-tlcp-v0.2.2](https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.2.2...gm-tlcp-v0.4.0)
    for the diff that fixed both.
 
-### 3.6 Findings and (non-binding) follow-up
+10. **gm-tlcp 0.6.2** (post-R-7, 2026-09-09) — **RSA single-Cert wire format + audit-doc refresh** release. Closes the 1-cert `TlcpCertPair` open item from §3.6.2 and the doc-staleness item from §3.6.1. No new substantive defects introduced; no behavior change for existing callers unless they opt into `TlcpAcceptor::with_rsa_certs_single(...)`. PATCH bump per SemVer §4 (backwards-compatible: additive `CertMode` field + additive `TlcpCertPair::new_single(...)` + additive `TlcpAcceptor::with_rsa_certs_single(...)` + additive `TlcpConnector::with_rsa_certs_single(...)` synonym; existing call sites default to dual-cert behavior unchanged). Closes:
+    - **Item 1** — RSA single-Cert wire format per GB/T 38636-2020 §6.4.5.5. New `TlcpCertPair::new_single(cert)`, `TlcpCertPair::is_single_cert() -> bool`. Server-side emission gated on `rsa_single_cert_mode: bool` flag (set by `with_rsa_certs_single(...)`); the existing `with_rsa_certs(...)` retains dual-cert behavior for backwards compatibility. `TlcpCertPair::from_certificate_message(...)` now accepts 1 OR 2 cert entries (auto-detected). Suite-aware post-parse validation rejects single-Cert for non-RSA suites (strict mode); accepts both layouts for RSA suites (lenient mode). 2 new loopback tests `gm_tlcp_rsa_single_cert_loopback_with_real_keys_{gcm,cbc}` in `tests/gm_tlcp_loopback.rs` cover the wire path. New SKE signature-input update: server now signs over `cr || sr || len(enc_cert) || enc_cert` where `enc_cert` is the actual bytes from the emitted `cert_pair.enc_cert` (matches client-side verifier). In single-cert mode the enc_cert is empty, so the signature input is 67 bytes; in dual-cert mode it's 103 bytes for a 100-byte RSA cert.
+    - **Item 2** — COMPARISON doc refresh. §3.6 rewritten with 3 categories (Resolved historical / Open forward-looking / Excluded) replacing the stale "one substantive defect" preamble; duplicate #2 / #3 numbering bug fixed. §4 Summary rewritten to reflect the audit-clean state of gm-tlcp 0.6.1. §5 Sources adds the canonical `AUDIT-2026-09-06-v2.md` v2-rev10 reference.
 
-The analysis above identifies one substantive defect in gm-tlcp:
+    **Verification** (all 7 gates green): `cargo +stable fmt --check` clean · `cargo +stable clippy --lib --tests -- -D warnings` clean · `cargo +stable test --lib` → 125 passed (R-7 +6 new cert_pair unit tests) · `cargo +stable test --test gm_tlcp_loopback` → 13 passed (R-7 +2 new single-cert loopback tests) · `cargo +stable test --test integration_tlcp` → 32 passed (preserved) · `cargo +stable doc --no-deps` clean · `cargo +stable test --features tlcp-strict --lib` → 125 passed (no regression in strict mode). **Audit tally unchanged from v2-rev9**: 0 Critical / 0 Major / 0 Minor / 0 Doc still blocked. **gm-tlcp 0.6.2 is the new audit-clean + spec-clean baseline**.
 
-1. **Server-side algorithm fix (recommended)**: the server must call
-   `compute_tlcp_ecdhe_pms(...)` instead of
-   `kp.compute_shared_secret(...)`. Inputs needed: client's enc pub
-   (already in scope from `process_server_certs`), client's ephemeral
-   pub (from CKE), server's enc priv/pub (already in scope),
-   `z_server`/`z_client` (need to be made available at this site). The
-   argument order at the server call site must be `(z_server,
-   z_client)` to match the client; do not introduce a mixed-order
-   half-fix, since that would make the two sides derive different PMS
-   values. Cfg-gate behind `--features tlcp-strict` is a reasonable
-   way to keep default-mode behavior stable until positive GmSSL
-   interop is observed.
+### 3.6 Findings and follow-up
 
-3. **Cross-implementation interop test** (new). Add an end-to-end
-   TlcpConnector ↔ TlcpAcceptor test that runs a full handshake on a
-   `tokio::TcpStream` and asserts both reach `AppData`. This does
-   **not** require the gmssl binary and is the missing test that would
-   have caught the server-side bug earlier.
+**As of gm-tlcp 0.6.1 (R-6, 2026-09-09), this comparison is informational only — no substantive defects remain in gm-tlcp.** The canonical open-finding tally lives in [`AUDIT-2026-09-06-v2.md`](AUDIT-2026-09-06-v2.md) v2-rev10 (2026-09-09). This section groups the historical + forward-looking notes into three categories.
 
-2. **Cross-implementation interop test (recommended)**: add an end-to-end
-   TlcpConnector ↔ TlcpAcceptor test on a `tokio::TcpStream` that asserts
-   both sides reach `AppData`. This does not require the gmssl binary and
-   is the missing test that would have caught the server-side bug earlier.
+#### 3.6.1 Resolved (historical)
 
-3. **Update M2-ROOT-CAUSE-ANALYSIS.md** to remove the now-incorrect
-   client Z-order claim and the mixed-order fix proposal, and to state
-   that the substantive defect is the server algorithm.
+1. **Server-side algorithm fix (gm-tlcp 0.4.0, R-3, 2026-09-08)**: the
+   server was using raw `compute_ecdh_shared_secret(...)` (32-byte
+   x-coord) instead of `compute_tlcp_ecdhe_pms(...)` (48-byte KDF
+   output). Closed by R-3; the server now uses SM2 KAP by default
+   (`tlcp-gmssl-compat` keeps raw ECDH opt-in).
+2. **Client Z-order asymmetry in M2-ROOT-CAUSE-ANALYSIS.md (gm-tlcp
+   0.3.0, R-1, 2026-09-08)**: the early v1 analysis claimed the
+   client-side Z-order was wrong; this was a false alarm. Both
+   server and client use the spec-conformant
+   `(z_server, z_client) = (ZA, ZB)` argument order.
+3. **Static-ECC SKE body interpretation (gm-tlcp 0.3.1, R-2,
+   2026-09-08)**: spec-ambiguous between RFC 5246 §7.4.3 (no SKE
+   for static-ECC) and GB/T 38636-2020 §6.4.5.4 (sig-only SKE over
+   `cr ∥ sr ∥ enc_cert`). Resolved by emitting the sig-only body
+   (interpretation B, matches openHiTLS / Tongsuo).
+4. **Audit doc staleness in this very file (gm-tlcp 0.6.2, R-7,
+   2026-09-09)**: §3.6 / §4 still referenced the server-algorithm
+   defect as "the only confirmed defect" even though R-3 had closed
+   it 4 minor versions earlier. Refreshed by R-7.
+5. **Audit M-2 / M-3 wording fixes (gm-tlcp 0.6.1, R-6, 2026-09-09)**:
+   `src/tlcp/pms.rs` "GmSSL-specific `x̂` transform" corrected to
+   "spec-mandated `x̂` transform" per GM/T 0003.3-2012 §6.1;
+   `TlcpAcceptor::with_server_sign_distid(...)` builder added for
+   per-call signing-cert user_id override.
+
+#### 3.6.2 Open (forward-looking, non-blocking)
+
+1. **1-cert `TlcpCertPair` mode for RSA suites (gm-tlcp 0.6.2, R-7,
+   2026-09-09)**: closed by R-7; listed here only for completeness.
+   The 4 RSA suites now opt into single-Certificate emission per
+   GB/T 38636-2020 §6.4.5.5 via `TlcpAcceptor::with_rsa_certs_single`.
+2. **SHA-256 PRF for the two `_SHA256` suites (E01C/E05A)** — spec
+   is ambiguous (GB/T 38636-2020 §6.5.1 leaves the PRF choice
+   underspecified for SHA-256 suite names). gm-tlcp 0.6.2 / 0.6.1
+   / 0.6.0 continue to use SM3-PRF for all 12 suites (matches
+   GmSSL + openHiTLS convention). Follow-up is **R-8+** if a
+   strict-spec peer demand arises.
+3. **gmssl CI interop enabling** — operational change (requires
+   `gmssl` binary on the runner image). Not blocking; the existing
+   7 interop tests in `tests/gmssl_interop.rs` are `#[ignore]`-d
+   behind `gmssl_present()` and self-skip when the binary is
+   absent.
+
+#### 3.6.3 Excluded
+
+1. **SM9 IBSDH asymmetric `client_id`** — already implemented at
+   `src/tlcp/mod.rs:1601` (`with_sm9_client_exchange_key(de_a, client_id)`);
+   field `sm9_ibsdh_client_id` threaded at lines 2165 (client)
+   and 2485 (server validation). v1 uses `client_id = server_id`
+   shortcut with `.unwrap_or(server_id)` fallback; per-identity
+   deployment supported via the builder. **No further work needed.**
 
 ---
 
@@ -850,25 +882,35 @@ GmSSL master, openHiTLS, and Tongsuo are all "partial TLCP" — each
 implements a narrow subset (predominantly ECDHE+ECC × CBC+GCM, SM2-based)
 of the GB/T 38636-2020 cipher suite table; none of them implements SM9
 IBC/IBSDH at the code level, and Tongsuo is the only one that actively
-wires up the four RSA suites. All four implementations use the
-spec-conformant ECDHE KDF input order `xV ∥ yV ∥ ZA ∥ ZB` (server=A,
-client=B), and three of them encode the ECDHE CKE body as
-`03 00 29 || pub_len || pub`; GmSSL master wraps that in an extra u16
-prefix. gm-tlcp's `pms.rs` formula is spec-correct and the client call
-site already uses the spec-conformant `(z_server, z_client)` argument
-order. The only confirmed defect in gm-tlcp is that the server still
-uses raw `compute_shared_secret` (standard ECDH, 32-byte x-coord)
-instead of `compute_tlcp_ecdhe_pms` (48-byte KDF output), so the
-client and server produce different PMS values and can never agree on
-the master secret. Fixing that single call site is the only change
-required to make gm-tlcp interop with any spec-conformant peer.
+wires up the four RSA suites (though gm-tlcp now matches that coverage
+as of 0.6.0+). All four implementations use the spec-conformant ECDHE
+KDF input order `xV ∥ yV ∥ ZA ∥ ZB` (server=A, client=B), and three of
+them encode the ECDHE CKE body as `03 00 29 || pub_len || pub`; GmSSL
+master wraps that in an extra u16 prefix. gm-tlcp's `pms.rs` formula is
+spec-correct and the client call site already uses the spec-conformant
+`(z_server, z_client)` argument order. As of gm-tlcp 0.6.1 (R-6,
+2026-09-09), all 9 remaining audit findings are RESOLVED and the audit
+is clean across all severities — see
+[`AUDIT-2026-09-06-v2.md`](AUDIT-2026-09-06-v2.md) v2-rev10 for the
+canonical tally. As of gm-tlcp 0.6.2 (R-7, 2026-09-09), the 4 RSA
+suites can opt into spec-conformant single-Certificate emission per
+GB/T 38636-2020 §6.4.5.5 (matching openHiTLS / Tongsuo convention);
+the existing `with_rsa_certs(...)` is retained for backwards
+compatibility (gm-tlcp 0.6.0 / 0.6.1 callers continue to emit dual-Cert).
 
 ---
 
 ## 5. Sources
 
+- [`AUDIT-2026-09-06-v2.md`](AUDIT-2026-09-06-v2.md) — the canonical
+  open-finding tally for gm-tlcp, kept in sync with each release
+  (current: v2-rev10 / gm-tlcp 0.6.2 / 2026-09-09). All Critical /
+  Major / Minor / Doc findings are RESOLVED as of gm-tlcp 0.6.1;
+  v2-rev10 adds the R-7 single-Cert wire-format resolution.
 - `gm/gm-tlcp/src/tlcp/pms.rs` — formula audited in PR4/5
 - `gm/gm-tlcp/src/tlcp/mod.rs` — call sites audited in PR4
+- `gm/gm-tlcp/src/tlcp/messages/cert_pair.rs` — R-7 single-Cert wire
+  format + suite-aware validation
 - `gm/gm-tlcp/interop/M2-ROOT-CAUSE-ANALYSIS.md` — prior analysis; this
   document supersedes its client Z-order claim and its mixed-order fix plan
 - `gmssl-master/src/tlcp.c` and `src/sm2_exch.c`

@@ -519,3 +519,108 @@ async fn run_sm9_ibsdh_loopback(suite: [u8; 2]) {
         "client received wrong bytes -- IBSDH PMS derivation diverged"
     );
 }
+
+// ============================================================================
+// RSA single-Cert loopback regression tests (R-7, gm-tlcp 0.6.2)
+// ============================================================================
+//
+// These are the regression gate for the single-Certificate wire-format
+// for the 4 RSA suites (E019/E01C/E059/E05A). Per GB/T 38636-2020
+// §6.4.5.5, RSA suites use exactly one cert entry in the Certificate
+// handshake message (matches openHiTLS / Tongsuo convention). The
+// server-side emission is opt-in via `TlcpAcceptor::with_rsa_certs_single`
+// (gm-tlcp 0.6.0 / 0.6.1 used a dual-cert workaround for compatibility
+// with the existing serializer).
+//
+// These tests do NOT require the `gmssl` CLI. The RSA keypair is
+// generated locally via `rsa_helpers::RsaKeyPair::generate(2048)` and
+// the "RSA cert" sent in the Certificate message is a dummy 100-byte
+// DER blob (same convention as the R-5 dual-cert tests).
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gm_tlcp_rsa_single_cert_loopback_with_real_keys_gcm() {
+    run_rsa_single_cert_loopback([0xE0, 0x59]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gm_tlcp_rsa_single_cert_loopback_with_real_keys_cbc() {
+    run_rsa_single_cert_loopback([0xE0, 0x19]).await;
+}
+
+async fn run_rsa_single_cert_loopback(suite: [u8; 2]) {
+    use gm_tlcp::tlcp::*;
+
+    // 1. RSA keypair for the server. 2048-bit modulus keeps the test
+    //    snappy (~1s for keygen + a few encrypt/decrypt/sign/verify).
+    let rsa_kp = gm_tlcp::tlcp::rsa_helpers::RsaKeyPair::generate(2048).expect("rsa keypair gen");
+    let rsa_pub = rsa_kp.to_public_key().expect("rsa public key");
+
+    // 2. Configure both sides. The key difference from the R-5 dual-cert
+    //    test: the server uses `with_rsa_certs_single` (R-7), which
+    //    enables single-Certificate emission per GB/T 38636-2020 §6.4.5.5.
+    //    The connector uses `with_rsa_certs_single` (synonym for
+    //    `with_rsa_certs` — see docs in src/tlcp/mod.rs) — layout-agnostic.
+    let rsa_cert_der: Vec<u8> = (0..100u8).collect(); // dummy DER blob
+    let acceptor = TlcpAcceptor::new().with_rsa_certs_single(rsa_kp, rsa_cert_der);
+
+    let connector = TlcpConnector::new()
+        .with_cipher_suites(vec![suite])
+        .with_rsa_certs_single(rsa_pub);
+
+    // 3. tokio::io::duplex transport.
+    let (client_io, server_io) = tokio::io::duplex(16384);
+
+    // 4. Spawn server.
+    let server_handle = tokio::spawn(async move {
+        acceptor
+            .accept_with_certs(server_io)
+            .await
+            .expect("server: RSA single-cert handshake must succeed in 0.6.2+")
+    });
+
+    // 5. Spawn client.
+    let client_handle = tokio::spawn(async move {
+        connector
+            .connect_with_certs(client_io)
+            .await
+            .expect("client: RSA single-cert handshake must succeed in 0.6.2+")
+    });
+
+    // 6. Wait for handshake to complete. Same timeout as the R-5
+    //    dual-cert tests (RSA keygen + 1 encrypt is the dominant cost).
+    let mut server_stream = tokio::time::timeout(std::time::Duration::from_secs(15), server_handle)
+        .await
+        .expect("server task timed out (>15s)")
+        .expect("server task panicked");
+
+    let mut client_stream = tokio::time::timeout(std::time::Duration::from_secs(15), client_handle)
+        .await
+        .expect("client task timed out (>15s)")
+        .expect("client task panicked");
+
+    // 7. Exchange a single app-data record to prove the record layer
+    //    works post-handshake (proves master_secret derivation was
+    //    correct on both sides; the cert-layout change does not affect
+    //    master_secret derivation).
+    let msg: &[u8] = b"hello-rsa-single";
+    client_stream.write_all(msg).await.expect("client write");
+    client_stream.flush().await.expect("client flush");
+
+    let mut buf = vec![0u8; 256];
+    let n = server_stream.read(&mut buf).await.expect("server read");
+    assert_eq!(
+        &buf[..n],
+        msg,
+        "server received wrong bytes -- RSA single-cert PMS derivation diverged"
+    );
+
+    // Server -> Client round-trip.
+    server_stream.write_all(msg).await.expect("server write");
+    server_stream.flush().await.expect("server flush");
+    let n = client_stream.read(&mut buf).await.expect("client read");
+    assert_eq!(
+        &buf[..n],
+        msg,
+        "client received wrong bytes -- RSA single-cert PMS derivation diverged"
+    );
+}

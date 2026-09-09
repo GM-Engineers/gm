@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-09-09
+
+### Fixed — RSA single-Cert wire format + COMPARISON doc refresh (R-7)
+
+Two PATCH-bump items, both fully backwards-compatible (no breaking API changes; existing callers see no behavior change unless they explicitly opt in).
+
+#### Item 1: RSA single-Cert wire format (per GB/T 38636-2020 §6.4.5.5)
+
+The `Certificate` handshake message for the 4 RSA suites (`0xE019`/`0xE01C`/`0xE059`/`0xE05A`) now supports the spec-mandated **single-Cert layout** (one entry) via opt-in builder methods. Previously (gm-tlcp 0.6.0 / 0.6.1), the server emitted a dual-Cert layout with the same RSA cert in both slots as a workaround for the existing `TlcpCertPair` serializer. This was wire-format non-conformant and incompatible with strict-spec RSA peers.
+
+**New API** (all additive, no breaking changes):
+
+- `TlcpCertPair::new_single(cert: Vec<u8>) -> Self` — constructor for single-Cert layout.
+- `TlcpCertPair::is_single_cert() -> bool` — layout introspection helper.
+- `TlcpAcceptor::with_rsa_certs_single(rsa_keypair, rsa_cert_der) -> Self` — builder that opts into single-Cert emission for the 4 RSA suites. The existing `with_rsa_certs(...)` is retained for backwards compatibility (still emits dual-Cert, which gm-tlcp 0.6.0 / 0.6.1 callers rely on).
+- `TlcpConnector::with_rsa_certs_single(server_rsa_pub) -> Self` — synonym for `with_rsa_certs(...)` (the connector is layout-agnostic; the server decides the layout).
+
+**Wire-format change** (server-side, RSA suites only, opt-in):
+
+- `with_rsa_certs_single(...)`: server emits `Certificate` with **one** entry (the RSA cert in the sign position). Matches openHiTLS / Tongsuo convention.
+- `with_rsa_certs(...)` (existing, default): server emits dual-Cert (RSA cert in both slots, gm-tlcp 0.6.0 / 0.6.1 behavior, preserved for backwards compat).
+
+**Parser change** (both client and server, automatic):
+
+- `TlcpCertPair::from_certificate_message(body)` now accepts **1 or 2** cert entries (previously hard-required 2). The mode is auto-detected from the observed cert-entry count and stored in the internal `CertMode` field.
+
+**Suite-aware post-parse validation** (client side):
+
+- **Lenient mode** (RSA suites): accepts both single-Cert and dual-Cert. The existing dual-Cert workaround from 0.6.0 / 0.6.1 remains wire-compatible (no upgrade required for old → new peers).
+- **Strict mode** (non-RSA suites): rejects single-Cert with a clear error message. SM2 / SM9 suites always require dual-Cert (sign + enc).
+
+**SKE signature input update** (server side, RSA suites, dual-Cert mode):
+
+- The server now signs over `cr || sr || len(enc_cert) || enc_cert` where `enc_cert` is the actual bytes from the emitted `cert_pair.enc_cert`. In dual-Cert mode this equals the raw RSA cert (no behavior change); in single-Cert mode it is empty (matches the client's expectation). The client-side verifier was already computing this correctly via `cert_pair.enc_cert`.
+
+#### Item 2: COMPARISON doc refresh (closes the R-6 doc story)
+
+`interop/TLCP-IMPLEMENTATION-COMPARISON.md` last received substantive updates pre-0.4.0; as a result §3.6 / §4 referenced stale "findings" that have been resolved for many releases.
+
+- **§3.6 "Findings and follow-up"** rewritten: 3 categories (Resolved historical / Open forward-looking / Excluded) replace the stale "one substantive defect" preamble. Duplicate #2 / #3 numbering bug fixed.
+- **§4 "Summary in one paragraph"** rewritten: stale "the only confirmed defect" claim (server-side algorithm fix, resolved in 0.4.0) removed; current audit-clean state reflected.
+- **§5 Sources** added: `AUDIT-2026-09-06-v2.md` v2-rev9 / v2-rev10 as the canonical audit-tally reference.
+- **§3.5 best-fit ranking** added entry #10 for gm-tlcp 0.6.2 (between current #9 `gm-tlcp 0.2.0` and §3.6).
+
+### Bump rationale (PATCH, not MINOR)
+
+Per [SemVer §4](https://semver.org/spec/v2.0.0.html) a PATCH release is "backwards compatible bug fixes". Every change in 0.6.2 fits:
+
+- **Item 1**: New builder methods + new `CertMode` field + new `is_single_cert()` method. All strictly additive. The existing `with_rsa_certs(...)` retains its dual-Cert behavior. The parser becomes more lenient (accepts both layouts for RSA suites).
+- **Item 2**: Doc-only.
+
+No public type signature, wire format, or pre-existing semantics changed for callers who don't opt into the new builders. Bumping to `0.7.0` (MINOR) is reserved for genuine new functionality (SHA-256 PR F, etc.).
+
+### Verification
+
+All gates per the R-7 plan §5 pass:
+
+- `cargo +stable fmt --check` clean
+- `cargo +stable clippy --lib --tests -- -D warnings` clean
+- `cargo +stable test --lib` → 125 passed (R-7 +6 new cert_pair unit tests)
+- `cargo +stable test --test gm_tlcp_loopback` → 13 passed (R-7 +2 new single-cert loopback tests)
+- `cargo +stable test --test integration_tlcp` → 32 passed (preserved)
+- `cargo +stable doc --no-deps` clean (no rustdoc warnings)
+- `cargo +stable test --features tlcp-strict --lib` → 125 passed (no regression in strict mode)
+
+### Migration guide (0.6.1 → 0.6.2)
+
+No migration required. Existing callers using `with_rsa_certs(...)` continue to emit dual-Cert (gm-tlcp 0.6.0 / 0.6.1 behavior, fully preserved). To opt into single-Cert emission per GB/T 38636-2020 §6.4.5.5, replace `with_rsa_certs(...)` with `with_rsa_certs_single(...)` on the `TlcpAcceptor`. The connector change is a no-op synonym (`with_rsa_certs_single` on `TlcpConnector` aliases `with_rsa_certs`).
+
 ## [0.6.1] - 2026-09-09
 
 ### Fixed — Audit close-out (R-6)

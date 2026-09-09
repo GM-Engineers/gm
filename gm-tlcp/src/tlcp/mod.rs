@@ -1659,6 +1659,33 @@ impl TlcpConnector {
         self
     }
 
+    /// Single-Cert counterpart to [`TlcpConnector::with_rsa_certs`] (R-7).
+    ///
+    /// The connector is layout-agnostic — the **server** decides
+    /// whether to emit single-Cert or dual-Cert for the 4 RSA suites
+    /// (see [`TlcpAcceptor::with_rsa_certs_single`] vs
+    /// [`TlcpAcceptor::with_rsa_certs`]). The connector's job is just
+    /// to:
+    /// 1. Carry the server's RSA public key for SKE signature verify +
+    ///    step 7.5 PMS encrypt.
+    /// 2. Advertise the 4 RSA suites in the ClientHello preference list.
+    /// 3. Parse the server's `Certificate` message — accepting either
+    ///    1 cert entry (single-Cert layout) or 2 cert entries (dual-Cert
+    ///    layout), with post-parse validation that the layout matches
+    ///    the negotiated suite (see `mod.rs` ~line 1720).
+    ///
+    /// This method is therefore a synonym for `with_rsa_certs(...)`
+    /// with documentation reflecting the R-7 single-Cert acceptance
+    /// path. New deployments targeting strict-spec RSA peers should
+    /// call this method (or its synonym) AND partner with a server
+    /// that was configured via `TlcpAcceptor::with_rsa_certs_single`.
+    pub fn with_rsa_certs_single(
+        self,
+        server_rsa_pub: crate::tlcp::rsa_helpers::RsaPubKey,
+    ) -> Self {
+        self.with_rsa_certs(server_rsa_pub)
+    }
+
     pub async fn connect_with_certs<S>(&self, transport: S) -> Result<TlcpStream<S>, TlcpError>
     where
         S: AsyncRead + AsyncWrite + Unpin,
@@ -1700,8 +1727,10 @@ impl TlcpConnector {
                 cert_type
             )));
         }
-        // Parse the dual-cert (sign + enc) so we can run ECC-suite key
-        // exchange (we need the enc cert for SM2 enc). The state-machine
+        // Parse the cert list (1 entry for RSA suites per §6.4.5.5; 2 entries
+        // for SM2 / SM9 suites). R-7: `from_certificate_message` accepts
+        // either layout; the suite-aware validation below enforces which
+        // layout is permitted for the negotiated suite. The state-machine
         // `process_server_certs` call also advances the handshake so the
         // subsequent `derive_master_secret` is happy.
         let cert_pair = TlcpCertPair::from_certificate_message(&cert_body)?;
@@ -1719,6 +1748,38 @@ impl TlcpConnector {
                 server_hello.cipher_suite
             ))
         })?;
+        // R-7: suite-aware post-parse validation. GB/T 38636-2020
+        // §6.4.5.5 specifies that RSA suites use a single-Cert layout;
+        // SM2 / SM9 suites use a dual-Cert layout.
+        //
+        // Lenient mode: we ACCEPT both single-Cert and dual-Cert for
+        // RSA suites (gm-tlcp 0.6.0 / 0.6.1 used dual-Cert for RSA
+        // suites as a workaround; existing callers and tests rely on
+        // that. The new `with_rsa_certs_single` builder lets new
+        // deployments opt into the spec-conformant single-Cert
+        // layout; both layouts are accepted on the receive side).
+        //
+        // Strict mode: we REJECT single-Cert for non-RSA suites,
+        // because SM2 / SM9 suites always require dual-Cert (sign +
+        // enc) and a single-Cert from a peer is unambiguously a
+        // spec-violating or corrupted Certificate message.
+        match (cert_pair.is_single_cert(), suite.key_exchange) {
+            (false, _) => {
+                // OK: dual-Cert for any suite (existing behavior).
+            }
+            (true, crate::tlcp::cipher_suite::KeyExchangeMode::Rsa) => {
+                // OK: single-Cert for RSA suite (spec-conformant;
+                // emitted by `with_rsa_certs_single`).
+            }
+            (true, _) => {
+                return Err(TlcpError::HandshakeFailed(
+                    "non-RSA suite negotiated but server sent single-Cert \
+                     Certificate message (GB/T 38636-2020 §6.4.5.5 requires \
+                     dual-Cert for SM2 / SM9 suites)"
+                        .to_string(),
+                ));
+            }
+        }
         // R-5: RSA suites reuse the static-ECC `is_ecc_mode` path (same
         // sig-only SKE wire shape, just signed with RSA-PKCS1-v1_5
         // instead of SM2). The verifier differs (RsaVerifier vs
@@ -2792,6 +2853,18 @@ pub struct TlcpAcceptor {
     /// Used in step 8 to recover the 48-byte PMS from the client's
     /// `RSAEncryptedPreMasterSecret`.
     rsa_decryptor: Option<Arc<crate::tlcp::rsa_helpers::RsaDecryptor>>,
+    /// Emit single-Certificate layout for RSA suites (R-7).
+    ///
+    /// Per GB/T 38636-2020 §6.4.5.5, RSA suites use exactly one
+    /// certificate entry in the `Certificate` handshake message. When
+    /// this flag is `true` and the negotiated suite has
+    /// `key_exchange == KeyExchangeMode::Rsa`, the server emits a
+    /// single-Cert layout (matches openHiTLS / Tongsuo convention).
+    ///
+    /// Defaults to `false` for backwards compatibility with the
+    /// gm-tlcp 0.6.0 / 0.6.1 dual-cert-emit behavior. Set via
+    /// [`TlcpAcceptor::with_rsa_certs_single`].
+    rsa_single_cert_mode: bool,
 }
 impl Default for TlcpAcceptor {
     fn default() -> Self {
@@ -2817,6 +2890,7 @@ impl TlcpAcceptor {
             rsa_cert: None,
             rsa_signer: None,
             rsa_decryptor: None,
+            rsa_single_cert_mode: false,
         }
     }
     /// Create an acceptor with a shared session cache for resumption.
@@ -2920,6 +2994,39 @@ impl TlcpAcceptor {
         // original is zeroized on drop. If the caller wants to retain
         // a copy they should clone before passing.
         drop(rsa_keypair);
+        self
+    }
+
+    /// Single-Certificate variant of [`TlcpAcceptor::with_rsa_certs`] (R-7).
+    ///
+    /// Configures the same RSA material as `with_rsa_certs(...)` but
+    /// ALSO marks the acceptor for **single-Certificate emission** for
+    /// the 4 RSA suites (E019/E01C/E059/E05A) per
+    /// GB/T 38636-2020 §6.4.5.5.
+    ///
+    /// Wire-format difference:
+    /// - `with_rsa_certs(...)` (dual): server emits `Certificate` with
+    ///   **two** entries — the RSA cert placed in both the sign and
+    ///   enc positions. This is a workaround for the existing
+    ///   `TlcpCertPair` serializer; non-strict-spec peers may accept
+    ///   it, but it is wire-format non-conformant.
+    /// - `with_rsa_certs_single(...)` (single, this method): server
+    ///   emits `Certificate` with **one** entry (the RSA cert in the
+    ///   sign position only). This matches openHiTLS / Tongsuo
+    ///   convention and GB/T 38636-2020 §6.4.5.5 literally.
+    ///
+    /// For backwards compatibility, `with_rsa_certs(...)` retains the
+    /// dual-cert behavior. New deployments targeting strict-spec
+    /// RSA peers should use `with_rsa_certs_single(...)`.
+    pub fn with_rsa_certs_single(
+        mut self,
+        rsa_keypair: crate::tlcp::rsa_helpers::RsaKeyPair,
+        rsa_cert_der: Vec<u8>,
+    ) -> Self {
+        // Reuse `with_rsa_certs` for the signer / decryptor / cert setup,
+        // then opt into single-cert mode.
+        self = self.with_rsa_certs(rsa_keypair, rsa_cert_der);
+        self.rsa_single_cert_mode = true;
         self
     }
     /// Accept a TLCP client connection over the given transport.
@@ -3026,8 +3133,30 @@ impl TlcpAcceptor {
             .await
             .map_err(|e| TlcpError::HandshakeFailed(format!("write ServerHello: {}", e)))?;
         server_hs.transcript.extend_from_slice(&sh_bytes);
-        // Step 4: Send Certificate (dual: sign + enc)
-        let cert_pair = TlcpCertPair::new(sign_cert.clone(), enc_cert.clone());
+        // Step 4: Send Certificate (dual by default; single-Cert layout
+        // for RSA suites when rsa_single_cert_mode is enabled — R-7).
+        let cert_pair = match (self.rsa_single_cert_mode, suite.key_exchange) {
+            (true, crate::tlcp::cipher_suite::KeyExchangeMode::Rsa) => {
+                // Single-Cert layout per GB/T 38636-2020 §6.4.5.5
+                // (matches openHiTLS / Tongsuo).
+                TlcpCertPair::new_single(sign_cert.clone())
+            }
+            _ => {
+                // Dual-Cert layout (existing behavior). Used for all
+                // non-RSA suites; for RSA suites when
+                // `with_rsa_certs` (not `with_rsa_certs_single`) was
+                // called.
+                TlcpCertPair::new(sign_cert.clone(), enc_cert.clone())
+            }
+        };
+        // R-7: capture the actual enc_cert bytes from the emitted
+        // cert_pair (NOT the raw `enc_cert` local variable). In
+        // single-cert mode, `cert_pair.enc_cert` is empty; in
+        // dual-cert mode, it equals the raw cert. The SKE signature
+        // input must match what the client will see in
+        // `cert_pair.enc_cert`, so we thread this through to
+        // `generate_rsa` below.
+        let ske_input_enc_cert = cert_pair.enc_cert.clone();
         let cert_msg = cert_pair.to_certificate_message();
         write_handshake_record(&mut io, &cert_msg)
             .await
@@ -3237,16 +3366,18 @@ impl TlcpAcceptor {
                             .to_string(),
                     )
                 })?;
-                let rsa_cert_der = self.rsa_cert.as_ref().ok_or_else(|| {
-                    TlcpError::HandshakeFailed(
-                        "RSA suite negotiated but rsa_cert is missing (with_rsa_certs bug?)"
-                            .to_string(),
-                    )
-                })?;
+                // R-7: thread the actual enc_cert bytes from the emitted cert_pair
+                // (NOT the raw `enc_cert` local variable). In dual-cert
+                // mode the enc_cert equals the raw cert (100 bytes); in
+                // single-cert mode the enc_cert is empty (0 bytes). The
+                // signature input is `cr || sr || len(enc_cert) ||
+                // enc_cert`, and the client verifies the same way over
+                // `cert_pair.enc_cert`. Using `self.rsa_cert` directly
+                // would cause an SKE-verify mismatch in single-cert mode.
                 let ske = TlcpServerKeyExchange::generate_rsa(
                     &client_random,
                     &server_random,
-                    rsa_cert_der,
+                    &ske_input_enc_cert,
                     rsa_signer,
                 )?;
                 let ske_bytes = ske.to_bytes();
