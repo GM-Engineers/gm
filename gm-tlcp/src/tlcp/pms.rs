@@ -6,16 +6,22 @@
 //! * `sm2_compute_z` — compute the SM2 Z value per GB/T 32918.1-2016 §6.1
 //!   (used to verify the ServerKeyExchange SM2 signature and to feed
 //!   the ECDHE PMS KDF).
-//! * `scalar_from_x_hat` — apply the GmSSL-specific 128-bit x̂
+//! * `scalar_from_x_hat` — apply the spec-mandated 128-bit x̂
 //!   transform `2^127 + (x mod 2^127)` to an ECDH shared point's
-//!   x-coordinate. Without this, our PMS diverges from GmSSL's.
+//!   x-coordinate per GM/T 0003.3-2012 §6.1 B3..B7 (and equivalent
+//!   GB/T 32918.3-2016 §6.4). All four TLCP implementations we
+//!   audit against (GmSSL master, openHiTLS, Tongsuo 8.3.0, gm-tlcp)
+//!   use this transform — it is part of the SM2 KAP specification, not
+//!   a GmSSL-specific interop quirk. Without this, our PMS diverges
+//!   from every spec-conformant peer.
 //! * `compute_tlcp_ecdhe_pms` — compute the TLCP Pre-Master Secret
 //!   via the GB/T 32918.3-2016 §6.4.2 key agreement.
 //!
 //! These functions were previously in `gm_crypto::sm2_kex` but were
-//! only ever used by `gm-tlcp`. They are TLCP-specific (the GmSSL
-//! `x̂` transform is a non-standard interop quirk, and `Z` is only
-//! computed for the TLCP SKE signature verification path).
+//! only ever used by `gm-tlcp`. They are TLCP-specific: `Z` is only
+//! computed for the TLCP SKE signature verification path, and the
+//! SM2 KAP `x̂` transform (GM/T 0003.3-2012 §6.1) is required by every
+//! spec-conformant TLCP peer — not a GmSSL interop quirk.
 
 use crate::error::TlcpError;
 use elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};

@@ -2753,6 +2753,11 @@ pub struct TlcpAcceptor {
     /// encryption certificate during ECDHE PMS derivation
     /// (GB/T 32918.1-2016 §6.1).
     server_enc_distid: Option<String>,
+    /// SM2 user_id used by the server's **signing** key (for SKE /
+    /// CertificateVerify signatures). Defaults to
+    /// `"1234567812345678"`. Override this if the sign cert was
+    /// generated with a different user_id (audit M-3, R-6).
+    server_sign_distid: Option<String>,
     /// SM2 user_id used to derive `Z_client` from the client's
     /// encryption certificate during ECDHE PMS derivation
     /// (GB/T 32918.1-2016 §6.1).
@@ -2803,6 +2808,7 @@ impl TlcpAcceptor {
             sign_key: None,
             enc_key: None,
             server_enc_distid: None,
+            server_sign_distid: None,
             client_enc_distid: None,
             client_sign_distid: None,
             sm9_sign_master: None,
@@ -2836,6 +2842,18 @@ impl TlcpAcceptor {
         self.enc_cert = Some(enc_cert);
         self.sign_key = Some(Arc::new(sign_key));
         self.enc_key = Some(Arc::new(enc_key));
+        self
+    }
+    /// Configure the SM2 distid for the server's **signing** key
+    /// (used in SKE + CertificateVerify signatures, GB/T 32918.1-2016 §6.1).
+    ///
+    /// Defaults to `"1234567812345678"` for cross-implementation interop
+    /// (all four reference implementations use this convention).
+    /// Override this if the server's sign cert was generated with a
+    /// different user_id; otherwise the SKE signature will not verify
+    /// on the peer. Audit M-3 (R-6).
+    pub fn with_server_sign_distid(mut self, distid: String) -> Self {
+        self.server_sign_distid = Some(distid);
         self
     }
 
@@ -3045,8 +3063,17 @@ impl TlcpAcceptor {
                         "SM2 sign key not configured (needed for Ecdhe/Ecc suites)".to_string(),
                     )
                 })?;
-                let sign_signer = gm_crypto::sm2::Sm2Signer::new(sign_kp_ref)
-                    .map_err(|e| TlcpError::HandshakeFailed(format!("sign signer: {}", e)))?;
+                // Resolve the SM2 user_id for SKE signing (defaults match
+                // GmSSL/Tongsuo/openHiTLS convention). Audit M-3 (R-6):
+                // override via `with_server_sign_distid(_)` if the sign
+                // cert was generated with a non-default user_id.
+                let sign_distid: &str = self
+                    .server_sign_distid
+                    .as_deref()
+                    .unwrap_or(gm_crypto::sm2::GM_TLS_DEFAULT_ID);
+                let sign_signer =
+                    gm_crypto::sm2::Sm2Signer::new_with_distid(sign_kp_ref, sign_distid)
+                        .map_err(|e| TlcpError::HandshakeFailed(format!("sign signer: {}", e)))?;
                 let (ske, kp) =
                     TlcpServerKeyExchange::generate(&client_random, &server_random, &sign_signer)?;
                 let ske_bytes = ske.to_bytes();
@@ -3069,8 +3096,16 @@ impl TlcpAcceptor {
                             "SM2 sign key not configured (needed for gmssl-compat Ecc)".to_string(),
                         )
                     })?;
-                    let sign_signer = gm_crypto::sm2::Sm2Signer::new(sign_kp_ref)
-                        .map_err(|e| TlcpError::HandshakeFailed(format!("sign signer: {}", e)))?;
+                    // Audit M-3 (R-6): honor `with_server_sign_distid`.
+                    let sign_distid: &str = self
+                        .server_sign_distid
+                        .as_deref()
+                        .unwrap_or(gm_crypto::sm2::GM_TLS_DEFAULT_ID);
+                    let sign_signer =
+                        gm_crypto::sm2::Sm2Signer::new_with_distid(sign_kp_ref, sign_distid)
+                            .map_err(|e| {
+                                TlcpError::HandshakeFailed(format!("sign signer: {}", e))
+                            })?;
                     let (ske, kp) = TlcpServerKeyExchange::generate(
                         &client_random,
                         &server_random,
@@ -3098,8 +3133,16 @@ impl TlcpAcceptor {
                                 .to_string(),
                         )
                     })?;
-                    let sign_signer = gm_crypto::sm2::Sm2Signer::new(sign_kp_ref)
-                        .map_err(|e| TlcpError::HandshakeFailed(format!("sign signer: {}", e)))?;
+                    // Audit M-3 (R-6): honor `with_server_sign_distid`.
+                    let sign_distid: &str = self
+                        .server_sign_distid
+                        .as_deref()
+                        .unwrap_or(gm_crypto::sm2::GM_TLS_DEFAULT_ID);
+                    let sign_signer =
+                        gm_crypto::sm2::Sm2Signer::new_with_distid(sign_kp_ref, sign_distid)
+                            .map_err(|e| {
+                                TlcpError::HandshakeFailed(format!("sign signer: {}", e))
+                            })?;
                     let ske = TlcpServerKeyExchange::generate_ecc(
                         &client_random,
                         &server_random,

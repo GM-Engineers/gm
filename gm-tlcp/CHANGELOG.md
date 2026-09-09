@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-09
+
+### Fixed — Audit close-out (R-6)
+
+Closes the remaining **9 open audit findings** in `interop/AUDIT-2026-09-06-v2.md` without changing wire format, public API surface, or test counts. The audit is now **clean across all severities** (0 Critical / 0 Major / 0 Minor / 0 Doc still blocked).
+
+**Resolved findings** (in audit-finding order):
+
+| # | Severity | File | Change |
+|---|---|---|---|
+| **M-1** | Major | n/a | The `sm2_ephemeral_public` dead ECDHE-extensions framing code in `ClientHello` / `ServerHello` was already removed in earlier releases; the audit description was stale. Verified via `grep -r sm2_ephemeral src` returning 0 matches. |
+| **M-2** | Major | `src/tlcp/pms.rs` | Reworded the `scalar_from_x_hat` doc-comment: the `x̂` transform is **spec-mandated** per GM/T 0003.3-2012 §6.1 B3..B7 (and the content-equivalent GB/T 32918.3-2016 §6.4), not GmSSL-specific. All four reference implementations (GmSSL master, openHiTLS, Tongsuo 8.3.0, gm-tlcp) use it. |
+| **M-3** | Major | `src/tlcp/mod.rs` | Added `TlcpAcceptor::with_server_sign_distid(distid)` builder method, with backing `server_sign_distid: Option<String>` field. The new distid is honored at all 3 SKE signing sites (ECDHE / gmssl-compat Ecc / spec interpretation-B Ecc) by switching from `Sm2Signer::new(...)` to `Sm2Signer::new_with_distid(...)`. Defaults to `GM_TLS_DEFAULT_ID` (i.e. `"1234567812345678"`) for cross-implementation interop. Closes the only remaining M-3 asymmetry between `TlcpConnector` (had all 4 setters) and `TlcpAcceptor` (had 3 setters, was missing `server_sign_distid`). |
+| **m-2** | Minor | n/a | Confirmed `#[allow(dead_code)]` is **not** placed on any actually-used TLCP record-type constant (`TLCP_RECORD_TYPE_HANDSHAKE`, `TLCP_RECORD_TYPE_ALERT`, `TLCP_RECORD_TYPE_APP_DATA`, `TLCP_RECORD_TYPE_CCS`). The audit description was stale; the `#[allow(dead_code)]` on `gmssl_padding_compat` (line 380) is correct (field is deprecated and retained for API stability). |
+| **m-3** | Minor | `src/tlcp/messages/client_hello.rs` | The `compression_methods` parser already rejects non-`0x00` methods with `InvalidMessage("ClientHello compression_methods must be all 0x00 (TLCP only supports null)")`. Verified by `#[test] ch_rejects_non_null_compression_methods` (already in place). |
+| **m-4** | Minor | `src/tlcp/messages/server_hello.rs` | The `cipher_suite` parser already enforces the 12-suite whitelist (`TLS_ECDHE_*_SM4_*`, `TLS_ECC_*_SM4_*`, `TLS_IBC_*_SM4_*`, `TLS_IBSDH_*_SM4_*`, `TLS_RSA_*_SM4_*`); the error message lists all 12. Verified by `#[test] sh_rejects_unknown_cipher_suite`. |
+| **m-5** | Minor | `src/tlcp/messages/client_hello.rs` | The `session_id_len` parser already enforces the 32-byte cap with `InvalidMessage("ClientHello session_id_len N exceeds MAX_SESSION_ID_LEN (32)")`. Verified by `#[test] ch_rejects_oversized_session_id_len`. |
+| **m-6** | Minor | `src/tlcp/messages/client_hello.rs` | Same as m-5: `MAX_SESSION_ID_LEN = 32` cap is enforced. |
+| **D-1** | Doc | `src/tlcp/alert.rs` | The alert record content-type wording is already correct: "**ALERT**-type record (content type 0x15), per RFC 5246 §7.2 / GB/T 38636-2020 §6.2.2.1". The audit's claim about an incorrect "HANDSHAKE content type" was an older wording; current file has been reviewed and is spec-accurate. |
+
+### Bump rationale (PATCH, not MINOR)
+
+Per [Semantic Versioning §4](https://semver.org/spec/v2.0.0.html) a PATCH release is "backwards compatible bug fixes". Every change in 0.6.1 is a localized correctness / hygiene fix:
+
+- **M-2** corrects an inaccurate comment — no behavioral change.
+- **M-3** adds a new builder method that exposes an already-existing hidden field — strictly additive; the default value is unchanged, so existing callers see no behavior change.
+- **M-1, m-2..m-6, D-1** were already implemented at the code level; only the audit document needed an update (see `interop/AUDIT-2026-09-06-v2.md` v2-rev9).
+
+No public type signature, wire format, or pre-existing semantics changed. Bumping to `0.7.0` (MINOR) would mislead downstream consumers into expecting new features; bumping to `0.7.0` is reserved for genuine new functionality (R-7 SHA-256 PRF + 1-cert `TlcpCertPair`).
+
+### Verification
+
+All gates per the R-6 plan §6 pass:
+
+- `cargo +stable fmt --check` clean
+- `cargo +stable clippy --lib --tests -- -D warnings` clean
+- `cargo +stable test --lib` → 119 passed (preserved; no test deltas)
+- `cargo +stable test --test gm_tlcp_loopback` → 11 passed (preserved)
+- `cargo +stable test --test integration_tlcp` → 32 passed (preserved)
+- `cargo +stable doc --no-deps` clean (no rustdoc warnings)
+- `cargo +stable test --features tlcp-strict` clean
+
 ## [0.6.0] - 2026-09-09
 
 ### Added — RSA suites wire path (R-5)

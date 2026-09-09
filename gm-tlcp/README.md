@@ -42,7 +42,8 @@ TLCP（Transport Layer Cryptographic Protocol，传输层密码协议）是 GB/T
 - ✅ SM4-GCM 和 SM4-CBC + HMAC-SM3 record-layer 加密
 - ✅ Session resumption via session IDs (`TlcpSessionCache`)
 - ✅ Alert 协议（`TlcpAlert` / `TlcpAlertDescription`）
-- ✅ 全部 4 个密码套件
+- ✅ 全部 12 个密码套件（4 SM2 + 4 SM9 + 4 RSA）
+- ✅ **审计全清**（R-6 / gm-tlcp 0.6.1）：`interop/AUDIT-2026-09-06-v2.md` v2-rev9：0 Critical / 0 Major / 0 Minor / 0 Doc still blocked。9 项历史遗留 (M-1/M-2/M-3 + m-2..m-6 + D-1) 全部 RESOLVED。
 - ✅ 119 lib tests (R-5 +6：rsa_helpers 单元测试) + 11 loopback tests（R-5 +2：2 个 `gm_tlcp_rsa_loopback_with_real_keys_{gcm,cbc}`） + 32 integration tests (`tests/integration_tlcp.rs`) + 4 default gmssl interop tests (7 more `#[ignore]`d, run with `--ignored` when `gmssl` is on `PATH`)
 - ✅ GmSSL 3.3.0-dev (`master`) handshake + APP_DATA byte-for-byte 互操作验证（需 `tlcp-gmssl-compat`）
 - ✅ openHiTLS `s_server -tlcp` 互操作验证：ECDHE（默认模式）+ static-ECC SKE + static-ECC PMS decrypt（默认模式，server 侧 R-3 已实现）
@@ -51,7 +52,8 @@ TLCP（Transport Layer Cryptographic Protocol，传输层密码协议）是 GB/T
 - ⚠️ R-4.1 (0.5.1)发布 版本: SM9 IBC wire path 实际上坏（server 早返 + ServerHello parse 白名单漏 IBC + server 对 IBC 发 CR）—— 请跳过 0.5.1 使用 0.5.2。ECDHE/ECC 路径不受影响。
 - ✅ R-4.2 / gm-tlcp 0.5.3: SM9 IBSDH ephemeral 套件 (E055/E015) — 2 轮 initiator/responder 握手。2 个 loopback 回归门禁新增（`gm_tlcp_sm9_ibsdh_loopback_with_real_keys_{gcm,cbc}`）。C-5 IBSDH half 已 RESOLVED。Known limitation: v1 使用 `client_id = server_id` 简捷做法（同身份部署）；后续 PR 可扩展 `with_sm9_certs_client_id(...)` 支持非对称身份。
 - ✅ R-5 / gm-tlcp 0.6.0: RSA 套件 (E019/E01C/E059/E05A) — RustCrypto `rsa = 0.9` 直集成（RSA 不属于国密，故不放在 gm-crypto）。`TlcpAcceptor::with_rsa_certs(rsa_keypair, rsa_cert_der)` + `TlcpConnector::with_rsa_certs(server_rsa_pub)` 为新增构造器。2 个 loopback 回归门禁新增（`gm_tlcp_rsa_loopback_with_real_keys_{gcm,cbc}`）。C-5 RSA half 已 RESOLVED；C-5 整体在 0.6.0 完整 RESOLVED（4 SM2 + 4 SM9 + 4 RSA = 全部 12 套）。
-- ⚠️ R-5 已知限制：(a) 两个 `_SHA256` 套件 (E01C/E05A) 的 PRF 仍走 SM3（spec 模糊，与 GmSSL + openHiTLS 一致）；(b) `TlcpCertPair` 仍发双证书 layout（把同一 RSA cert 在 sign + enc 两个 slot 都填一遍），openHiTLS / Tongsuo 的单证书 layout 互操作需要后续 PR 扩展 `TlcpCertPair` 支持 1-cert mode。
+- ⚠️ R-5 已知限制：(a) 两个 `_SHA256` 套件 (E01C/E05A) 的 PRF 仍走 SM3（spec  模糊，与 GmSSL + openHiTLS 一致）；(b) `TlcpCertPair` 仍发双证书 layout（把同一 RSA cert 在 sign + enc 两个 slot 都填一遍），openHiTLS / Tongsuo 的单证书 layout 互操作需要后续 PR 扩展 `TlcpCertPair` 支持 1-cert mode。
+- ✅ R-6 / gm-tlcp 0.6.1: 审计 close-out（无 wire / API 变动）。新加 `TlcpAcceptor::with_server_sign_distid(distid)` 与 connector 侧 4 个 `with_*_distid` 对齐；`pms.rs` 顶注的 “GmSSL-specific `x̂` transform” 表述改为 GM/T 0003.3-2012 §6.1；其余 m-2..m-6 + D-1 状态由 `git grep` / `cargo +stable test --lib` 现网走话验证。详细见 `CHANGELOG.md [0.6.1]` + `interop/AUDIT-2026-09-06-v2.md` v2-rev9。
 - ❌ Tongsuo 8.3.0 round-trip — Tongsuo-side NTLS state-machine 拒绝 `0x0101`， 调查见 `interop/tongsuo/upstream/`
 
 ## 特性开关 (Feature flags)
