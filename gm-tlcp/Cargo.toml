@@ -1,7 +1,7 @@
 [package]
 authors = ["Eric Zhang"]
 name = "gm-tlcp"
-version = "0.6.2"
+version = "0.6.3"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "TLCP (Transport Layer Cryptographic Protocol, GB/T 38636-2020) core library in pure Rust with SM2/SM3/SM4 support"

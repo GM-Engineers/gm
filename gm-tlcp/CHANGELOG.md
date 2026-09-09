@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-09-09
+
+### Documented — GmSSL cross-impl interop verification (R-8)
+
+Per AUDIT v2 §3.4 caveat ("CI green is structurally uninformative about TLCP interop"), the 7 `#[ignore]`-d `gmssl_interop.rs` tests have been structurally unverified since the audit started. R-8 closes this gap:
+
+#### R-8 findings
+
+- **F1 (env)**: Homebrew `gmssl` 3.1.1 (the only `gmssl` binary on most macOS dev machines) **lacks TLCP CLI support** — `tlcp_server -help` shows no `-verbose` / `-cipher_suite` flags; tests that assume those flags error out immediately. Fix path: build `gmssl-master` from source (~2 min via `cmake + make`).
+- **F2 (confirmed C-1)**: gm-tlcp **default mode** CKE (spec-conformant ECParameters envelope `03 00 29 || 41 || pub`, no u16 prefix) is **incompatible** with `gmssl-master` CKE parser. gmssl master rejects with `alert(50: decode_error)` at the ClientKeyExchange step. Confirms audit C-1's "GmSSL prefix is opt-in via `tlcp-gmssl-compat`" status.
+- **F3 (positive evidence — first cross-impl interop)**: With `--features tlcp-gmssl-compat`, gm-tlcp ↔ gmssl master **HANDSHAKE COMPLETES SUCCESSFULLY** end-to-end for `TLS_ECDHE_SM4_GCM_SM3` (E051): full 9-message exchange (ClientHello → ServerHello → Certificate → SKE → SHD → Certificate → CKE → CertVerify → CCS → Finished → CCS → Finished) succeeds, gmssl's transcript hash matches, both sides arrive at the post-handshake data state. This is the **first positive cross-impl interop evidence** for gm-tlcp since the audit started. Closes the §3.4 "structurally uninformative" caveat with concrete handshake evidence.
+- **F4 (NEW Critical finding, filed)**: After the successful handshake, the subsequent application-data exchange (`write_application_data` + `read_application_data`) hangs indefinitely. gmssl server spins at 95% CPU in `do_send_select -> tls_send` retry loop. The hang is in the **post-handshake record-layer framing** — likely a GCM nonce / AAD / record-payload-length encoding mismatch that prevents the encrypted application-data records from being parsed on the receive end. Scope: R-9 investigation.
+
+#### Code changes
+
+None. R-8 is documentation-only — the audit-doc is updated to reflect the new findings, but no code is changed. The 7 `#[ignore]`-d interop tests remain `#[ignore]` (they require a built `gmssl-master` binary on `PATH`); once F4 is fixed in R-9 and the data exchange works, the `#[ignore]` attributes can be removed (a follow-up decision).
+
+#### Migration guide
+
+No migration required. `gm-tlcp 0.6.3` is identical to `gm-tlcp 0.6.2` at the code level; only the audit doc + CHANGELOG + README + COMPARISON are updated.
+
+#### F4 follow-up (R-9 scope)
+
+Per R-8 plan §3.2 and AUDIT v2-rev11, F4 is the next Critical audit finding. R-9 will investigate the post-handshake record-layer framing mismatch between gm-tlcp and gmssl-master. Candidates:
+
+1. **GCM nonce layout** — gm-tlcp might derive the 12-byte nonce as `salt(4) || implicit-IV(8)` per RFC 5288, while gmssl might use a different layout. Per RFC 5288 §3: "The 64-bit salt is derived from the client_write_IV / server_write_IV; the 12-byte nonce is salt XOR explicit_nonce(8)". gm-tlcp's `record_layer.rs` would need to be checked.
+2. **AAD construction** — per RFC 5246 §6.2.3.3, AAD = `seq_num(8) || type(1) || version(2) || length(2)`. If gm-tlcp uses length differently (e.g., plaintext length vs ciphertext length), gmssl would reject the GCM tag.
+3. **CBC padding** — TLS 1.2 / TLCP uses PKCS#7-style padding with a MAC. If gm-tlcp's MAC-then-encrypt ordering is reversed, gmssl would reject the record.
+
+R-9 will narrow down which (1 / 2 / 3) is responsible and fix it.
+
 ## [0.6.2] - 2026-09-09
 
 ### Fixed — RSA single-Cert wire format + COMPARISON doc refresh (R-7)
