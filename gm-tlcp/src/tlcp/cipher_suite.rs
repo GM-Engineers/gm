@@ -12,8 +12,8 @@
 //! | `0xE057` | `IBC_SM4_GCM_SM3`     | IBC (static)     | SM4-GCM-128      |
 //! | `0xE017` | `IBC_SM4_CBC_SM3`     | IBC (static)     | SM4-CBC + HMAC   |
 //!
-//! (SM9 IBSDH dynamic suites E055/E015 pending R-4.1 / gm-tlcp 0.5.1;
-//! RSA suites E019 / E01C / E059 / E05A pending R-5 / gm-tlcp 0.6.0.)
+//! SM9 IBSDH dynamic suites E055/E015 (added in gm-tlcp 0.5.3, R-4.2).
+//! RSA suites E019 / E01C / E059 / E05A pending R-5 / gm-tlcp 0.6.0.
 //!
 //! This module is data-only; the cipher-suite selection / negotiation
 //! lives in the handshake state machine.
@@ -25,7 +25,7 @@
 
 use super::constants::{
     TLS_ECC_SM4_CBC_SM3, TLS_ECC_SM4_GCM_SM3, TLS_ECDHE_SM4_CBC_SM3, TLS_ECDHE_SM4_GCM_SM3,
-    TLS_IBC_SM4_CBC_SM3, TLS_IBC_SM4_GCM_SM3,
+    TLS_IBC_SM4_CBC_SM3, TLS_IBC_SM4_GCM_SM3, TLS_IBSDH_SM4_CBC_SM3, TLS_IBSDH_SM4_GCM_SM3,
 };
 
 /// TLCP key-exchange algorithm (`KeyExchangeAlgorithm` per
@@ -136,6 +136,24 @@ impl TlcpCipherSuite {
         ecdhe: false,
     };
 
+    /// SM9 IBSDH + SM4-GCM + SM3 (dynamic key, R-4.2)
+    pub const IBSDH_SM4_GCM_SM3: Self = Self {
+        id: TLS_IBSDH_SM4_GCM_SM3,
+        name: "IBSDH_SM4_GCM_SM3",
+        key_exchange: KeyExchangeMode::Ibsdh,
+        gcm: true,
+        ecdhe: false,
+    };
+
+    /// SM9 IBSDH + SM4-CBC + SM3 (dynamic key, R-4.2)
+    pub const IBSDH_SM4_CBC_SM3: Self = Self {
+        id: TLS_IBSDH_SM4_CBC_SM3,
+        name: "IBSDH_SM4_CBC_SM3",
+        key_exchange: KeyExchangeMode::Ibsdh,
+        gcm: false,
+        ecdhe: false,
+    };
+
     /// True iff the suite uses a static (non-ephemeral) key
     /// agreement. Useful for distinguishing the SKE / CKE
     /// branches in the handshake state machine.
@@ -150,7 +168,10 @@ impl TlcpCipherSuite {
     /// Lets the handshake state machine quickly route to the
     /// gm-sm9-rs code paths.
     pub fn is_sm9(&self) -> bool {
-        matches!(self.key_exchange, KeyExchangeMode::Ibc)
+        matches!(
+            self.key_exchange,
+            KeyExchangeMode::Ibc | KeyExchangeMode::Ibsdh
+        )
     }
 
     /// Look up cipher suite by ID
@@ -162,6 +183,8 @@ impl TlcpCipherSuite {
             TLS_ECC_SM4_CBC_SM3 => Some(Self::ECC_SM4_CBC_SM3),
             TLS_IBC_SM4_GCM_SM3 => Some(Self::IBC_SM4_GCM_SM3),
             TLS_IBC_SM4_CBC_SM3 => Some(Self::IBC_SM4_CBC_SM3),
+            TLS_IBSDH_SM4_GCM_SM3 => Some(Self::IBSDH_SM4_GCM_SM3),
+            TLS_IBSDH_SM4_CBC_SM3 => Some(Self::IBSDH_SM4_CBC_SM3),
             _ => None,
         }
     }
@@ -175,6 +198,8 @@ impl TlcpCipherSuite {
             Self::ECC_SM4_CBC_SM3,
             Self::IBC_SM4_GCM_SM3,
             Self::IBC_SM4_CBC_SM3,
+            Self::IBSDH_SM4_GCM_SM3,
+            Self::IBSDH_SM4_CBC_SM3,
         ]
     }
 }
@@ -200,10 +225,32 @@ mod tests {
     }
 
     #[test]
-    fn from_id_resolves_all_six_suites() {
+    fn sm9_ibsdh_suites_have_correct_key_exchange_mode() {
+        // R-4.2: SM9 IBSDH suites are dynamic (ephemeral R_A / R_B)
+        // and use SM9 — so `is_sm9()` returns true, `is_static()`
+        // returns false.
+        assert_eq!(
+            TlcpCipherSuite::IBSDH_SM4_GCM_SM3.key_exchange,
+            KeyExchangeMode::Ibsdh
+        );
+        assert_eq!(
+            TlcpCipherSuite::IBSDH_SM4_CBC_SM3.key_exchange,
+            KeyExchangeMode::Ibsdh
+        );
+        assert!(TlcpCipherSuite::IBSDH_SM4_GCM_SM3.is_sm9());
+        assert!(TlcpCipherSuite::IBSDH_SM4_CBC_SM3.is_sm9());
+        assert!(!TlcpCipherSuite::IBSDH_SM4_GCM_SM3.is_static());
+        assert!(!TlcpCipherSuite::IBSDH_SM4_CBC_SM3.is_static());
+        assert_eq!(TlcpCipherSuite::IBSDH_SM4_GCM_SM3.id, [0xE0, 0x55]);
+        assert_eq!(TlcpCipherSuite::IBSDH_SM4_CBC_SM3.id, [0xE0, 0x15]);
+    }
+
+    #[test]
+    fn from_id_resolves_all_eight_suites() {
         let all = TlcpCipherSuite::all();
         // 4 SM2-based (ECDHE/ECC × GCM/CBC) + 2 SM9-IBC (GCM/CBC)
-        assert_eq!(all.len(), 6);
+        // + 2 SM9-IBSDH (GCM/CBC, R-4.2) = 8 total.
+        assert_eq!(all.len(), 8);
         for suite in all {
             assert_eq!(
                 TlcpCipherSuite::from_id(suite.id),

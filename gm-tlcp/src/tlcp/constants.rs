@@ -84,6 +84,21 @@ pub const TLS_IBC_SM4_GCM_SM3: [u8; 2] = [0xE0, 0x57];
 /// [`TLS_IBC_SM4_GCM_SM3`] but with the CBC record layer.
 pub const TLS_IBC_SM4_CBC_SM3: [u8; 2] = [0xE0, 0x17];
 
+/// TLCP cipher suite: SM9 IBSDH + SM4-GCM + SM3 (dynamic key)
+///
+/// GB/T 38636-2020 §6.4.5.2.1 表 2: code point `0xE055`.
+/// Added in gm-tlcp 0.5.3 (R-4.2); uses SM9 identity-based
+/// 2-round key exchange (initiator → responder → finish) per
+/// GM/T 0044.3-2016 §7.2 with server-side key confirmation S_B.
+pub const TLS_IBSDH_SM4_GCM_SM3: [u8; 2] = [0xE0, 0x55];
+
+/// TLCP cipher suite: SM9 IBSDH + SM4-CBC + SM3 (dynamic key)
+///
+/// GB/T 38636-2020 §6.4.5.2.1 表 2: code point `0xE015`.
+/// Added in gm-tlcp 0.5.3 (R-4.2); same protocol as
+/// [`TLS_IBSDH_SM4_GCM_SM3`] but with the CBC record layer.
+pub const TLS_IBSDH_SM4_CBC_SM3: [u8; 2] = [0xE0, 0x15];
+
 /// Maximum TLCP record size
 pub const MAX_TLCP_RECORD_SIZE: usize = 16 * 1024;
 

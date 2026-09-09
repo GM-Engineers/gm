@@ -40,6 +40,19 @@ pub struct TlcpServerHandshake {
     pub resumed_session: Option<TlcpResumedSession>,
     /// Session cache for looking up and storing sessions
     pub session_cache: Option<TlcpSessionCache>,
+    /// **R-4.2**: deferred-SKE-emit state for SM9 IBSDH suites
+    /// (`E015` / `E055`). The server needs the client's R_A (from
+    /// `ClientKeyExchange`) before it can compute `R_B + S_B + SK_B`,
+    /// so SKE emission is delayed to after step 7.5 reads CKE.
+    /// `pending_ibsdh_ske = true` is set in step 5; the deferred
+    /// emit handler clears it after writing the SKE record.
+    #[cfg_attr(feature = "tlcp-gmssl-compat", allow(dead_code))]
+    pub pending_ibsdh_ske: bool,
+    /// **R-4.2**: stash of the SM9 IBSDH pre-master secret computed
+    /// by `responder_process` during the deferred SKE emit.
+    /// `pre_master_secret` is set from this in step 8.
+    #[cfg_attr(feature = "tlcp-gmssl-compat", allow(dead_code))]
+    pub sk_b: Option<Vec<u8>>,
 }
 
 impl TlcpServerHandshake {
@@ -64,6 +77,8 @@ impl TlcpServerHandshake {
             is_resumed: false,
             resumed_session: None,
             session_cache: None,
+            pending_ibsdh_ske: false,
+            sk_b: None,
         })
     }
 
@@ -91,6 +106,8 @@ impl TlcpServerHandshake {
             is_resumed: false,
             resumed_session: None,
             session_cache: Some(cache),
+            pending_ibsdh_ske: false,
+            sk_b: None,
         })
     }
 

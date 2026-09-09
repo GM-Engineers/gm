@@ -37,6 +37,26 @@ pub struct TlcpHandshake {
     pub transcript: Vec<u8>,
     /// Cipher suites to offer in ClientHello (default: all four TLCP suites)
     pub cipher_suites: Vec<[u8; 2]>,
+    /// **R-4.2**: SM9 IBSDH initiator state from `initiator_begin`.
+    /// Populated when the client emits the IBSDH CKE in step 7.5;
+    /// consumed by the deferred SKE verify in step 5 (the IBSDH
+    /// state machine reads SKE after emitting CKE — the only KEX
+    /// mode with this ordering).
+    #[cfg_attr(feature = "tlcp-gmssl-compat", allow(dead_code))]
+    pub ibsdh_initiator_state: Option<gm_sm9_rs::key_exchange::InitiatorState>,
+    /// **R-4.2**: R_A wire bytes (65-byte uncompressed G1 point)
+    /// sent in the IBSDH CKE. Used in step 5 to verify the server's
+    /// SKE echoes R_A unchanged. (We don't derive it from
+    /// `ibsdh_initiator_state.r_a_point` because that field is
+    /// private in gm-sm9-rs 0.1.1.)
+    #[cfg_attr(feature = "tlcp-gmssl-compat", allow(dead_code))]
+    pub ibsdh_ra_wire: Option<Vec<u8>>,
+    /// **R-4.2**: PMS placeholder / pending PMS for SM9 IBSDH.
+    /// `None` between CKE emit (step 7.5) and SKE verify (step 5);
+    /// set to the real SK_A after `initiator_finish` returns.
+    /// Read by `derive_master_secret` to produce `master_secret`.
+    #[cfg_attr(feature = "tlcp-gmssl-compat", allow(dead_code))]
+    pub pending_pms: Option<Vec<u8>>,
 }
 
 impl Drop for TlcpHandshake {
@@ -80,6 +100,9 @@ impl TlcpHandshake {
                 TLS_ECC_SM4_GCM_SM3,
                 TLS_ECC_SM4_CBC_SM3,
             ],
+            ibsdh_initiator_state: None,
+            ibsdh_ra_wire: None,
+            pending_pms: None,
         })
     }
 
@@ -113,6 +136,9 @@ impl TlcpHandshake {
                 TLS_ECC_SM4_GCM_SM3,
                 TLS_ECC_SM4_CBC_SM3,
             ],
+            ibsdh_initiator_state: None,
+            ibsdh_ra_wire: None,
+            pending_pms: None,
         })
     }
 
@@ -251,6 +277,14 @@ impl TlcpHandshake {
     /// Check if handshake is established
     pub fn is_established(&self) -> bool {
         self.state == TlcpHandshakeState::Established
+    }
+
+    /// **R-4.2**: stash the SM9 IBSDH pre-master secret (computed by
+    /// `initiator_finish` in step 5) so `derive_master_secret` can
+    /// consume it. The empty placeholder PMS returned by step 7.5 is
+    /// replaced by the real SK_A here.
+    pub fn prepending_pms(&mut self, pms: Vec<u8>) {
+        self.pending_pms = Some(pms);
     }
 
     /// Get the session ID from the server's ServerHello.

@@ -18,7 +18,7 @@ use crate::error::TlcpError;
 use crate::tlcp::HandshakeType;
 use crate::tlcp::constants::{
     TLS_ECC_SM4_CBC_SM3, TLS_ECC_SM4_GCM_SM3, TLS_ECDHE_SM4_CBC_SM3, TLS_ECDHE_SM4_GCM_SM3,
-    TLS_IBC_SM4_CBC_SM3, TLS_IBC_SM4_GCM_SM3,
+    TLS_IBC_SM4_CBC_SM3, TLS_IBC_SM4_GCM_SM3, TLS_IBSDH_SM4_CBC_SM3, TLS_IBSDH_SM4_GCM_SM3,
 };
 
 /// TLCP ServerHello message
@@ -75,10 +75,12 @@ impl TlcpServerHello {
                 | TLS_ECC_SM4_CBC_SM3
                 | TLS_IBC_SM4_GCM_SM3
                 | TLS_IBC_SM4_CBC_SM3
+                | TLS_IBSDH_SM4_GCM_SM3
+                | TLS_IBSDH_SM4_CBC_SM3
         ) {
             return Err(TlcpError::InvalidMessage(format!(
                 "ServerHello cipher_suite {:02X?} is not a known TLCP suite \
-                 (gm-tlcp 0.5.2 supports ECDHE/ECC + IBC; IBSDH + RSA pending R-4.2 / R-5)",
+                 (gm-tlcp 0.5.3 supports ECDHE/ECC + IBC + IBSDH; RSA pending R-5)",
                 cipher_suite
             )));
         }

@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-09-09
+
+### Added — SM9 IBSDH handshake wire path (R-4.2)
+
+`gm-tlcp 0.5.2` closed the **IBC half** of audit **C-5** (SM9 coverage tracking); the **IBSDH half** (suites `E055` and `E015`) remained pending — `accept_with_certs` and `connect_with_certs` returned explicit "pending R-4.2" errors when an IBSDH suite was negotiated, and `TlcpServerHello::from_bytes` rejected IBSDH suites as "not a known TLCP suite". This release closes that gap and adds loopback regression gates.
+
+The implementation is **purely TLCP state-machine integration** — the cryptographic core (`initiator_begin` / `responder_process` / `initiator_finish` / `compute_sb` / `verify_sa`) is reused from `gm-sm9-rs 0.1.1` (5 unit tests including KAT, length variations, key confirmation, bad-point rejection).
+
+**Wire-format additions** (3 enum-variant extensions):
+
+| # | Extension | File | Wire format |
+|---|---|---|---|
+| 1 | `ServerKeyExchangeBody::Ibsdh { ra, rb, sb }` | `src/tlcp/messages/ecdhe.rs` | `uint16 ra_len \|\| ra \|\| uint16 rb_len \|\| rb \|\| uint16 sb_len \|\| sb` (65-byte uncompressed G1 + 65-byte G1 + 32-byte SM3 hash) |
+| 2 | `ClientKeyExchangeBody::Ibsdh { ra }` | `src/tlcp/messages/client_key_exchange.rs` | `uint16 ra_len \|\| ra` (65-byte uncompressed G1) |
+| 3 | `TlcpCipherSuite::IBSDH_SM4_GCM_SM3` (E055) + `IBSDH_SM4_CBC_SM3` (E015) | `src/tlcp/cipher_suite.rs` | Suite IDs `[0xE0, 0x55]` / `[0xE0, 0x15]` |
+
+**State-machine reshuffle** — deferred SKE emit:
+
+The server needs the client's `R_A` (from CKE) before it can compute `R_B + S_B + SK_B`. For all other KEX modes SKE is emitted BEFORE CKE; IBSDH is the only mode where SKE is emitted AFTER CKE (deferred-emit pattern). Implementation:
+
+- New `pending_ibsdh_ske: bool` flag on `TlcpServerHandshake` (set in step 5; cleared by the deferred emit handler).
+- New `sk_b: Option<Vec<u8>>` stash on `TlcpServerHandshake` (populated by the deferred emit handler; consumed in step 8 PMS compute).
+- New `ibsdh_initiator_state`, `ibsdh_ra_wire`, `pending_pms` fields on `TlcpHandshake` (client-side: stash `InitiatorState` after CKE emit; restore during deferred SKE verify + `initiator_finish`).
+- New `TlcpConnector::with_sm9_client_exchange_key(de_a, client_id)` builder method.
+- New `mod sm9_helpers` (`g1_point_to_uncompressed` / `g1_point_from_uncompressed`) — 65-byte SEC1 wire-format serialization for SM9 G1 points.
+
+**Key confirmation**: server always sends `S_B` (32-byte SM3 hash per GM/T 0044.3-2016 §7.2 B6) so the client can verify the server actually derived the same SK. Mutual confirmation `S_A` (client → server) is **not** implemented — TLCP does not require it for the handshake to complete.
+
+### C-5 IBSDH half status — RESOLVED
+
+Audit **C-5** is now **fully resolved** on the SM9 half:
+- **IBC half** (E057 / E017) — resolved in `gm-tlcp 0.5.2` (R-4.1-hotfix).
+- **IBSDH half** (E055 / E015) — resolved in `gm-tlcp 0.5.3` (this release, R-4.2).
+
+The **RSA half** (E019 / E01C / E059 / E05A) remains pending R-5 / gm-tlcp 0.6.0. See [`interop/AUDIT-2026-09-06-v2.md`](interop/AUDIT-2026-09-06-v2.md) (v2-rev7) for the updated post-0.5.3 critical-finding tally.
+
+### Known limitations
+
+- **`client_id = server_id` shortcut (v1, DECIDED)**: SM9 IBSDH technically uses two distinct identities (one per party — `client_id` for the initiator, `server_id` for the responder). For this PATCH release, both parties run the KEX with the **same identity** (single SM9 identity deployment). This keeps the existing builder signature unchanged (zero API breakage for 0.5.x users). A deployment with two distinct SM9 identities (KGC admin, auditor, etc.) will not interop with this implementation. Follow-up PR can extend `TlcpConnector::with_sm9_certs(...)` to take an optional `client_id` if needed.
+- **GmSSL-master interop**: GmSSL master does not implement SM9 IBSDH. Building with `--features tlcp-gmssl-compat` and negotiating an IBSDH suite returns an explicit error early in step 5: *"SM9 IBSDH suites (E015/E055) are not GmSSL-master-compatible; build without --features tlcp-gmssl-compat to use them."* Loopback is the only available interop signal for IBSDH.
+
+### Regression gates added (`tests/gm_tlcp_loopback.rs`)
+
+- `gm_tlcp_sm9_ibsdh_loopback_with_real_keys_gcm` — full handshake for E055 (`IBSDH_SM4_GCM_SM3`) via `tokio::io::duplex`, including app-data round-trip to prove record layer derives identical key material on both sides.
+- `gm_tlcp_sm9_ibsdh_loopback_with_real_keys_cbc` — same for E015 (`IBSDH_SM4_CBC_SM3`).
+
+Both tests run unconditionally (no `gmssl` CLI dependency). Both confirm:
+- The server's `responder_process` SK_B matches the client's `initiator_finish` SK_A (S_B verified).
+- The deferred-SKE wire ordering works end-to-end (server emits SKE after reading CKE).
+- The master_secret derivation round-trips (post-handshake app-data exchange succeeds).
+
+**Total `tests/gm_tlcp_loopback.rs`**: 9 tests (5 handshake-loopback + 4 support-module); was 7 pre-R-4.2 (3 handshake-loopback + 4 support-module).
+
+### Verification
+
+- `cargo +stable fmt --all -- --check` clean
+- `cargo +stable clippy -p gm-tlcp --all-features --all-targets -- -D warnings` clean
+- `cargo +stable test -p gm-tlcp --lib --no-fail-fast` clean (113 lib tests; was 105 pre-R-4.2 — added 8 tests across `sm9_helpers` + `ecdhe::tests` + `cipher_suite::tests`)
+- `cargo +stable test -p gm-tlcp --features tlcp-gmssl-compat --lib --no-fail-fast` clean (111 lib tests; the 2 IBSDH ecdhe tests are excluded in gmssl-compat mode where IBSDH is not supported)
+- `cargo +stable test -p gm-tlcp --features tlcp-strict --lib --no-fail-fast` clean (113 lib tests)
+- `cargo +stable test -p gm-tlcp --tests --no-fail-fast` clean (113 lib + 9 loopback + 4 gmssl_interop + 32 integration; +2 loopback vs. 0.5.2)
+- `cargo +stable publish -p gm-tlcp --dry-run --registry crates-io --allow-dirty` clean (45 files, 608.6 KiB; was 44 files, ~564 KiB pre-R-4.2)
+- Both new SM9 IBSDH loopback tests pass end-to-end with `tokio::io::duplex`, proving the full 2-round KEX handshake works and the record layer derives the same key material on both sides.
+
+### Lessons learned
+
+The R-4.2 implementation followed the R-4.1-hotfix discipline (every handshake-state-machine PR ships with loopback regression tests). Two non-obvious pitfalls were caught during R-4.2 implementation, both recorded here so future PRs avoid them:
+
+1. **The server-side CKE parse dispatch must take 4 flags**, not 3 — `from_body(&body, is_ecc_mode, is_ibc_mode, is_ibsdh_mode)` — because the `Ibsdh` variant has its own wire shape (uint16 ra_len || ra) that overlaps with neither the ECDHE-style envelope (for Ecdhe / Ecc) nor the IBC-style `uint16 id_len || id || uint16 sig_len || sig` (for Ibc). Auto-detection would misread IBSDH ra_len as IBC id_len.
+2. **The `client_id = server_id` shortcut requires BOTH parties to extract their user keys from the SAME `KgcMasterKey`** — otherwise de_a and de_b produce different shared secrets and the key-confirmation S_B mismatches. The first loopback test build accidentally used two different freshly-generated KGCs (one for the acceptor, one for the connector) and failed with `S_B mismatch`. The fix is to extract `de_a` from the SAME kgc before handing ownership to the acceptor.
+
 ## [0.5.2] - 2026-09-08
 
 ### Fixed — SM9 IBC handshake wire path (R-4.1-hotfix)
@@ -620,6 +691,7 @@ server-side PMS decryption** (R-5 / 0.6.0) and **SM9 suites** (R-4
   accidentally pushed to a public mirror.
 
 [Unreleased]: https://github.com/GM-Engineers/gm/compare/main...HEAD
+[0.5.3]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.5.2...gm-tlcp-v0.5.3
 [0.5.2]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.5.1...gm-tlcp-v0.5.2
 [0.5.1]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.5.0...gm-tlcp-v0.5.1
 [0.5.0]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.4.0...gm-tlcp-v0.5.0

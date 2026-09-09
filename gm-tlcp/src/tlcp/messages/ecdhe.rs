@@ -19,7 +19,18 @@
 //!   so a parser does not depend on certificate-subjectAltName handling
 //!   to know which identity to encrypt the PMS under.)
 //!
-//! The 4-byte handshake header is identical in all three cases
+//! - **Ibsdh** for SM9 IBSDH suites (E015 / E055, R-4.2): 2-round
+//!   key-exchange body carrying `uint16 ra_len || ra ||
+//!   uint16 rb_len || rb || uint16 sb_len || sb`. `ra` and `rb` are
+//!   the client/server's SM9 ephemeral R-points serialized as 65-byte
+//!   uncompressed G1 points (`0x04 || x || y`); `sb` is the server's
+//!   32-byte SM3 key-confirmation value per GM/T 0044.3-2016 §7.2 B6.
+//!   This is the only variant where ServerKeyExchange is emitted
+//!   **after** the server reads ClientKeyExchange (deferred-emit
+//!   pattern; the server needs the client's R_A before it can compute
+//!   R_B + S_B + SK_B).
+//!
+//! The 4-byte handshake header is identical in all four cases
 //! (`[type=0x0C | length(3)])`).
 
 use crate::error::TlcpError;
@@ -161,11 +172,36 @@ pub enum ServerKeyExchangeBody {
     /// server_sm9_id` under the server's SM9 signing user key.
     Ibc {
         /// SM9 server identity (recipient of the SM9 PKE).
-        /// UTF-8 bytes, e.g. `alice@example.com` or an X.500 DN.
+        /// UTF-8 bytes, or an X.500 DN.
         server_id: Vec<u8>,
         /// SM9 IBC signature over `cr || sr || server_sm9_id`
         /// (DER-encoded, <= 65535 bytes).
         signature: Vec<u8>,
+    },
+    /// SM9 IBSDH body (R-4.2) for E015 / E055.
+    ///
+    /// Wire layout: `uint16 ra_len || ra || uint16 rb_len || rb ||
+    /// uint16 sb_len || sb`.
+    ///
+    /// `ra` is the client's `R_A = [r_A]Q_B` (65 bytes uncompressed
+    /// G1 point, re-broadcast via SKE so the server doesn't need a
+    /// second copy of it in CKE). `rb` is the server's `R_B =
+    /// [r_B]Q_A` (65 bytes). `sb` is the server's SM9 key-
+    /// confirmation value (32-byte SM3 hash per GM/T 0044.3-2016
+    /// §7.2 B6).
+    ///
+    /// This is the only KEX mode where SKE is emitted **after** the
+    /// server reads CKE (deferred-emit pattern). The SKE parse path
+    /// here is for the server's own emit; the client receives the
+    /// SKE later in its step 5 (SKE verify) and parses via
+    /// `from_body` with `KeyExchangeMode::Ibsdh`.
+    Ibsdh {
+        /// Client's R_A from `initiator_begin` (re-broadcast via SKE).
+        ra: Vec<u8>,
+        /// Server's R_B from `responder_process`.
+        rb: Vec<u8>,
+        /// Server's S_B key-confirmation value (32-byte SM3 hash).
+        sb: Vec<u8>,
     },
 }
 
@@ -206,7 +242,9 @@ impl TlcpServerKeyExchange {
     pub fn as_ecdhe(&self) -> Option<&Sm2EcdheParams> {
         match &self.body {
             ServerKeyExchangeBody::Ecdhe(p) => Some(p),
-            ServerKeyExchangeBody::Ecc { .. } | ServerKeyExchangeBody::Ibc { .. } => None,
+            ServerKeyExchangeBody::Ecc { .. }
+            | ServerKeyExchangeBody::Ibc { .. }
+            | ServerKeyExchangeBody::Ibsdh { .. } => None,
         }
     }
 
@@ -214,7 +252,9 @@ impl TlcpServerKeyExchange {
     pub fn as_ecc_signature(&self) -> Option<&[u8]> {
         match &self.body {
             ServerKeyExchangeBody::Ecc { signature } => Some(signature),
-            ServerKeyExchangeBody::Ecdhe(_) | ServerKeyExchangeBody::Ibc { .. } => None,
+            ServerKeyExchangeBody::Ecdhe(_)
+            | ServerKeyExchangeBody::Ibc { .. }
+            | ServerKeyExchangeBody::Ibsdh { .. } => None,
         }
     }
 
@@ -236,6 +276,24 @@ impl TlcpServerKeyExchange {
                 server_id,
                 signature,
             } => Some((server_id.as_slice(), signature.as_slice())),
+            _ => None,
+        }
+    }
+
+    /// Create a new ServerKeyExchange wrapping the SM9 IBSDH body (R-4.2).
+    pub fn new_ibsdh(ra: Vec<u8>, rb: Vec<u8>, sb: Vec<u8>) -> Self {
+        Self {
+            body: ServerKeyExchangeBody::Ibsdh { ra, rb, sb },
+        }
+    }
+
+    /// Borrow the IBSDH `(ra, rb, sb)` triple, or `None` if this is not
+    /// the IBSDH variant.
+    pub fn as_ibsdh(&self) -> Option<(&[u8], &[u8], &[u8])> {
+        match &self.body {
+            ServerKeyExchangeBody::Ibsdh { ra, rb, sb } => {
+                Some((ra.as_slice(), rb.as_slice(), sb.as_slice()))
+            }
             _ => None,
         }
     }
@@ -408,6 +466,17 @@ impl TlcpServerKeyExchange {
                 buf.extend_from_slice(signature);
                 buf
             }
+            ServerKeyExchangeBody::Ibsdh { ra, rb, sb } => {
+                // uint16 ra_len || ra || uint16 rb_len || rb || uint16 sb_len || sb
+                let mut buf = Vec::with_capacity(2 + ra.len() + 2 + rb.len() + 2 + sb.len());
+                buf.extend_from_slice(&(ra.len() as u16).to_be_bytes());
+                buf.extend_from_slice(ra);
+                buf.extend_from_slice(&(rb.len() as u16).to_be_bytes());
+                buf.extend_from_slice(rb);
+                buf.extend_from_slice(&(sb.len() as u16).to_be_bytes());
+                buf.extend_from_slice(sb);
+                buf
+            }
         }
     }
 
@@ -513,8 +582,56 @@ impl TlcpServerKeyExchange {
                     },
                 })
             }
-            KeyExchangeMode::Ibsdh | KeyExchangeMode::Rsa => Err(TlcpError::InvalidMessage(
-                "ServerKeyExchange not used for IBSDH or RSA suites (yet)".to_string(),
+            KeyExchangeMode::Ibsdh => {
+                // body = uint16 ra_len || ra || uint16 rb_len || rb || uint16 sb_len || sb
+                let mut p = 0usize;
+                if body.len() < p + 2 {
+                    return Err(TlcpError::InvalidMessage(format!(
+                        "IBSDH SKE body too short: {} bytes, need at least 2",
+                        body.len()
+                    )));
+                }
+                let ra_len = u16::from_be_bytes([body[p], body[p + 1]]) as usize;
+                p += 2;
+                if body.len() < p + ra_len + 2 {
+                    return Err(TlcpError::InvalidMessage(format!(
+                        "IBSDH SKE ra truncated: body {} < {} + ra_len {}",
+                        body.len(),
+                        p + 2,
+                        ra_len
+                    )));
+                }
+                let ra = body[p..p + ra_len].to_vec();
+                p += ra_len;
+                let rb_len = u16::from_be_bytes([body[p], body[p + 1]]) as usize;
+                p += 2;
+                if body.len() < p + rb_len + 2 {
+                    return Err(TlcpError::InvalidMessage(format!(
+                        "IBSDH SKE rb truncated: body {} < {} + rb_len {}",
+                        body.len(),
+                        p + 2,
+                        rb_len
+                    )));
+                }
+                let rb = body[p..p + rb_len].to_vec();
+                p += rb_len;
+                let sb_len = u16::from_be_bytes([body[p], body[p + 1]]) as usize;
+                p += 2;
+                if body.len() < p + sb_len {
+                    return Err(TlcpError::InvalidMessage(format!(
+                        "IBSDH SKE sb truncated: body {} < {} + sb_len {}",
+                        body.len(),
+                        p,
+                        sb_len
+                    )));
+                }
+                let sb = body[p..p + sb_len].to_vec();
+                Ok(Self {
+                    body: ServerKeyExchangeBody::Ibsdh { ra, rb, sb },
+                })
+            }
+            KeyExchangeMode::Rsa => Err(TlcpError::InvalidMessage(
+                "ServerKeyExchange not used for RSA suites (yet)".to_string(),
             )),
         }
     }
@@ -786,10 +903,81 @@ mod tests {
     }
 
     #[test]
-    fn ske_from_body_rejects_ibsdh_and_rsa_kinds() {
+    fn ske_from_body_rejects_rsa_kind() {
         use crate::tlcp::cipher_suite::KeyExchangeMode;
         let body = vec![0u8; 8];
-        assert!(TlcpServerKeyExchange::from_body(&body, KeyExchangeMode::Ibsdh).is_err());
+        // R-4.2: IBSDH is now implemented; only RSA remains
+        // explicitly rejected.
         assert!(TlcpServerKeyExchange::from_body(&body, KeyExchangeMode::Rsa).is_err());
+    }
+
+    // ----- IBSDH (R-4.2) wire-format roundtrip -----
+
+    #[test]
+    fn ske_ibsdh_to_bytes_writes_three_uint16_len_prefixed_segments() {
+        let ra = vec![0x04; 65]; // G1 uncompressed point
+        let rb = vec![0x05; 65];
+        let sb = vec![0xAA; 32]; // SM3 hash
+        let ske = TlcpServerKeyExchange::new_ibsdh(ra.clone(), rb.clone(), sb.clone());
+        let bytes = ske.to_bytes();
+        // 4-byte HS header
+        assert_eq!(bytes[0], HandshakeType::ServerKeyExchange as u8);
+        let body_len =
+            ((bytes[1] as usize) << 16) | ((bytes[2] as usize) << 8) | (bytes[3] as usize);
+        assert_eq!(body_len, 2 + ra.len() + 2 + rb.len() + 2 + sb.len());
+        // uint16(65) || ra
+        assert_eq!(&bytes[4..6], &(ra.len() as u16).to_be_bytes());
+        assert_eq!(&bytes[6..6 + ra.len()], ra.as_slice());
+        // uint16(65) || rb
+        let rb_offset = 6 + ra.len();
+        assert_eq!(
+            &bytes[rb_offset..rb_offset + 2],
+            &(rb.len() as u16).to_be_bytes()
+        );
+        assert_eq!(
+            &bytes[rb_offset + 2..rb_offset + 2 + rb.len()],
+            rb.as_slice()
+        );
+        // uint16(32) || sb
+        let sb_offset = rb_offset + 2 + rb.len();
+        assert_eq!(
+            &bytes[sb_offset..sb_offset + 2],
+            &(sb.len() as u16).to_be_bytes()
+        );
+        assert_eq!(
+            &bytes[sb_offset + 2..sb_offset + 2 + sb.len()],
+            sb.as_slice()
+        );
+    }
+
+    #[test]
+    fn ske_ibsdh_roundtrip_preserves_ra_rb_sb() {
+        use crate::tlcp::cipher_suite::KeyExchangeMode;
+        let ra = vec![0x01; 65];
+        let rb = vec![0x02; 65];
+        let sb = vec![0x03; 32];
+        let ske = TlcpServerKeyExchange::new_ibsdh(ra.clone(), rb.clone(), sb.clone());
+        let bytes = ske.to_bytes();
+        let body_len =
+            ((bytes[1] as usize) << 16) | ((bytes[2] as usize) << 8) | (bytes[3] as usize);
+        let parsed =
+            TlcpServerKeyExchange::from_body(&bytes[4..4 + body_len], KeyExchangeMode::Ibsdh)
+                .expect("IBSDH SKE parse should succeed");
+        let (ra_p, rb_p, sb_p) = parsed.as_ibsdh().expect("expected IBSDH variant");
+        assert_eq!(ra_p, ra.as_slice());
+        assert_eq!(rb_p, rb.as_slice());
+        assert_eq!(sb_p, sb.as_slice());
+        assert!(parsed.as_ecdhe().is_none());
+        assert!(parsed.as_ecc_signature().is_none());
+        assert!(parsed.as_ibc().is_none());
+    }
+
+    #[test]
+    fn ske_ibsdh_from_body_rejects_truncated_input() {
+        use crate::tlcp::cipher_suite::KeyExchangeMode;
+        assert!(TlcpServerKeyExchange::from_body(&[0x00], KeyExchangeMode::Ibsdh).is_err());
+        assert!(TlcpServerKeyExchange::from_body(&[0x00, 0x0A], KeyExchangeMode::Ibsdh).is_err());
+        // uint16(100) but no body
+        assert!(TlcpServerKeyExchange::from_body(&[0x00, 0x64], KeyExchangeMode::Ibsdh).is_err());
     }
 }

@@ -200,6 +200,7 @@ mod handshake_type;
 mod key_material;
 mod messages;
 pub mod pms;
+mod sm9_helpers;
 pub use pms::*;
 mod session;
 pub use alert::*;
@@ -1348,6 +1349,20 @@ pub struct TlcpConnector {
     /// SM9 server identity (R-4.1). Must match the identity the
     /// server's KGC bound the user decryption key to.
     sm9_server_id: Option<Vec<u8>>,
+    /// **R-4.2**: SM9 IBSDH encryption user key for the client
+    /// (`de_a = kgc.enc_master.extract_key_exchange(client_id)`).
+    /// The connector uses this in `initiator_finish` to complete the
+    /// 2-round KEX. Default: `None` — set via
+    /// `with_sm9_client_exchange_key` before connecting with an
+    /// IBSDH suite.
+    #[cfg_attr(feature = "tlcp-gmssl-compat", allow(dead_code))]
+    sm9_ibsdh_de_a: Option<gm_sm9_rs::key::EncUserKey>,
+    /// **R-4.2**: client-side identity used by `initiator_begin` /
+    /// `initiator_finish` for SM9 IBSDH. v1 shortcut: defaults to
+    /// the same value as `sm9_server_id` (single-identity
+    /// deployment); can be overridden via `with_sm9_client_exchange_key`.
+    #[cfg_attr(feature = "tlcp-gmssl-compat", allow(dead_code))]
+    sm9_ibsdh_client_id: Option<Vec<u8>>,
 }
 impl Default for TlcpConnector {
     fn default() -> Self {
@@ -1381,6 +1396,8 @@ impl TlcpConnector {
             sm9_kgc_ppube: None,
             sm9_kgc_ppubs: None,
             sm9_server_id: None,
+            sm9_ibsdh_de_a: None,
+            sm9_ibsdh_client_id: None,
         }
     }
     /// Create a connector with a shared session cache for resumption.
@@ -1555,6 +1572,35 @@ impl TlcpConnector {
         self
     }
 
+    /// Configure SM9 IBSDH key material on the client side (R-4.2).
+    ///
+    /// `de_a` is the client's SM9 encryption user key, typically
+    /// extracted via `kgc.enc_master().extract_key_exchange(client_id)`.
+    /// `client_id` is the SM9 identity the client uses in the KEX; v1
+    /// shortcut accepts the same identity as `sm9_server_id`.
+    ///
+    /// This is required before connecting with a SM9 IBSDH suite
+    /// (E015 / E055); without it, the connector returns an explicit
+    /// error in step 7.5.
+    pub fn with_sm9_client_exchange_key(
+        mut self,
+        de_a: gm_sm9_rs::key::EncUserKey,
+        client_id: Vec<u8>,
+    ) -> Self {
+        self.sm9_ibsdh_de_a = Some(de_a);
+        self.sm9_ibsdh_client_id = Some(client_id);
+        // Add IBSDH suites to the preference list if not already present.
+        let mut suites = self.cipher_suites;
+        if !suites.contains(&TLS_IBSDH_SM4_GCM_SM3) {
+            suites.push(TLS_IBSDH_SM4_GCM_SM3);
+        }
+        if !suites.contains(&TLS_IBSDH_SM4_CBC_SM3) {
+            suites.push(TLS_IBSDH_SM4_CBC_SM3);
+        }
+        self.cipher_suites = suites;
+        self
+    }
+
     pub async fn connect_with_certs<S>(&self, transport: S) -> Result<TlcpStream<S>, TlcpError>
     where
         S: AsyncRead + AsyncWrite + Unpin,
@@ -1631,23 +1677,37 @@ impl TlcpConnector {
         // ECDHE-style body (interpretation-C) which the same
         // ECDHE-parser path handles.
 
-        // Step 4: Read ServerKeyExchange
-        let (_ct, ske_payload) = read_plaintext_record(&mut io)
-            .await
-            .map_err(|e| TlcpError::HandshakeFailed(format!("read ServerKeyExchange: {}", e)))?;
-        let (ske_type, ske_body, _rem) = parse_handshake_message(&ske_payload)?;
-        if ske_type != HandshakeType::ServerKeyExchange {
-            return Err(TlcpError::HandshakeFailed(format!(
-                "Expected ServerKeyExchange, got {:?}",
-                ske_type
-            )));
-        }
+        // Step 4: Read ServerKeyExchange (skip for SM9 IBSDH; the
+        // server defers SKE emit to AFTER it reads CKE, so the
+        // client must also defer the SKE read to after CKE emit).
+        // R-4.2: IBSDH suites take a separate deferred-SKE path.
+        let (ske_body, ske_record) = if matches!(
+            suite.key_exchange,
+            crate::tlcp::cipher_suite::KeyExchangeMode::Ibsdh
+        ) {
+            // Placeholder empty values — the real SKE is read after
+            // CKE emit (see step 7.6 below).
+            (Vec::new(), Vec::new())
+        } else {
+            let (_ct, ske_payload) = read_plaintext_record(&mut io).await.map_err(|e| {
+                TlcpError::HandshakeFailed(format!("read ServerKeyExchange: {}", e))
+            })?;
+            let (ske_type, body, _rem) = parse_handshake_message(&ske_payload)?;
+            if ske_type != HandshakeType::ServerKeyExchange {
+                return Err(TlcpError::HandshakeFailed(format!(
+                    "Expected ServerKeyExchange, got {:?}",
+                    ske_type
+                )));
+            }
+            (body, ske_payload)
+        };
         // Step 5: Verify ServerKeyExchange signature.
         // ECDHE / static-ECC use SM2 sigs (server_sign_pubkey + distid).
         // SM9 IBC suites use SM9 IBC sigs (KGC public + server_id).
-        // We dispatch on key_exchange BEFORE constructing the verifier
-        // so we don't try to build an SM2 verifier when the suite is
-        // SM9 (R-4.1).
+        // SM9 IBSDH suites SKIP this step entirely (handled after
+        // CKE emit in step 7.6). We dispatch on key_exchange BEFORE
+        // constructing the verifier so we don't try to build an SM2
+        // verifier when the suite is SM9 (R-4.1).
         if matches!(
             suite.key_exchange,
             crate::tlcp::cipher_suite::KeyExchangeMode::Ibc
@@ -1690,15 +1750,24 @@ impl TlcpConnector {
             verifier.verify(&to_verify, &sig).map_err(|e| {
                 TlcpError::HandshakeFailed(format!("SM9 IBC SKE signature verify: {}", e))
             })?;
-        } else {
+        } else if !matches!(
+            suite.key_exchange,
+            crate::tlcp::cipher_suite::KeyExchangeMode::Ibsdh
+        ) {
             // Existing ECDHE / static-ECC verification path.
+            // For SM9 IBSDH, we SKIP this branch entirely (the SKE
+            // body is empty at step 5; deferred SKE read + verify
+            // happens at step 7.6 after CKE emit).
             let (pubkey, distid) = self
                 .server_sign_pubkey
                 .as_ref()
                 .zip(self.server_sign_distid.as_ref())
                 .ok_or_else(|| {
                     TlcpError::HandshakeFailed(
-                        "ServerKeyExchange signature verification requires                          server_sign_pubkey + server_sign_distid; call                          TlcpConnector::with_server_sign_key() before                          connect_with_certs()."
+                        "ServerKeyExchange signature verification requires \
+                         server_sign_pubkey + server_sign_distid; call \
+                         TlcpConnector::with_server_sign_key() before \
+                         connect_with_certs()."
                             .to_string(),
                     )
                 })?;
@@ -1713,7 +1782,15 @@ impl TlcpConnector {
                 &verifier,
             )?;
         }
-        client_hs.transcript.extend_from_slice(&ske_payload);
+        // For SM9 IBSDH, step 5 verify is skipped entirely (the SKE
+        // arrives after CKE in the deferred-emit wire order; step 7.6
+        // below handles the SKE read + `initiator_finish` call).
+        if !matches!(
+            suite.key_exchange,
+            crate::tlcp::cipher_suite::KeyExchangeMode::Ibsdh
+        ) {
+            client_hs.transcript.extend_from_slice(&ske_record);
+        }
         // Step 5.5: Read CertificateRequest or ServerHelloDone. The next plaintext
         // record from the server is one of:
         //   - CertificateRequest (GmSSL/Tongsuo for ECDHE)
@@ -1948,6 +2025,48 @@ impl TlcpConnector {
             msg.push(body.len() as u8);
             msg.extend_from_slice(&body);
             (msg, pms_bytes.to_vec())
+        } else if matches!(
+            suite.key_exchange,
+            crate::tlcp::cipher_suite::KeyExchangeMode::Ibsdh
+        ) {
+            // SM9 IBSDH (R-4.2): client generates R_A via
+            // `initiator_begin`, embeds R_A in CKE-IBSDH body, stashes
+            // InitiatorState and the R_A wire bytes for step 5's
+            // SKE verify + `initiator_finish` call. The placeholder PMS
+            // (48 zero bytes) is returned here; step 5 replaces it
+            // with the real SK_A via `client_hs.prepending_pms`.
+            let kgc_ppube = self.sm9_kgc_ppube.as_ref().ok_or_else(|| {
+                TlcpError::HandshakeFailed(
+                    "SM9 IBSDH suite negotiated but \
+                     TlcpConnector::with_sm9_certs(...) was not called (need ppube)"
+                        .to_string(),
+                )
+            })?;
+            let server_id = self.sm9_server_id.as_ref().ok_or_else(|| {
+                TlcpError::HandshakeFailed(
+                    "SM9 IBSDH suite negotiated but sm9_server_id is missing".to_string(),
+                )
+            })?;
+            // v1 shortcut: client_id = server_id (single-identity
+            // deployment; documented compromise, see R-4.2 plan §2).
+            let client_id = self.sm9_ibsdh_client_id.as_deref().unwrap_or(server_id);
+            // Generate R_A + stash InitiatorState.
+            let (state, round1) = gm_sm9_rs::key_exchange::initiator_begin(
+                client_id,
+                server_id,
+                kgc_ppube,
+                &mut rand::rng(),
+            )
+            .map_err(|e| TlcpError::HandshakeFailed(format!("SM9 IBSDH initiator_begin: {}", e)))?;
+            let ra_bytes = crate::tlcp::sm9_helpers::g1_point_to_uncompressed(&round1.r_a)?;
+            let cke = TlcpClientKeyExchange::new_ibsdh(ra_bytes.clone());
+            let cke_bytes = cke.to_bytes();
+            client_hs.ibsdh_initiator_state = Some(state);
+            client_hs.ibsdh_ra_wire = Some(ra_bytes);
+            // Placeholder PMS (48 zero bytes); step 5 replaces it via
+            // `prepending_pms(output.shared_key)`. The placeholder
+            // is never consumed (derive_master_secret runs AFTER step 5).
+            (cke_bytes, vec![0u8; 48])
         } else {
             // Existing ECDHE / static-ECC path.
             if is_ecc_mode {
@@ -2157,6 +2276,90 @@ impl TlcpConnector {
             .await
             .map_err(|e| TlcpError::HandshakeFailed(format!("write ClientKeyExchange: {}", e)))?;
         client_hs.transcript.extend_from_slice(&cke_bytes);
+        // Step 7.6 (R-4.2): SM9 IBSDH deferred SKE read + verify +
+        // `initiator_finish`. The server emits SKE AFTER it reads CKE
+        // (see accept_with_certs step 7.5), so the client must read
+        // SKE here, after sending CKE. The verify + finish block runs
+        // `initiator_finish` to compute SK_A from R_B (and verify S_B),
+        // then stashes SK_A on `client_hs.pending_pms` so step 8's
+        // `derive_master_secret` substitutes it for the placeholder.
+        if matches!(
+            suite.key_exchange,
+            crate::tlcp::cipher_suite::KeyExchangeMode::Ibsdh
+        ) {
+            let (_ct, deferred_ske_payload) =
+                read_plaintext_record(&mut io).await.map_err(|e| {
+                    TlcpError::HandshakeFailed(format!("read deferred SKE (IBSDH): {}", e))
+                })?;
+            let (deferred_ske_type, deferred_ske_body, _rem) =
+                parse_handshake_message(&deferred_ske_payload)?;
+            if deferred_ske_type != HandshakeType::ServerKeyExchange {
+                return Err(TlcpError::HandshakeFailed(format!(
+                    "Expected deferred ServerKeyExchange (IBSDH), got {:?}",
+                    deferred_ske_type
+                )));
+            }
+            client_hs
+                .transcript
+                .extend_from_slice(&deferred_ske_payload);
+            // Parse the SKE-IBSDH body.
+            let ske = TlcpServerKeyExchange::from_body(
+                &deferred_ske_body,
+                crate::tlcp::cipher_suite::KeyExchangeMode::Ibsdh,
+            )?;
+            let (ra_from_ske, rb_bytes, sb_bytes) = ske.as_ibsdh().ok_or_else(|| {
+                TlcpError::InvalidMessage(
+                    "SM9 IBSDH verify called on non-IBSDH SKE body".to_string(),
+                )
+            })?;
+            // Sanity: the server must echo the client's R_A unchanged.
+            let ra_sent = client_hs.ibsdh_ra_wire.as_deref().ok_or_else(|| {
+                TlcpError::HandshakeFailed(
+                    "SM9 IBSDH client step 7.6: ibsdh_ra_wire missing".to_string(),
+                )
+            })?;
+            if ra_from_ske != ra_sent {
+                return Err(TlcpError::HandshakeFailed(
+                    "SM9 IBSDH: SKE's R_A does not match client's R_A".to_string(),
+                ));
+            }
+            // Decode R_B into a G1Point.
+            let rb_g1 = crate::tlcp::sm9_helpers::g1_point_from_uncompressed(rb_bytes)?;
+            // Restore the stashed InitiatorState from step 7.
+            let state = client_hs.ibsdh_initiator_state.take().ok_or_else(|| {
+                TlcpError::HandshakeFailed(
+                    "SM9 IBSDH client step 7.6: initiator_state missing -- \
+                     step 7 did not stash it"
+                        .to_string(),
+                )
+            })?;
+            // Extract de_a and the identities for KDF / S_B.
+            let de_a = self.sm9_ibsdh_de_a.as_ref().ok_or_else(|| {
+                TlcpError::HandshakeFailed(
+                    "SM9 IBSDH suite negotiated but \
+                     TlcpConnector::with_sm9_client_exchange_key(...) was not called"
+                        .to_string(),
+                )
+            })?;
+            let client_id = self.sm9_ibsdh_client_id.as_deref().ok_or_else(|| {
+                TlcpError::HandshakeFailed("SM9 IBSDH: sm9_ibsdh_client_id missing".to_string())
+            })?;
+            let server_id = self.sm9_server_id.as_deref().ok_or_else(|| {
+                TlcpError::HandshakeFailed("SM9 IBSDH: sm9_server_id missing".to_string())
+            })?;
+            // Run initiator_finish with S_B verification.
+            let output = gm_sm9_rs::key_exchange::initiator_finish(
+                state,
+                &rb_g1,
+                de_a,
+                client_id,
+                server_id,
+                48,
+                Some(sb_bytes),
+            )
+            .map_err(|e| TlcpError::HandshakeFailed(format!("SM9 IBSDH finish: {}", e)))?;
+            client_hs.prepending_pms(output.shared_key);
+        }
         // Step 7.5: Build CertificateVerify if we sent a client cert.
         // Per GmSSL 2026-06+ master (and RFC 5246 §7.4.8), CV is
         // signed over the transcript HASH that includes everything up
@@ -2263,7 +2466,16 @@ impl TlcpConnector {
             client_hs.transcript.extend_from_slice(&cv_msg);
         }
         // Step 8: Stash PMS + server_random + selected suite, derive master secret.
-        client_hs.pre_master_secret = Some(pms);
+        // R-4.2: for SM9 IBSDH suites, the placeholder PMS from
+        // step 7.5 was replaced by the real SK_A in step 5's verify +
+        // finish block. We substitute it here before the master_secret
+        // derivation.
+        let effective_pms: Vec<u8> = if let Some(real) = client_hs.pending_pms.take() {
+            real
+        } else {
+            pms
+        };
+        client_hs.pre_master_secret = Some(effective_pms);
         client_hs.server_random = Some(server_random);
         client_hs.cipher_suite = Some(server_hello.cipher_suite);
         client_hs.derive_master_secret()?;
@@ -2704,10 +2916,29 @@ impl TlcpAcceptor {
                 server_hs.transcript.extend_from_slice(&ske_bytes);
                 None
             }
-            crate::tlcp::cipher_suite::KeyExchangeMode::Ibsdh
-            | crate::tlcp::cipher_suite::KeyExchangeMode::Rsa => {
+            crate::tlcp::cipher_suite::KeyExchangeMode::Ibsdh => {
+                // SM9 IBSDH (R-4.2): DEFERRED SKE EMIT. The server
+                // needs the client's R_A (from CKE in step 7.5) before
+                // it can compute R_B + S_B + SK_B. So we set a flag,
+                // skip the SKE write here, and let the post-CKE
+                // handler emit SKE carrying (ra, rb, sb).
+                server_hs.pending_ibsdh_ske = true;
+                // gmssl-compat: GmSSL master does not implement SM9
+                // IBSDH at all. Refuse to negotiate IBSDH in compat mode.
+                #[cfg(feature = "tlcp-gmssl-compat")]
+                {
+                    return Err(TlcpError::HandshakeFailed(
+                        "SM9 IBSDH suites (E015/E055) are not GmSSL-master-compatible; \
+                         build without --features tlcp-gmssl-compat to use them."
+                            .to_string(),
+                    ));
+                }
+                #[cfg(not(feature = "tlcp-gmssl-compat"))]
+                None
+            }
+            crate::tlcp::cipher_suite::KeyExchangeMode::Rsa => {
                 return Err(TlcpError::HandshakeFailed(format!(
-                    "cipher suite {} uses key exchange {:?} which is not yet implemented; pending R-4.2 / R-5.",
+                    "cipher suite {} uses key exchange {:?} which is not yet implemented; pending R-5.",
                     suite.name, suite.key_exchange
                 )));
             }
@@ -2723,14 +2954,19 @@ impl TlcpAcceptor {
         // GmSSL master itself does not.
         #[cfg(not(feature = "tlcp-gmssl-compat"))]
         {
-            // SM9 IBC suites (R-4.1-hotfix): server authenticates via
-            // SM9 IBC identity (step 5 SKE), not via SM2 cert chain.
-            // Per GB/T 38636-2020 §6.4.5.4 the IBC suites do not require
-            // client authentication, so skip the CertificateRequest and
-            // the corresponding Client Certificate read in step 7.
+            // SM9 IBC / IBSDH suites (R-4.1-hotfix / R-4.2): server
+            // authenticates via SM9 identity (step 5 SKE for IBC,
+            // step 7.5 deferred SKE for IBSDH), not via SM2 cert chain.
+            // Per GB/T 38636-2020 §6.4.5.4 these suites do not
+            // require client authentication, so skip the
+            // CertificateRequest and the corresponding Client
+            // Certificate read in step 7.
             if !matches!(
                 suite.key_exchange,
                 crate::tlcp::cipher_suite::KeyExchangeMode::Ibc
+            ) && !matches!(
+                suite.key_exchange,
+                crate::tlcp::cipher_suite::KeyExchangeMode::Ibsdh
             ) {
                 let cr = TlcpCertificateRequest::standard();
                 let cr_bytes = cr.to_bytes()?;
@@ -2775,10 +3011,13 @@ impl TlcpAcceptor {
         let _client_certs: Vec<Vec<u8>> = if matches!(
             suite.key_exchange,
             crate::tlcp::cipher_suite::KeyExchangeMode::Ibc
+        ) || matches!(
+            suite.key_exchange,
+            crate::tlcp::cipher_suite::KeyExchangeMode::Ibsdh
         ) {
-            // SM9 IBC suites (R-4.1-hotfix): server skipped
-            // CertificateRequest in step 5.5, so the client sends no
-            // Certificate. No client certs to consume here.
+            // SM9 IBC / IBSDH suites (R-4.1-hotfix / R-4.2): server
+            // skipped CertificateRequest in step 5.5, so the client
+            // sends no Certificate. No client certs to consume here.
             Vec::new()
         } else {
             let (_ct, cert_payload) = read_plaintext_record(&mut io).await.map_err(|e| {
@@ -2831,18 +3070,108 @@ impl TlcpAcceptor {
             )));
         }
         // R-4: SM9 IBC suites route to the Ibc variant of CKE.
+        // R-4.2: SM9 IBSDH suites route to the Ibsdh variant.
         let cke = TlcpClientKeyExchange::from_body(
             &cke_body,
             !matches!(
                 suite.key_exchange,
                 crate::tlcp::cipher_suite::KeyExchangeMode::Ecdhe
+            ) && !matches!(
+                suite.key_exchange,
+                crate::tlcp::cipher_suite::KeyExchangeMode::Ibsdh
             ),
             matches!(
                 suite.key_exchange,
                 crate::tlcp::cipher_suite::KeyExchangeMode::Ibc
             ),
+            matches!(
+                suite.key_exchange,
+                crate::tlcp::cipher_suite::KeyExchangeMode::Ibsdh
+            ),
         )?;
         server_hs.transcript.extend_from_slice(&cke_payload);
+        // R-4.2: deferred SKE emit for SM9 IBSDH suites. If step 5 set
+        // `pending_ibsdh_ske = true`, the server now runs
+        // `responder_process` to compute `R_B + S_B + SK_B` from the
+        // client's R_A (read in CKE), emits the SKE-IBSDH record
+        // carrying `(ra, rb, sb)`, appends the SKE bytes to the
+        // transcript, and stashes SK_B for step 8.
+        #[cfg(not(feature = "tlcp-gmssl-compat"))]
+        if server_hs.pending_ibsdh_ske
+            && matches!(
+                suite.key_exchange,
+                crate::tlcp::cipher_suite::KeyExchangeMode::Ibsdh
+            )
+        {
+            let ra_bytes = cke.as_ibsdh_ra().ok_or_else(|| {
+                TlcpError::HandshakeFailed(
+                    "SM9 IBSDH server: client CKE not in IBSDH R_A format".to_string(),
+                )
+            })?;
+            let sm9_enc_master = self.sm9_enc_master.as_ref().ok_or_else(|| {
+                TlcpError::HandshakeFailed(
+                    "SM9 IBSDH suite negotiated but TlcpAcceptor::with_sm9_certs(...) was not called"
+                        .to_string(),
+                )
+            })?;
+            let server_id = self.sm9_server_id.as_ref().ok_or_else(|| {
+                TlcpError::HandshakeFailed(
+                    "SM9 IBSDH suite negotiated but sm9_server_id is missing".to_string(),
+                )
+            })?;
+            // Parse the client's R_A into a G1Point.
+            let ra_g1 = crate::tlcp::sm9_helpers::g1_point_from_uncompressed(ra_bytes)?;
+            // Extract the server's encryption user key (hid=0x03).
+            let de_b = sm9_enc_master
+                .extract_key_exchange(server_id)
+                .map_err(|e| {
+                    TlcpError::HandshakeFailed(format!("SM9 IBSDH de_b extract: {}", e))
+                })?;
+            // Run the responder half of the SM9 KEX (with confirmation
+            // so the client verifies S_B).
+            let resp = gm_sm9_rs::key_exchange::responder_process(
+                // id_a (client) and id_b (server) — v1 shortcut: client
+                // uses the same identity as the server (documented
+                // compromise; see R-4.2 plan §2).
+                server_id,
+                server_id,
+                &de_b.ppube,
+                &de_b,
+                &ra_g1,
+                48,
+                true,
+                &mut rand::rng(),
+            )
+            .map_err(|e| TlcpError::HandshakeFailed(format!("SM9 IBSDH responder: {}", e)))?;
+            // Serialize (ra, rb, sb) on the wire.
+            let ra_wire = ra_bytes.to_vec();
+            let rb_wire = crate::tlcp::sm9_helpers::g1_point_to_uncompressed(&resp.r_b)?;
+            let sb_wire = resp
+                .s_b
+                .as_ref()
+                .ok_or_else(|| {
+                    TlcpError::HandshakeFailed(
+                        "SM9 IBSDH responder_process returned None S_B despite \
+                         need_confirm=true"
+                            .to_string(),
+                    )
+                })?
+                .clone();
+            let ske = TlcpServerKeyExchange::new_ibsdh(ra_wire, rb_wire, sb_wire);
+            let ske_bytes = ske.to_bytes();
+            write_handshake_record(&mut io, &ske_bytes)
+                .await
+                .map_err(|e| {
+                    TlcpError::HandshakeFailed(format!(
+                        "write ServerKeyExchange (IBSDH deferred): {}",
+                        e
+                    ))
+                })?;
+            server_hs.transcript.extend_from_slice(&ske_bytes);
+            // Stash SK_B for step 8 PMS compute.
+            server_hs.sk_b = Some(resp.shared_key);
+            server_hs.pending_ibsdh_ske = false;
+        }
         // Step 8: Compute pre-master secret.
         //
         // Spec-default: use the SM2 Key Agreement Protocol from
@@ -2906,8 +3235,23 @@ impl TlcpAcceptor {
                 )));
             }
             pms_plaintext
+        } else if matches!(
+            suite.key_exchange,
+            crate::tlcp::cipher_suite::KeyExchangeMode::Ibsdh
+        ) {
+            // SM9 IBSDH (R-4.2): PMS = SK_B from responder_process,
+            // stashed in `server_hs.sk_b` by the deferred SKE emit
+            // handler in step 7.5. The deferred emit must have run
+            // (otherwise `sk_b` is None); a missing value indicates
+            // an internal state-machine bug.
+            server_hs.sk_b.take().ok_or_else(|| {
+                TlcpError::HandshakeFailed(
+                    "SM9 IBSDH server PMS: server_hs.sk_b missing -- \
+                     deferred SKE emit did not run (internal state-machine bug)"
+                        .to_string(),
+                )
+            })?
         } else {
-            // Existing ECDHE / static-ECC path.
             match server_ephemeral_kp_opt {
                 Some(kp) => {
                     // The peer's ECDHE public key is wrapped in an
@@ -3736,9 +4080,9 @@ mod tests {
     #[test]
     fn test_cipher_suite_all() {
         let all = TlcpCipherSuite::all();
-        // 4 SM2-based (ECDHE/ECC x GCM/CBC) + 2 SM9-IBC (GCM/CBC).
-        // SM9-IBSDH pending R-4.1; RSA pending R-5.
-        assert_eq!(all.len(), 6);
+        // 4 SM2-based (ECDHE/ECC x GCM/CBC) + 2 SM9-IBC (GCM/CBC)
+        // + 2 SM9-IBSDH (GCM/CBC, R-4.2). RSA pending R-5.
+        assert_eq!(all.len(), 8);
     }
     #[test]
     fn test_handshake_type_conversion() {
@@ -4447,7 +4791,7 @@ mod tests {
         // Handshake body length is 24-bit, spanning bytes 1..=3.
         let body_len = ((bytes[1] as usize) << 16) | ((bytes[2] as usize) << 8) | bytes[3] as usize;
         let parsed =
-            TlcpClientKeyExchange::from_body(&bytes[4..4 + body_len], false, false).unwrap();
+            TlcpClientKeyExchange::from_body(&bytes[4..4 + body_len], false, false, false).unwrap();
         // The wire payload is the ECParameters-wrapped blob
         // (`[curve_type][named_curve][pub_len][pub]`). The raw public
         // key is recoverable via `ecdhe_public_key()`.
@@ -4468,7 +4812,7 @@ mod tests {
         assert_eq!(bytes[0], HandshakeType::ClientKeyExchange as u8);
         let body_len = ((bytes[1] as usize) << 16) | ((bytes[2] as usize) << 8) | bytes[3] as usize;
         let parsed =
-            TlcpClientKeyExchange::from_body(&bytes[4..4 + body_len], true, false).unwrap();
+            TlcpClientKeyExchange::from_body(&bytes[4..4 + body_len], true, false, false).unwrap();
         assert_eq!(
             parsed.as_ecc_ciphertext().expect("Ecc variant"),
             encrypted_pms.as_slice()
@@ -4821,8 +5165,8 @@ mod tests {
         let ciphertext: Vec<u8> = vec![0xCC; 320]; // fake SM9 ciphertext
         let cke = TlcpClientKeyExchange::new_ibc(ciphertext.clone());
         let bytes = cke.to_bytes();
-        let parsed =
-            TlcpClientKeyExchange::from_body(&bytes[4..], false, true).expect("IBC CKE parse");
+        let parsed = TlcpClientKeyExchange::from_body(&bytes[4..], false, true, false)
+            .expect("IBC CKE parse");
         let ct = parsed.as_ibc_ciphertext().expect("IBC variant");
         assert_eq!(ct, ciphertext.as_slice());
     }

@@ -270,3 +270,138 @@ async fn run_sm9_ibc_loopback(suite: [u8; 2]) {
         "client received wrong bytes — IBC PMS derivation diverged"
     );
 }
+
+// ============================================================================
+// SM9 IBSDH loopback regression tests (R-4.2, gm-tlcp 0.5.3)
+// ============================================================================
+//
+// These are the regression gate for the SM9 IBSDH wire-protocol path
+// (audit C-5 IBSDH half). They wire `TlcpAcceptor` + `TlcpConnector`
+// through `tokio::io::duplex`, complete a full SM9 IBSDH handshake
+// (E055 or E015), and exchange a single app-data record round-trip
+// to prove the record layer also works post-handshake.
+//
+// Pre-flight: the server must complete step 5 + step 8 with an
+// identical SM9 IBSDH PMS as the client. This exercises:
+//   - the deferred SKE emit pattern (server reads R_A in CKE before
+//     emitting its SKE-IBSDH with (ra, rb, sb))
+//   - the client's `initiator_finish` S_B verification
+//   - the master_secret derivation round-trip
+//
+// These tests do NOT require the `gmssl` CLI. The SM2 dual-certs are
+// dummy DER blobs (the IBSDH path doesn't consume them) and the SM9
+// keys are generated locally via `KgcMasterKey::generate()`.
+//
+// Note: this v1 implementation uses the documented `client_id =
+// server_id` shortcut (single SM9 identity). See CHANGELOG [0.5.3]
+// and R-4.2 plan §2 for the tradeoffs.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gm_tlcp_sm9_ibsdh_loopback_with_real_keys_gcm() {
+    run_sm9_ibsdh_loopback([0xE0, 0x55]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gm_tlcp_sm9_ibsdh_loopback_with_real_keys_cbc() {
+    run_sm9_ibsdh_loopback([0xE0, 0x15]).await;
+}
+
+async fn run_sm9_ibsdh_loopback(suite: [u8; 2]) {
+    use gm_tlcp::tlcp::*;
+
+    // 1. SM9 KGC + identity.
+    let kgc = gm_sm9_rs::key::KgcMasterKey::generate().expect("kgc master");
+    let ppube = kgc.enc_master().ppube;
+    let ppubs = kgc.sign_master().ppubs;
+    let server_id = b"sm9-ibsdh-server@tlcp.local".to_vec();
+
+    // 2. SM2 dual-cert keypairs for the acceptor's cert pair. The IBSDH
+    //    path does not consume these (no SM2 PKE / no SM2 sig), but
+    //    `accept_with_certs` requires them to be configured.
+    let sign_kp = gm_crypto::sm2::Sm2KeyPair::generate().expect("sign kp");
+    let enc_kp = gm_crypto::sm2::Sm2KeyPair::generate().expect("enc kp");
+
+    // 3. Configure both sides.
+    //
+    // SM9 IBSDH requires both parties to derive their user keys from the
+    // SAME KGC master — otherwise de_a and de_b produce different
+    // shared secrets and the key confirmation S_B mismatches. The
+    // acceptor takes ownership of the kgc in `with_sm9_certs`, so we
+    // pre-extract the client's `de_a` from the SAME kgc before
+    // handing the kgc to the acceptor.
+    let de_a = kgc
+        .enc_master()
+        .extract_key_exchange(&server_id)
+        .expect("de_a extract from shared kgc");
+
+    let acceptor = TlcpAcceptor::new()
+        .with_dual_certs(
+            vec![0x01; 100], // dummy sign cert DER
+            vec![0x02; 100], // dummy enc cert DER
+            sign_kp,
+            enc_kp,
+        )
+        .with_sm9_certs(kgc, server_id.clone());
+
+    // v1 shortcut: client_id = server_id (single SM9 identity).
+    let connector = TlcpConnector::new()
+        .with_cipher_suites(vec![suite])
+        .with_sm9_certs(ppube, ppubs, server_id.clone())
+        .with_sm9_client_exchange_key(de_a, server_id);
+
+    // 4. tokio::io::duplex transport.
+    let (client_io, server_io) = tokio::io::duplex(16384);
+
+    // 5. Spawn server.
+    let server_handle = tokio::spawn(async move {
+        acceptor
+            .accept_with_certs(server_io)
+            .await
+            .expect("server: SM9 IBSDH handshake must succeed in 0.5.3")
+    });
+
+    // 6. Spawn client.
+    let client_handle = tokio::spawn(async move {
+        connector
+            .connect_with_certs(client_io)
+            .await
+            .expect("client: SM9 IBSDH handshake must succeed in 0.5.3")
+    });
+
+    // 7. Wait for handshake to complete. SM9 pairing is expensive, so
+    //    we use a 10s timeout (vs. the 5s for IBC suites).
+    let mut server_stream = tokio::time::timeout(std::time::Duration::from_secs(10), server_handle)
+        .await
+        .expect("server task timed out (>10s)")
+        .expect("server task panicked");
+
+    let mut client_stream = tokio::time::timeout(std::time::Duration::from_secs(10), client_handle)
+        .await
+        .expect("client task timed out (>10s)")
+        .expect("client task panicked");
+
+    // 8. Exchange a single app-data record to prove the record layer
+    //    works post-handshake (proves master_secret derivation was
+    //    correct on both sides).
+    let msg: &[u8] = b"hello-ibsdh";
+    client_stream.write_all(msg).await.expect("client write");
+    client_stream.flush().await.expect("client flush");
+
+    let mut buf = vec![0u8; 256];
+    let n = server_stream.read(&mut buf).await.expect("server read");
+    assert_eq!(
+        &buf[..n],
+        msg,
+        "server received wrong bytes -- IBSDH PMS derivation diverged"
+    );
+
+    // Server -> Client round-trip.
+    server_stream.write_all(msg).await.expect("server write");
+    server_stream.flush().await.expect("server flush");
+    let n = client_stream.read(&mut buf).await.expect("client read");
+    assert_eq!(
+        &buf[..n],
+        msg,
+        "client received wrong bytes -- IBSDH PMS derivation diverged"
+    );
+}
