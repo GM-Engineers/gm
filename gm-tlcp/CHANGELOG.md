@@ -68,7 +68,7 @@ Both tests run unconditionally (no `gmssl` CLI dependency). Both confirm:
 - `cargo +stable test -p gm-tlcp --features tlcp-gmssl-compat --lib --no-fail-fast` clean (111 lib tests; the 2 IBSDH ecdhe tests are excluded in gmssl-compat mode where IBSDH is not supported)
 - `cargo +stable test -p gm-tlcp --features tlcp-strict --lib --no-fail-fast` clean (113 lib tests)
 - `cargo +stable test -p gm-tlcp --tests --no-fail-fast` clean (113 lib + 9 loopback + 4 gmssl_interop + 32 integration; +2 loopback vs. 0.5.2)
-- `cargo +stable publish -p gm-tlcp --dry-run --registry crates-io --allow-dirty` clean (45 files, 608.6 KiB; was 44 files, ~564 KiB pre-R-4.2)
+- `cargo +stable publish -p gm-tlcp --dry-run --registry crates-io --allow-dirty` clean (45 files, 608.6 KiB unpacked / 153 KiB compressed; was 44 files, ~564 KiB pre-R-4.2)
 - Both new SM9 IBSDH loopback tests pass end-to-end with `tokio::io::duplex`, proving the full 2-round KEX handshake works and the record layer derives the same key material on both sides.
 
 ### Lessons learned
