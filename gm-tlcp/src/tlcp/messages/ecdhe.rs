@@ -30,12 +30,21 @@
 //!   pattern; the server needs the client's R_A before it can compute
 //!   R_B + S_B + SK_B).
 //!
-//! The 4-byte handshake header is identical in all four cases
+//! - **Ecc { signature }** (re-used) for the 4 RSA suites
+//!   (E019/E01C/E059/E05A, R-5): same wire shape as the static-ECC
+//!   sig-only body (`uint16 sig_len || sig`); `signature` is a
+//!   raw RSA-PKCS1-v1_5 signature over `cr || sr || enc_cert_header ||
+//!   enc_cert` using SM3 as the hash. The signature is **raw bytes**
+//!   (length = RSA modulus size, e.g. 256 for RSA-2048), NOT DER —
+//!   TLCP's RSA-SKE does not wrap the signature in an ASN.1 envelope.
+//!
+//! The 4-byte handshake header is identical in all variants
 //! (`[type=0x0C | length(3)])`).
 
 use crate::error::TlcpError;
 use crate::tlcp::HandshakeType;
 use crate::tlcp::constants::TLCP_ECH_PARAMS_PREFIX;
+use crate::tlcp::rsa_helpers::RsaSigner;
 use gm_crypto::sm2::{Sm2EcdhKeypair, Sm2Signer, Sm2Verifier};
 
 /// SM2 ECDHE parameters for TLCP key exchange
@@ -399,6 +408,52 @@ impl TlcpServerKeyExchange {
             .map_err(|_| TlcpError::HandshakeFailed("ECC SKE raw sig not 64 bytes".to_string()))?;
         let signature = gm_crypto::sm2::sm2_signature_raw_to_der(&raw_arr);
 
+        Ok(Self {
+            body: ServerKeyExchangeBody::Ecc { signature },
+        })
+    }
+
+    /// Create an RSA ServerKeyExchange by signing the
+    /// `client_random || server_random || 3-byte-big-endian enc_cert_len || enc_cert_der`
+    /// digest with the server's RSA private key
+    /// (R-5 / gm-tlcp 0.6.0, suites E019/E01C/E059/E05A).
+    ///
+    /// Wire layout: identical to the static-ECC `Ecc { signature }`
+    /// body (RFC 5246 §7.4.3 interpretation B:
+    /// `uint16 sig_len || sig`). The signature is
+    /// `RSAES-PKCS1-v1_5(SM3(to_sign))` per RFC 8017 §9.2, with the
+    /// SM3 DigestInfo prefix encoded inline by `rsa_helpers`.
+    ///
+    /// The signature bytes are **raw** (length = RSA modulus size,
+    /// e.g. 256 for RSA-2048), NOT DER. TLCP/GB/T 38636-2020
+    /// §6.4.5.4 does not wrap the RSA-SKE signature in an ASN.1
+    /// envelope (this matches openHiTLS / Tongsuo master).
+    pub fn generate_rsa(
+        client_random: &[u8; 32],
+        server_random: &[u8; 32],
+        rsa_cert_der: &[u8],
+        rsa_signer: &RsaSigner,
+    ) -> Result<Self, TlcpError> {
+        if rsa_cert_der.len() > 0xFFFFFF {
+            return Err(TlcpError::HandshakeFailed(format!(
+                "rsa_cert_der too long for RSA SKE: {} bytes (max 16777215)",
+                rsa_cert_der.len()
+            )));
+        }
+        // Sign over `cr || sr || enc_cert_header || enc_cert`
+        //   where enc_cert_header = 3-byte big-endian len(enc_cert_der)
+        // Same as `generate_ecc` but with RSA-PKCS1-v1_5 instead of SM2.
+        let mut to_sign = Vec::with_capacity(32 + 32 + 3 + rsa_cert_der.len());
+        to_sign.extend_from_slice(client_random);
+        to_sign.extend_from_slice(server_random);
+        let cert_len = rsa_cert_der.len() as u32;
+        to_sign.push((cert_len >> 16) as u8);
+        to_sign.push((cert_len >> 8) as u8);
+        to_sign.push(cert_len as u8);
+        to_sign.extend_from_slice(rsa_cert_der);
+        let signature = rsa_signer
+            .sign(&to_sign)
+            .map_err(|e| TlcpError::HandshakeFailed(format!("RSA SKE sign: {}", e)))?;
         Ok(Self {
             body: ServerKeyExchangeBody::Ecc { signature },
         })

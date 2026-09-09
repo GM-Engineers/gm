@@ -29,10 +29,10 @@ TLCP（Transport Layer Cryptographic Protocol，传输层密码协议）是 GB/T
 | `0xE017` | `TLS_IBC_SM4_CBC_SM3` | ⚠️ 0.5.1 broken / ✅ 0.5.2 fixed (R-4.1 / R-4.1-hotfix)：SM9 IBC + SM4-CBC + HMAC-SM3 |
 | `0xE055` | `TLS_IBSDH_SM4_GCM_SM3` | ✅ 0.5.3 (R-4.2)：SM9 IBSDH 2-round KEX + SM4-GCM + SM3 |
 | `0xE015` | `TLS_IBSDH_SM4_CBC_SM3` | ✅ 0.5.3 (R-4.2)：SM9 IBSDH 2-round KEX + SM4-CBC + HMAC-SM3 |
-| `0xE059` | `TLS_RSA_SM4_GCM_SM3` | ⏳ R-5 / 0.6.0 |
-| `0xE019` | `TLS_RSA_SM4_CBC_SM3` | ⏳ R-5 / 0.6.0 |
-| `0xE05A` | `TLS_RSA_SM4_GCM_SHA256` | ⏳ R-5 / 0.6.0 |
-| `0xE01C` | `TLS_RSA_SM4_CBC_SHA256` | ⏳ R-5 / 0.6.0 |
+| `0xE059` | `TLS_RSA_SM4_GCM_SM3` | ✅ 0.6.0 (R-5)：RSA + SM4-GCM + SM3 |
+| `0xE019` | `TLS_RSA_SM4_CBC_SM3` | ✅ 0.6.0 (R-5)：RSA + SM4-CBC + HMAC-SM3 |
+| `0xE05A` | `TLS_RSA_SM4_GCM_SHA256` | ✅ 0.6.0 (R-5)：RSA + SM4-GCM + SHA-256（PRF 仍走 SM3，详见 CHANGELOG 已知限制） |
+| `0xE01C` | `TLS_RSA_SM4_CBC_SHA256` | ✅ 0.6.0 (R-5)：RSA + SM4-CBC + SHA-256（PRF 仍走 SM3，详见 CHANGELOG 已知限制） |
 
 ## 实现状态
 
@@ -43,14 +43,15 @@ TLCP（Transport Layer Cryptographic Protocol，传输层密码协议）是 GB/T
 - ✅ Session resumption via session IDs (`TlcpSessionCache`)
 - ✅ Alert 协议（`TlcpAlert` / `TlcpAlertDescription`）
 - ✅ 全部 4 个密码套件
-- ✅ 113 lib tests + 9 loopback tests（`tests/gm_tlcp_loopback.rs`，包含 `gm_tlcp_kap_pms_roundtrip_with_real_keys` + 2 个 SM9 IBC + 2 个新增的 `gm_tlcp_sm9_ibsdh_loopback_with_real_keys_{gcm,cbc}`） + 32 integration tests (`tests/integration_tlcp.rs`) + 4 default gmssl interop tests (7 more `#[ignore]`d, run with `--ignored` when `gmssl` is on `PATH`)
+- ✅ 119 lib tests (R-5 +6：rsa_helpers 单元测试) + 11 loopback tests（R-5 +2：2 个 `gm_tlcp_rsa_loopback_with_real_keys_{gcm,cbc}`） + 32 integration tests (`tests/integration_tlcp.rs`) + 4 default gmssl interop tests (7 more `#[ignore]`d, run with `--ignored` when `gmssl` is on `PATH`)
 - ✅ GmSSL 3.3.0-dev (`master`) handshake + APP_DATA byte-for-byte 互操作验证（需 `tlcp-gmssl-compat`）
 - ✅ openHiTLS `s_server -tlcp` 互操作验证：ECDHE（默认模式）+ static-ECC SKE + static-ECC PMS decrypt（默认模式，server 侧 R-3 已实现）
 - ✅ R-4 / gm-tlcp 0.5.0: SM9 IBC 静态套件 (E057/E017) cipher_suite registry 已声明，SKE/CKE wire format 完整实现 + 单元测试覆盖。
 - ✅ R-4.1 / gm-tlcp 0.5.2: SM9 IBC 握手 step 5 (server SKE 用 SM9 IBC 签名) + step 7.5 (client CKE 用 SM9 PKE 加密 PMS) + step 8 (server SM9 decrypt 恢复 PMS) 全部接通。`TlcpAcceptor::with_sm9_certs(...)` / `TlcpConnector::with_sm9_certs(...)` 为新增构造器。2 个 loopback 回归门禁（`gm_tlcp_sm9_ibc_loopback_with_real_keys_{gcm,cbc}`）在 `tests/gm_tlcp_loopback.rs` 。C-5 IBC half 已 RESOLVED。
 - ⚠️ R-4.1 (0.5.1)发布 版本: SM9 IBC wire path 实际上坏（server 早返 + ServerHello parse 白名单漏 IBC + server 对 IBC 发 CR）—— 请跳过 0.5.1 使用 0.5.2。ECDHE/ECC 路径不受影响。
 - ✅ R-4.2 / gm-tlcp 0.5.3: SM9 IBSDH ephemeral 套件 (E055/E015) — 2 轮 initiator/responder 握手。2 个 loopback 回归门禁新增（`gm_tlcp_sm9_ibsdh_loopback_with_real_keys_{gcm,cbc}`）。C-5 IBSDH half 已 RESOLVED。Known limitation: v1 使用 `client_id = server_id` 简捷做法（同身份部署）；后续 PR 可扩展 `with_sm9_certs_client_id(...)` 支持非对称身份。
-- ⏳ R-5 / gm-tlcp 0.6.0: RSA 套件 (E019/E01C/E059/E05A) — RustCrypto `rsa` crate 直集成（RSA 不属于国密，故不放在 gm-crypto）。
+- ✅ R-5 / gm-tlcp 0.6.0: RSA 套件 (E019/E01C/E059/E05A) — RustCrypto `rsa = 0.9` 直集成（RSA 不属于国密，故不放在 gm-crypto）。`TlcpAcceptor::with_rsa_certs(rsa_keypair, rsa_cert_der)` + `TlcpConnector::with_rsa_certs(server_rsa_pub)` 为新增构造器。2 个 loopback 回归门禁新增（`gm_tlcp_rsa_loopback_with_real_keys_{gcm,cbc}`）。C-5 RSA half 已 RESOLVED；C-5 整体在 0.6.0 完整 RESOLVED（4 SM2 + 4 SM9 + 4 RSA = 全部 12 套）。
+- ⚠️ R-5 已知限制：(a) 两个 `_SHA256` 套件 (E01C/E05A) 的 PRF 仍走 SM3（spec 模糊，与 GmSSL + openHiTLS 一致）；(b) `TlcpCertPair` 仍发双证书 layout（把同一 RSA cert 在 sign + enc 两个 slot 都填一遍），openHiTLS / Tongsuo 的单证书 layout 互操作需要后续 PR 扩展 `TlcpCertPair` 支持 1-cert mode。
 - ❌ Tongsuo 8.3.0 round-trip — Tongsuo-side NTLS state-machine 拒绝 `0x0101`， 调查见 `interop/tongsuo/upstream/`
 
 ## 特性开关 (Feature flags)

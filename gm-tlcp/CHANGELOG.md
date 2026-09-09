@@ -7,6 +7,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-09
+
+### Added — RSA suites wire path (R-5)
+
+`gm-tlcp 0.5.3` closed both halves of audit **C-5** on the SM9 side. The **RSA half** (suites `E019` `E01C` `E059` `E05A`) remained pending — `accept_with_certs` and `connect_with_certs` returned explicit "pending R-5" errors when an RSA suite was negotiated, and `TlcpServerHello::from_bytes` rejected RSA suites as "not a known TLCP suite". This release closes that last gap and ships the first end-to-end RSA support in `gm-tlcp`.
+
+**What's new** — 4 cipher suites added to `TlcpCipherSuite::all()`:
+
+| Suite ID | Name | Wire |
+|---|---|---|
+| `0xE0, 0x19` | `RSA_SM4_CBC_SM3` (E019) | SM4-CBC record + SM3 PRF + RSA-PKCS1-v1_5 static-KEM |
+| `0xE0, 0x1C` | `RSA_SM4_CBC_SHA256` (E01C) | SM4-CBC record + SM3 PRF + RSA-PKCS1-v1_5 static-KEM |
+| `0xE0, 0x59` | `RSA_SM4_GCM_SM3` (E059) | SM4-GCM record + SM3 PRF + RSA-PKCS1-v1_5 static-KEM |
+| `0xE0, 0x5A` | `RSA_SM4_GCM_SHA256` (E05A) | SM4-GCM record + SM3 PRF + RSA-PKCS1-v1_5 static-KEM |
+
+**Wire-format additions** (3 enum-variant extensions + 1 new module):
+
+| # | Extension | File | Wire format |
+|---|---|---|---|
+| 1 | `ServerKeyExchangeBody::Ecc { signature }` (re-used) | `src/tlcp/messages/ecdhe.rs` | `uint16 sig_len \|\| sig` (raw RSA signature, length = RSA modulus size, e.g. 256 for RSA-2048) |
+| 2 | `ClientKeyExchangeBody::Rsa { ciphertext }` | `src/tlcp/messages/client_key_exchange.rs` | raw RSAES-PKCS1-v1_5 ciphertext (length = RSA modulus size) |
+| 3 | `TlcpCipherSuite::RSA_SM4_*` (4 suites) | `src/tlcp/cipher_suite.rs` | Suite IDs above |
+| 4 | `pub mod rsa_helpers` | `src/tlcp/rsa_helpers.rs` | Thin wrappers over RustCrypto `rsa = 0.9` for SM3-DigestInfo + RSAES-PKCS1-v1_5 (see below) |
+
+**State-machine wiring** (re-uses the static-ECC wire body shape):
+
+- **Step 5 (server SKE emit)**: server emits `Ecc { signature }` body where `signature = RSA-PKCS1-v1_5(SM3(cr || sr || 3-byte-BE enc_cert_len || enc_cert_der))` per RFC 8017 §9.2 with the SM3 DigestInfo prefix encoded inline by `rsa_helpers::sm3_pkcs1_v15_encoding`. The signature bytes are **raw**, NOT DER (TLCP RSA-SKE does not wrap the signature in an ASN.1 envelope).
+- **Step 8 (server PMS decrypt)**: server recovers the 48-byte PMS via `RSAES-PKCS1-v1_5` envelope decrypt (RFC 8017 §7.2) of the client's `RSAEncryptedPreMasterSecret`. Plaintext layout is `ProtocolVersion (2B) || random (46B)` (matches static-ECC; spec is silent on the leading version field, master-secret derivation downstream catches any mismatch).
+- **Step 5 (client SKE verify)**: client re-builds the same signature input `cr || sr || 3-byte-BE enc_cert_len || enc_cert_der` and verifies via `RsaVerifier::verify(&input, &sig)`. Uses `rsa_server_pub` configured via `TlcpConnector::with_rsa_certs(...)`.
+- **Step 7.5 (client CKE emit)**: client generates a 48-byte PMS (`TLCP_VERSION_1_0 || 46 random bytes` per GB/T 38636-2020 §6.4.1.6), RSAES-PKCS1-v1_5-encrypts it under the server's RSA public key, emits it as the CKE body.
+
+**New builder methods**:
+
+- `TlcpAcceptor::with_rsa_certs(rsa_keypair, rsa_cert_der)` — configures the server's RSA keypair (PKCS#8 PEM or DER) and a single X.509 RSA certificate. Unlike the SM2 dual-cert model, RSA suites use one certificate (the same RSA keypair handles both SKE signing and CKE decryption).
+- `TlcpConnector::with_rsa_certs(server_rsa_pub)` — configures the client's view of the server's RSA public key. Also appends the 4 RSA suites to the connector's preference list.
+
+**New dependency**: `rsa = "0.9"` from RustCrypto (with `default-features = false, features = ["std", "pem"]`). RSA is NOT a 国密 algorithm so per the 2026-09-08 user directive we pull RustCrypto's `rsa` crate directly into `gm-tlcp`. This is the only KEX branch that touches a non-国密 crypto primitive. Additional transitives: `sha2 = "0.10"`, `signature = "2"`, `sm3 = "0.5"`, `digest = "0.10"`.
+
+**New module**: `pub mod rsa_helpers` (newtypes around RustCrypto's `rsa = 0.9`):
+
+- `RsaKeyPair` — server-side RSA private key (loadable from PKCS#8 PEM/DER or generated via `generate(bit_size)`).
+- `RsaPubKey` — RSA public key (loadable from public-key PEM/DER or built from `(n, e)` components).
+- `RsaSigner` — server-side `RSAES-PKCS1-v1_5` signer for the SKE body (uses SM3 digest, RFC 8017 §9.2 with manual SM3 DigestInfo prefix encoding).
+- `RsaVerifier` — client-side signature verifier (mirrors `RsaSigner`).
+- `RsaEncryptor` — client-side `RSAES-PKCS1-v1_5` envelope encryptor for the CKE body (RFC 8017 §7.2).
+- `RsaDecryptor` — server-side envelope decryptor for the CKE body.
+
+**Implementation strategy** (avoids `digest 0.10/0.11` version conflict):
+
+`sm3 0.5` re-exports `digest 0.10` while `rsa 0.9` re-exports `digest 0.11`. Bridging the two via the `signature::Digest` trait fails to compile. We sidestep this by using rsa 0.9's **low-level API** (`RsaPrivateKey::sign(SignatureScheme, &hashed_digest)` + `RsaPublicKey::verify(SignatureScheme, &hashed, &sig)`), prepending the SM3 PKCS#1 v1.5 DigestInfo prefix (19-byte ASN.1 SEQUENCE for SM3 OID 1.3.6.1.4.1.20145.2.7) by hand. The Pkcs1v15Sign scheme is reused for both sign AND verify (rsa 0.9 has no separate Verify struct; Pkcs1v15Sign implements `Signature` trait).
+
+### C-5 status — FULLY RESOLVED
+
+Audit **C-5** is now **fully resolved** across all 3 KEX families:
+
+- **IBC half** (E057 / E017) — resolved in `gm-tlcp 0.5.2` (R-4.1-hotfix).
+- **IBSDH half** (E055 / E015) — resolved in `gm-tlcp 0.5.3` (R-4.2).
+- **RSA half** (E019 / E01C / E059 / E05A) — resolved in `gm-tlcp 0.6.0` (this release, R-5).
+
+All 12 cipher suites defined in GB/T 38636-2020 §6.4.5.2.1 表 2 are now wired end-to-end.
+
+### Known limitations
+
+- **SHA-256 PRF for the two `_SHA256` suites (E01C/E05A)**: TLCP/GB/T 38636-2020 §6.3 leaves PRF selection per-suite (SM3 for SM3-based suites, possibly SHA-256 for SHA-256-based). We treat all 12 suites as SM3-PRF for 0.6.0 to match the GmSSL master + openHiTLS convention. If a peer requires SHA-256 PRF, a follow-up PR can add a per-suite PRF selector (the digest infrastructure is already in place via the `sha2 = "0.10"` dep).
+- **openHiTLS / Tongsuo interop**: these implementations use a single-Certificate message for RSA suites (not dual). gm-tlcp's `TlcpCertPair::to_certificate_message` emits a dual-Certificate layout (sign + enc); for 0.6.0 we send the same RSA cert in both slots to keep the change minimal (see R-5 plan §2 out-of-scope). Strict-spec peers expecting a single cert may reject this; a follow-up PR can extend `TlcpCertPair` to support 1-cert mode.
+- **Gmssl-master interop**: GmSSL master 2026-06+ does not implement RSA-SKE under the TLCP record-layer version 0x0101. Loopback is the only available interop signal for RSA suites.
+
+### Regression gates added (`tests/gm_tlcp_loopback.rs`)
+
+- `gm_tlcp_rsa_loopback_with_real_keys_gcm` — full handshake for E059 (`RSA_SM4_GCM_SM3`) via `tokio::io::duplex`, including app-data round-trip to prove record layer derives identical key material on both sides.
+- `gm_tlcp_rsa_loopback_with_real_keys_cbc` — same for E019 (`RSA_SM4_CBC_SM3`).
+
+Both tests run unconditionally (no `gmssl` CLI dependency). Both confirm:
+- The server's `RSAES-PKCS1-v1_5(SM3(cr || sr || 3-byte-BE enc_cert_len || enc_cert))` SKE signature verifies the client's reconstruction via `RsaVerifier::verify`.
+- The client's `RSAES-PKCS1-v1_5` envelope encrypts the same 48-byte PMS the server decrypts (modulus size = 256 bytes for RSA-2048).
+- The master_secret derivation round-trips (post-handshake app-data exchange succeeds).
+
+### Library API additions
+
+```rust
+// Server-side: configure RSA keypair + cert (single cert, unlike SM2 dual).
+let acceptor = TlcpAcceptor::new()
+    .with_rsa_certs(rsa_keypair, rsa_cert_der);
+
+// Client-side: configure the server's RSA public key.
+let connector = TlcpConnector::new()
+    .with_rsa_certs(server_rsa_pub);
+```
+
+### Verification (R-5 §6)
+
+- `cargo build --tests` — passes (1 minor unused-imports warning remains in `rsa_helpers.rs`; suppressed via `#[allow(unused_imports)]`).
+- `cargo test --lib` — 119 passed; 0 failed (was 113 → +6 RSA helper unit tests).
+- `cargo test --test gm_tlcp_loopback` — 11 passed; 0 failed (was 9 → +2 RSA loopback tests).
+- `cargo test --test integration_tlcp` — 32 passed; 0 failed (unchanged).
+
 ## [0.5.3] - 2026-09-09
 
 ### Added — SM9 IBSDH handshake wire path (R-4.2)

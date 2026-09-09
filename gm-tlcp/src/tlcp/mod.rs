@@ -202,6 +202,11 @@ mod messages;
 pub mod pms;
 mod sm9_helpers;
 pub use pms::*;
+// R-5: RSA helpers (RSA-PKCS1-v1_5 sign/verify + RSAES-PKCS1-v1_5
+// encrypt/decrypt). Exposed as a public module so integration tests
+// (and downstream crates building on gm-tlcp's RSA suites) can
+// construct RSA keypairs + verifiers directly.
+pub mod rsa_helpers;
 mod session;
 pub use alert::*;
 pub use cipher_suite::*;
@@ -1363,6 +1368,12 @@ pub struct TlcpConnector {
     /// deployment); can be overridden via `with_sm9_client_exchange_key`.
     #[cfg_attr(feature = "tlcp-gmssl-compat", allow(dead_code))]
     sm9_ibsdh_client_id: Option<Vec<u8>>,
+    /// RSA server public key for the 4 RSA suites
+    /// (E019/E01C/E059/E05A, R-5 / gm-tlcp 0.6.0). The connector
+    /// uses this in step 7.5 to RSAES-PKCS1-v1_5-encrypt the 48-byte
+    /// PMS, and in step 5 to verify the server's signed SKE body.
+    /// Set via [`TlcpConnector::with_rsa_certs`].
+    rsa_server_pub: Option<crate::tlcp::rsa_helpers::RsaPubKey>,
 }
 impl Default for TlcpConnector {
     fn default() -> Self {
@@ -1386,6 +1397,10 @@ impl TlcpConnector {
                 TLS_ECC_SM4_CBC_SM3,
                 TLS_IBC_SM4_GCM_SM3,
                 TLS_IBC_SM4_CBC_SM3,
+                TLS_RSA_SM4_GCM_SM3,
+                TLS_RSA_SM4_CBC_SM3,
+                TLS_RSA_SM4_GCM_SHA256,
+                TLS_RSA_SM4_CBC_SHA256,
             ],
             #[allow(deprecated)]
             gmssl_padding_compat: false,
@@ -1398,6 +1413,7 @@ impl TlcpConnector {
             sm9_server_id: None,
             sm9_ibsdh_de_a: None,
             sm9_ibsdh_client_id: None,
+            rsa_server_pub: None,
         }
     }
     /// Create a connector with a shared session cache for resumption.
@@ -1601,6 +1617,48 @@ impl TlcpConnector {
         self
     }
 
+    /// Configure RSA server public key for the 4 RSA suites
+    /// (E019/E01C/E059/E05A, R-5 / gm-tlcp 0.6.0).
+    ///
+    /// `server_rsa_pub` is the server's RSA public key, typically
+    /// loaded from the server's RSA certificate via
+    /// [`crate::tlcp::rsa_helpers::RsaPubKey::from_public_key_pem`] or
+    /// [`crate::tlcp::rsa_helpers::RsaPubKey::from_public_key_der`].
+    /// The connector uses it to:
+    /// 1. **Step 7.5**: RSAES-PKCS1-v1_5-encrypt the 48-byte PMS to the
+    ///    server's RSA public key (RFC 8017 §7.2). The resulting
+    ///    ciphertext becomes the body of the `ClientKeyExchange`
+    ///    message.
+    /// 2. **Step 5**: Verify the server's RSA-PKCS1-v1_5-signed SKE
+    ///    body (RFC 8017 §9.2 with SM3 digest).
+    ///
+    /// Calling this also appends the 4 RSA suites to the connector's
+    /// `cipher_suites` preference list (if not already present), so
+    /// the next `connect_with_certs` call will offer them. Production
+    /// callers typically want to invoke this AND
+    /// [`TlcpConnector::with_server_sign_key`] (the latter is only
+    /// consulted for non-RSA suites; for an RSA-only deployment you
+    /// can skip it).
+    pub fn with_rsa_certs(mut self, server_rsa_pub: crate::tlcp::rsa_helpers::RsaPubKey) -> Self {
+        self.rsa_server_pub = Some(server_rsa_pub);
+        // Add RSA suites to the preference list if not already present.
+        let mut suites = self.cipher_suites;
+        if !suites.contains(&TLS_RSA_SM4_GCM_SM3) {
+            suites.push(TLS_RSA_SM4_GCM_SM3);
+        }
+        if !suites.contains(&TLS_RSA_SM4_CBC_SM3) {
+            suites.push(TLS_RSA_SM4_CBC_SM3);
+        }
+        if !suites.contains(&TLS_RSA_SM4_GCM_SHA256) {
+            suites.push(TLS_RSA_SM4_GCM_SHA256);
+        }
+        if !suites.contains(&TLS_RSA_SM4_CBC_SHA256) {
+            suites.push(TLS_RSA_SM4_CBC_SHA256);
+        }
+        self.cipher_suites = suites;
+        self
+    }
+
     pub async fn connect_with_certs<S>(&self, transport: S) -> Result<TlcpStream<S>, TlcpError>
     where
         S: AsyncRead + AsyncWrite + Unpin,
@@ -1661,9 +1719,14 @@ impl TlcpConnector {
                 server_hello.cipher_suite
             ))
         })?;
-        let is_ecc_mode = !matches!(
+        // R-5: RSA suites reuse the static-ECC `is_ecc_mode` path (same
+        // sig-only SKE wire shape, just signed with RSA-PKCS1-v1_5
+        // instead of SM2). The verifier differs (RsaVerifier vs
+        // Sm2Verifier); see step 5 dispatch below.
+        let is_ecc_mode = matches!(
             suite.key_exchange,
-            crate::tlcp::cipher_suite::KeyExchangeMode::Ecdhe
+            crate::tlcp::cipher_suite::KeyExchangeMode::Ecc
+                | crate::tlcp::cipher_suite::KeyExchangeMode::Rsa
         );
         // Spec-default (RFC 5246 §7.4.3 + GB/T 38636-2020 §6.4.5.4
         // interpretation-B): both ECDHE and static-ECC suites emit
@@ -1750,6 +1813,56 @@ impl TlcpConnector {
             verifier.verify(&to_verify, &sig).map_err(|e| {
                 TlcpError::HandshakeFailed(format!("SM9 IBC SKE signature verify: {}", e))
             })?;
+        } else if matches!(
+            suite.key_exchange,
+            crate::tlcp::cipher_suite::KeyExchangeMode::Rsa
+        ) {
+            // R-5: RSA suites (E019/E01C/E059/E05A). The SKE body
+            // has the same wire shape as static-ECC's Ecc { signature }
+            // body (interpretation B), so we re-use the parser and
+            // signature-input construction; the only difference is the
+            // verifier (RsaVerifier vs Sm2Verifier).
+            //
+            // The 48-byte PMS we encrypt in step 7.5 is also
+            // constructed independently — this verify step does NOT
+            // need the PMS — so we only need the server's RSA pubkey
+            // for verification here. The pubkey was extracted from
+            // the server cert chain when we read the Certificate
+            // message earlier in step 3.
+            let rsa_pub = self.rsa_server_pub.as_ref().ok_or_else(|| {
+                TlcpError::HandshakeFailed(
+                    "RSA suite negotiated but \
+                     TlcpConnector::with_rsa_certs(...) was not called \
+                     (need server_rsa_pub for SKE signature verify)"
+                        .to_string(),
+                )
+            })?;
+            let verifier = crate::tlcp::rsa_helpers::RsaVerifier::new(rsa_pub);
+            // The signature input is identical to static-ECC:
+            //   cr || sr || enc_cert_header || enc_cert
+            // where enc_cert_header = 3-byte big-endian len(enc_cert_der).
+            // Pull the raw signature bytes out of the SKE body and
+            // verify via the RSA verifier.
+            let ske = TlcpServerKeyExchange::from_body(
+                &ske_body,
+                crate::tlcp::cipher_suite::KeyExchangeMode::Ecc,
+            )
+            .map_err(|e| TlcpError::HandshakeFailed(format!("RSA SKE parse: {}", e)))?;
+            let sig_bytes = ske.as_ecc_signature().ok_or_else(|| {
+                TlcpError::HandshakeFailed(
+                    "RSA SKE body does not contain an Ecc-style signature".to_string(),
+                )
+            })?;
+            // RecReconstruct the signature input and verify.
+            let mut to_verify = Vec::with_capacity(32 + 32 + 3 + cert_pair.enc_cert.len());
+            to_verify.extend_from_slice(&client_random);
+            to_verify.extend_from_slice(&server_random);
+            let cert_len = cert_pair.enc_cert.len() as u32;
+            to_verify.push((cert_len >> 16) as u8);
+            to_verify.push((cert_len >> 8) as u8);
+            to_verify.push(cert_len as u8);
+            to_verify.extend_from_slice(&cert_pair.enc_cert);
+            verifier.verify(&to_verify, sig_bytes)?;
         } else if !matches!(
             suite.key_exchange,
             crate::tlcp::cipher_suite::KeyExchangeMode::Ibsdh
@@ -2068,33 +2181,61 @@ impl TlcpConnector {
             // is never consumed (derive_master_secret runs AFTER step 5).
             (cke_bytes, vec![0u8; 48])
         } else {
-            // Existing ECDHE / static-ECC path.
-            if is_ecc_mode {
-                // ECC: extract enc cert SM2 pubkey (65 bytes uncompressed point).
-                let enc_pub = crate::tlcp::crypto::verify::extract_sm2_pubkey_from_cert_der(
-                    &cert_pair.enc_cert,
-                )
-                .map_err(TlcpError::HandshakeFailed)?;
-                // Per GB/T 38636-2020 §6.4.1.6 the PreMasterSecret is 48 bytes laid
-                // out as  `ProtocolVersion (2 bytes) || random (46 bytes)`.
-                // gmSSL's `tlcp_check_pre_master_secret` enforces this format
-                // (rejects anything else with `illegal_parameter`), so we must
-                // prefix the random bytes with our negotiated TLCP version.
+            // ECDHE / static-ECC / RSA path.
+            // R-5: is_ecc_mode now also matches RSA (the SKE body
+            // shape is the same as static-ECC sig-only). We dispatch
+            // on the specific key_exchange inside this branch.
+            if matches!(
+                suite.key_exchange,
+                crate::tlcp::cipher_suite::KeyExchangeMode::Rsa
+            ) {
+                // RSA suites (E019/E01C/E059/E05A, R-5):
+                // RSAES-PKCS1-v1_5 envelope (RFC 8017 §7.2) encrypts
+                // the 48-byte PMS under the server's RSA public key.
+                let rsa_pub = self.rsa_server_pub.as_ref().ok_or_else(|| {
+                    TlcpError::HandshakeFailed(
+                        "RSA suite negotiated but \
+                         TlcpConnector::with_rsa_certs(...) was not called \
+                         (need server_rsa_pub for PMS encrypt)"
+                            .to_string(),
+                    )
+                })?;
+                // Per GB/T 38636-2020 §6.4.1.6 the PreMasterSecret is
+                // 48 bytes laid out as
+                //   `ProtocolVersion (2 bytes) || random (46 bytes)`.
                 let mut pms_bytes = [0u8; 48];
                 pms_bytes[0] = TLCP_VERSION_1_0[0];
                 pms_bytes[1] = TLCP_VERSION_1_0[1];
                 rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut pms_bytes[2..]);
                 let pms_bytes = pms_bytes.to_vec();
-                // SM2-encrypt, DER-encoded SM2Cipher (matches GmSSL convention).
+                let enc = crate::tlcp::rsa_helpers::RsaEncryptor::new(rsa_pub);
+                let ciphertext = enc
+                    .encrypt(&pms_bytes)
+                    .map_err(|e| TlcpError::HandshakeFailed(format!("RSA PMS encrypt: {}", e)))?;
+                // TLCP CKE wire format for RSA suites (matches
+                // static-ECC: [2-byte ciphertext length prefix]
+                // [ciphertext bytes]). The HS header is built below
+                // by the same code path as static-ECC.
+                let cke_msg = TlcpClientKeyExchange::new_rsa(ciphertext);
+                let msg = cke_msg.to_bytes();
+                (msg, pms_bytes)
+            } else if is_ecc_mode {
+                // static-ECC: SM2-encrypt the 48-byte PMS under the
+                // server's enc cert SM2 pubkey.
+                let enc_pub = crate::tlcp::crypto::verify::extract_sm2_pubkey_from_cert_der(
+                    &cert_pair.enc_cert,
+                )
+                .map_err(TlcpError::HandshakeFailed)?;
+                let mut pms_bytes = [0u8; 48];
+                pms_bytes[0] = TLCP_VERSION_1_0[0];
+                pms_bytes[1] = TLCP_VERSION_1_0[1];
+                rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut pms_bytes[2..]);
+                let pms_bytes = pms_bytes.to_vec();
                 let enc = gm_crypto::sm2::Sm2Encryptor::new(&enc_pub)
                     .map_err(|e| TlcpError::HandshakeFailed(format!("sm2 enc new: {}", e)))?;
                 let ciphertext = enc
                     .encrypt_der(&pms_bytes)
                     .map_err(|e| TlcpError::HandshakeFailed(format!("sm2 encrypt: {}", e)))?;
-                // TLCP CKE wire format (matches GmSSL): handshake header
-                //   [type=0x10][length:3 bytes BE]
-                // followed by handshake body
-                //   [2-byte ciphertext length prefix][ciphertext bytes].
                 let mut body = Vec::with_capacity(2 + ciphertext.len());
                 body.push((ciphertext.len() >> 8) as u8);
                 body.push(ciphertext.len() as u8);
@@ -2634,6 +2775,18 @@ pub struct TlcpAcceptor {
     /// user decryption key to this identity; the client encrypts
     /// the PMS to the same identity.
     sm9_server_id: Option<Vec<u8>>,
+    /// RSA certificate (DER-encoded X.509) for the 4 RSA suites
+    /// (E019/E01C/E059/E05A, R-5 / gm-tlcp 0.6.0). Single cert —
+    /// unlike the SM2 dual-cert (sign + enc) model, RSA suites use
+    /// one certificate that carries the static RSA encryption key.
+    rsa_cert: Option<Vec<u8>>,
+    /// RSA-PKCS1-v1_5 signer for the SKE body (R-5).
+    /// Configured via [`TlcpAcceptor::with_rsa_certs`].
+    rsa_signer: Option<Arc<crate::tlcp::rsa_helpers::RsaSigner>>,
+    /// RSAES-PKCS1-v1_5 decryptor for the CKE body (R-5).
+    /// Used in step 8 to recover the 48-byte PMS from the client's
+    /// `RSAEncryptedPreMasterSecret`.
+    rsa_decryptor: Option<Arc<crate::tlcp::rsa_helpers::RsaDecryptor>>,
 }
 impl Default for TlcpAcceptor {
     fn default() -> Self {
@@ -2655,6 +2808,9 @@ impl TlcpAcceptor {
             sm9_sign_master: None,
             sm9_enc_master: None,
             sm9_server_id: None,
+            rsa_cert: None,
+            rsa_signer: None,
+            rsa_decryptor: None,
         }
     }
     /// Create an acceptor with a shared session cache for resumption.
@@ -2710,6 +2866,44 @@ impl TlcpAcceptor {
         self.sm9_server_id = Some(server_id);
         self
     }
+
+    /// Configure RSA key material for the 4 RSA suites
+    /// (E019/E01C/E059/E05A, R-5 / gm-tlcp 0.6.0).
+    ///
+    /// Unlike the SM2 dual-cert (sign + enc) model, RSA suites use a
+    /// single RSA X.509 certificate: the same RSA keypair is used both
+    /// to sign the SKE body (via `RSAES-PKCS1-v1_5` signature with SM3
+    /// digest, RFC 8017 §9.2) and to decrypt the client's
+    /// `RSAEncryptedPreMasterSecret` (via `RSAES-PKCS1-v1_5` envelope,
+    /// RFC 8017 §7.2). The certificate therefore embeds a single
+    /// RSA public key (no separate signing vs encryption keys).
+    ///
+    /// `rsa_keypair` is the server's RSA private key (typically loaded
+    /// from a PKCS#8 PEM via [`crate::tlcp::rsa_helpers::RsaKeyPair::from_pkcs8_pem`]).
+    /// `rsa_cert_der` is the matching X.509 certificate in DER encoding.
+    ///
+    /// Calling this does not affect ECDHE, static-ECC, or SM9 suites;
+    /// RSA material is only consulted when the negotiated suite has
+    /// `key_exchange == KeyExchangeMode::Rsa`.
+    pub fn with_rsa_certs(
+        mut self,
+        rsa_keypair: crate::tlcp::rsa_helpers::RsaKeyPair,
+        rsa_cert_der: Vec<u8>,
+    ) -> Self {
+        self.rsa_signer = Some(Arc::new(crate::tlcp::rsa_helpers::RsaSigner::new(
+            &rsa_keypair,
+        )));
+        self.rsa_decryptor = Some(Arc::new(crate::tlcp::rsa_helpers::RsaDecryptor::new(
+            &rsa_keypair,
+        )));
+        self.rsa_cert = Some(rsa_cert_der);
+        // We don't drop the `rsa_keypair` here — `RsaSigner` /
+        // `RsaDecryptor` clone the inner `Arc<RsaPrivateKey>`, so the
+        // original is zeroized on drop. If the caller wants to retain
+        // a copy they should clone before passing.
+        drop(rsa_keypair);
+        self
+    }
     /// Accept a TLCP client connection over the given transport.
     ///
     /// Performs the full handshake and returns an encrypted `TlcpStream`.
@@ -2725,7 +2919,13 @@ impl TlcpAcceptor {
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
-        if self.sign_cert.is_some() && self.sign_key.is_some() {
+        // R-5: also accept if RSA-only certs are configured (no SM2 dual
+        // cert needed for the 4 RSA suites E019/E01C/E059/E05A).
+        if (self.sign_cert.is_some() && self.sign_key.is_some())
+            || (self.rsa_cert.is_some()
+                && self.rsa_signer.is_some()
+                && self.rsa_decryptor.is_some())
+        {
             self.accept_with_certs(transport).await
         } else {
             #[allow(deprecated)]
@@ -2748,18 +2948,38 @@ impl TlcpAcceptor {
     {
         use tokio::io::AsyncWriteExt;
         let mut io = transport;
-        let sign_cert = self
-            .sign_cert
-            .clone()
-            .ok_or_else(|| TlcpError::HandshakeFailed("sign cert not configured".to_string()))?;
+        // R-5: support RSA-only configuration (no SM2 dual-cert). If the
+        // server has only the RSA cert configured, populate the dual-cert
+        // slots with the same RSA cert (the 4 RSA suites use a single
+        // RSA cert; we send it twice for wire compatibility with the
+        // existing TlcpCertPair serializer — see R-5 plan §2 out-of-scope
+        // note on gmssl interop). SM2-only code paths below (Ecdhe/Ecc
+        // arms) will never run for an RSA-negotiated suite, so leaving
+        // `sign_kp` as `None` is safe: the three use sites (Ecdhe / Ecc /
+        // gmssl-compat Ecc) are all unreachable when suite.key_exchange
+        // == Rsa. (Production deployments that need both SM2 and RSA
+        // suites should call `with_dual_certs` *and* `with_rsa_certs`.)
+        let rsa_cert = self.rsa_cert.clone();
+        let sign_cert =
+            self.sign_cert.clone().or(rsa_cert.clone()).ok_or_else(|| {
+                TlcpError::HandshakeFailed("sign cert not configured".to_string())
+            })?;
         let enc_cert = self
             .enc_cert
             .clone()
+            .or(rsa_cert.clone())
             .ok_or_else(|| TlcpError::HandshakeFailed("enc cert not configured".to_string()))?;
-        let sign_kp = self
-            .sign_key
-            .clone()
-            .ok_or_else(|| TlcpError::HandshakeFailed("sign key not configured".to_string()))?;
+        // sign_kp is None iff the server is configured with RSA-only
+        // (no SM2 sign cert). It is required when any non-RSA suite is
+        // negotiated; the per-suite arms below guard with `let Some(...)`
+        // where needed.
+        let sign_kp: Option<Arc<gm_crypto::sm2::Sm2KeyPair>> = self.sign_key.clone();
+        if sign_kp.is_none() && self.rsa_signer.is_none() {
+            return Err(TlcpError::HandshakeFailed(
+                "no sign key configured (need either with_dual_certs(...) or with_rsa_certs(...))"
+                    .to_string(),
+            ));
+        }
         // Step 1: Read ClientHello
         let (_content_type, record_payload) = read_plaintext_record(&mut io)
             .await
@@ -2820,7 +3040,12 @@ impl TlcpAcceptor {
             .key_exchange
         {
             crate::tlcp::cipher_suite::KeyExchangeMode::Ecdhe => {
-                let sign_signer = gm_crypto::sm2::Sm2Signer::new(&sign_kp)
+                let sign_kp_ref = sign_kp.as_deref().ok_or_else(|| {
+                    TlcpError::HandshakeFailed(
+                        "SM2 sign key not configured (needed for Ecdhe/Ecc suites)".to_string(),
+                    )
+                })?;
+                let sign_signer = gm_crypto::sm2::Sm2Signer::new(sign_kp_ref)
                     .map_err(|e| TlcpError::HandshakeFailed(format!("sign signer: {}", e)))?;
                 let (ske, kp) =
                     TlcpServerKeyExchange::generate(&client_random, &server_random, &sign_signer)?;
@@ -2839,7 +3064,12 @@ impl TlcpAcceptor {
                     // GmSSL-master shim: emit an ECDHE-style SKE for
                     // static-ECC (interpretation-C). Server-side PMS will
                     // use raw 32-byte ECDH (see step 8 below).
-                    let sign_signer = gm_crypto::sm2::Sm2Signer::new(&sign_kp)
+                    let sign_kp_ref = sign_kp.as_deref().ok_or_else(|| {
+                        TlcpError::HandshakeFailed(
+                            "SM2 sign key not configured (needed for gmssl-compat Ecc)".to_string(),
+                        )
+                    })?;
+                    let sign_signer = gm_crypto::sm2::Sm2Signer::new(sign_kp_ref)
                         .map_err(|e| TlcpError::HandshakeFailed(format!("sign signer: {}", e)))?;
                     let (ske, kp) = TlcpServerKeyExchange::generate(
                         &client_random,
@@ -2862,7 +3092,13 @@ impl TlcpAcceptor {
                     // enc_cert. No ephemeral keypair; the server's PMS
                     // will come from ECCEncryptedPreMasterSecret decryption
                     // (R-3, not yet implemented).
-                    let sign_signer = gm_crypto::sm2::Sm2Signer::new(&sign_kp)
+                    let sign_kp_ref = sign_kp.as_deref().ok_or_else(|| {
+                        TlcpError::HandshakeFailed(
+                            "SM2 sign key not configured (needed for static-ECC suites)"
+                                .to_string(),
+                        )
+                    })?;
+                    let sign_signer = gm_crypto::sm2::Sm2Signer::new(sign_kp_ref)
                         .map_err(|e| TlcpError::HandshakeFailed(format!("sign signer: {}", e)))?;
                     let ske = TlcpServerKeyExchange::generate_ecc(
                         &client_random,
@@ -2937,10 +3173,47 @@ impl TlcpAcceptor {
                 None
             }
             crate::tlcp::cipher_suite::KeyExchangeMode::Rsa => {
-                return Err(TlcpError::HandshakeFailed(format!(
-                    "cipher suite {} uses key exchange {:?} which is not yet implemented; pending R-5.",
-                    suite.name, suite.key_exchange
-                )));
+                // RSA suites (R-5 / gm-tlcp 0.6.0, E019/E01C/E059/E05A):
+                // emit a sig-only SKE (interpretation B, same wire layout
+                // as static-ECC's Ecc { signature } body) signed with the
+                // server's RSA private key over
+                //   cr || sr || enc_cert_header || enc_cert
+                // where enc_cert_header = 3-byte big-endian len(enc_cert_der).
+                // The signature is `RSAES-PKCS1-v1_5(SM3(to_sign))` (RFC
+                // 8017 §9.2) with the SM3 DigestInfo prefix encoded
+                // inline by `rsa_helpers::sm3_pkcs1_v15_encoding`. The
+                // signature bytes are raw (length = RSA modulus size).
+                //
+                // The server's RSA keypair is configured via
+                // `TlcpAcceptor::with_rsa_certs(rsa_keypair, rsa_cert_der)`.
+                // `rsa_signer` is required; `rsa_decryptor` is consulted
+                // in step 8 below for PMS recovery.
+                let rsa_signer = self.rsa_signer.as_ref().ok_or_else(|| {
+                    TlcpError::HandshakeFailed(
+                        "RSA suite negotiated but TlcpAcceptor::with_rsa_certs(...) was not called"
+                            .to_string(),
+                    )
+                })?;
+                let rsa_cert_der = self.rsa_cert.as_ref().ok_or_else(|| {
+                    TlcpError::HandshakeFailed(
+                        "RSA suite negotiated but rsa_cert is missing (with_rsa_certs bug?)"
+                            .to_string(),
+                    )
+                })?;
+                let ske = TlcpServerKeyExchange::generate_rsa(
+                    &client_random,
+                    &server_random,
+                    rsa_cert_der,
+                    rsa_signer,
+                )?;
+                let ske_bytes = ske.to_bytes();
+                write_handshake_record(&mut io, &ske_bytes)
+                    .await
+                    .map_err(|e| {
+                        TlcpError::HandshakeFailed(format!("write ServerKeyExchange (RSA): {}", e))
+                    })?;
+                server_hs.transcript.extend_from_slice(&ske_bytes);
+                None
             }
         }; // Step 5.5: Send CertificateRequest (spec-default; skip in
         // GmSSL-master shim).
@@ -2954,19 +3227,24 @@ impl TlcpAcceptor {
         // GmSSL master itself does not.
         #[cfg(not(feature = "tlcp-gmssl-compat"))]
         {
-            // SM9 IBC / IBSDH suites (R-4.1-hotfix / R-4.2): server
+            // SM9 IBC / IBSDH / RSA suites (R-4.1-hotfix / R-4.2 / R-5): server
             // authenticates via SM9 identity (step 5 SKE for IBC,
-            // step 7.5 deferred SKE for IBSDH), not via SM2 cert chain.
-            // Per GB/T 38636-2020 §6.4.5.4 these suites do not
-            // require client authentication, so skip the
-            // CertificateRequest and the corresponding Client
-            // Certificate read in step 7.
+            // step 7.5 deferred SKE for IBSDH) or RSA signature (RSA),
+            // not via SM2 cert chain. Per GB/T 38636-2020 §6.4.5.4
+            // these suites do not require client authentication, so
+            // skip the CertificateRequest and the corresponding Client
+            // Certificate read in step 7. RSA suites use a single RSA
+            // cert (sign + enc both via the same RSA keypair), so the
+            // spec-default client-auth model doesn't fit.
             if !matches!(
                 suite.key_exchange,
                 crate::tlcp::cipher_suite::KeyExchangeMode::Ibc
             ) && !matches!(
                 suite.key_exchange,
                 crate::tlcp::cipher_suite::KeyExchangeMode::Ibsdh
+            ) && !matches!(
+                suite.key_exchange,
+                crate::tlcp::cipher_suite::KeyExchangeMode::Rsa
             ) {
                 let cr = TlcpCertificateRequest::standard();
                 let cr_bytes = cr.to_bytes()?;
@@ -3014,10 +3292,16 @@ impl TlcpAcceptor {
         ) || matches!(
             suite.key_exchange,
             crate::tlcp::cipher_suite::KeyExchangeMode::Ibsdh
+        ) || matches!(
+            suite.key_exchange,
+            crate::tlcp::cipher_suite::KeyExchangeMode::Rsa
         ) {
-            // SM9 IBC / IBSDH suites (R-4.1-hotfix / R-4.2): server
-            // skipped CertificateRequest in step 5.5, so the client
-            // sends no Certificate. No client certs to consume here.
+            // SM9 IBC / IBSDH / RSA suites (R-4.1-hotfix / R-4.2 / R-5):
+            // server skipped CertificateRequest in step 5.5, so the
+            // client sends no Certificate. No client certs to consume
+            // here. RSA suites use a single RSA cert (sign + enc both
+            // via the same RSA keypair), so the spec-default
+            // client-auth model doesn't fit.
             Vec::new()
         } else {
             let (_ct, cert_payload) = read_plaintext_record(&mut io).await.map_err(|e| {
@@ -3071,14 +3355,12 @@ impl TlcpAcceptor {
         }
         // R-4: SM9 IBC suites route to the Ibc variant of CKE.
         // R-4.2: SM9 IBSDH suites route to the Ibsdh variant.
+        // R-5: RSA suites route to the Rsa variant of CKE.
         let cke = TlcpClientKeyExchange::from_body(
             &cke_body,
-            !matches!(
+            matches!(
                 suite.key_exchange,
-                crate::tlcp::cipher_suite::KeyExchangeMode::Ecdhe
-            ) && !matches!(
-                suite.key_exchange,
-                crate::tlcp::cipher_suite::KeyExchangeMode::Ibsdh
+                crate::tlcp::cipher_suite::KeyExchangeMode::Ecc
             ),
             matches!(
                 suite.key_exchange,
@@ -3087,6 +3369,10 @@ impl TlcpAcceptor {
             matches!(
                 suite.key_exchange,
                 crate::tlcp::cipher_suite::KeyExchangeMode::Ibsdh
+            ),
+            matches!(
+                suite.key_exchange,
+                crate::tlcp::cipher_suite::KeyExchangeMode::Rsa
             ),
         )?;
         server_hs.transcript.extend_from_slice(&cke_payload);
@@ -3251,6 +3537,54 @@ impl TlcpAcceptor {
                         .to_string(),
                 )
             })?
+        } else if matches!(
+            suite.key_exchange,
+            crate::tlcp::cipher_suite::KeyExchangeMode::Rsa
+        ) {
+            // RSA suites (R-5 / gm-tlcp 0.6.0): server-side
+            // RSAES-PKCS1-v1_5 decrypt of the client's
+            // `RSAEncryptedPreMasterSecret` (RFC 8017 §7.2). Wire
+            // format per RFC 5246 §7.4.7.1 / GB/T 38636-2020
+            // §6.4.5.8 c): the CKE body is
+            //   [2-byte ciphertext length prefix][ciphertext bytes]
+            // where `ciphertext` is exactly the RSA modulus size in
+            // bytes (e.g. 256 for RSA-2048).
+            //
+            // The plaintext is 48 bytes:
+            //   `ProtocolVersion client_version (2B) || opaque random[46]`
+            // Same layout as the static-ECC path; the spec is silent
+            // on the value of `client_version` (GmsSSL rejects
+            // non-0x0101, openHiTLS / Tongsuo 8.3.0 emit 0x0303 for
+            // legacy reasons). Stay permissive here; master-secret
+            // derivation downstream catches any PMS-content mismatch.
+            let ciphertext = cke.as_rsa_ciphertext().ok_or_else(|| {
+                TlcpError::HandshakeFailed(
+                    "RSA server PMS decrypt: client CKE not in \
+                     RSAEncryptedPreMasterSecret format"
+                        .to_string(),
+                )
+            })?;
+            let rsa_decryptor = self.rsa_decryptor.as_ref().ok_or_else(|| {
+                TlcpError::HandshakeFailed(
+                    "RSA suite negotiated but TlcpAcceptor::with_rsa_certs(...) \
+                     was not called (need rsa_decryptor)"
+                        .to_string(),
+                )
+            })?;
+            let pms_plaintext = rsa_decryptor.decrypt(ciphertext).map_err(|e| {
+                TlcpError::HandshakeFailed(format!(
+                    "RSA decrypt RSAEncryptedPreMasterSecret: {}",
+                    e
+                ))
+            })?;
+            if pms_plaintext.len() != 48 {
+                return Err(TlcpError::HandshakeFailed(format!(
+                    "RSA server PMS decrypt: plaintext must be 48 bytes \
+                     (2B version || 46B random), got {}",
+                    pms_plaintext.len()
+                )));
+            }
+            pms_plaintext
         } else {
             match server_ephemeral_kp_opt {
                 Some(kp) => {
@@ -4081,8 +4415,9 @@ mod tests {
     fn test_cipher_suite_all() {
         let all = TlcpCipherSuite::all();
         // 4 SM2-based (ECDHE/ECC x GCM/CBC) + 2 SM9-IBC (GCM/CBC)
-        // + 2 SM9-IBSDH (GCM/CBC, R-4.2). RSA pending R-5.
-        assert_eq!(all.len(), 8);
+        // + 2 SM9-IBSDH (GCM/CBC, R-4.2) + 4 RSA (GCM/CBC x SM3/SHA256, R-5).
+        // Total 12 suites per GB/T 38636-2020 §6.4.5.2.1 表 2.
+        assert_eq!(all.len(), 12);
     }
     #[test]
     fn test_handshake_type_conversion() {
@@ -4791,7 +5126,8 @@ mod tests {
         // Handshake body length is 24-bit, spanning bytes 1..=3.
         let body_len = ((bytes[1] as usize) << 16) | ((bytes[2] as usize) << 8) | bytes[3] as usize;
         let parsed =
-            TlcpClientKeyExchange::from_body(&bytes[4..4 + body_len], false, false, false).unwrap();
+            TlcpClientKeyExchange::from_body(&bytes[4..4 + body_len], false, false, false, false)
+                .unwrap();
         // The wire payload is the ECParameters-wrapped blob
         // (`[curve_type][named_curve][pub_len][pub]`). The raw public
         // key is recoverable via `ecdhe_public_key()`.
@@ -4812,7 +5148,8 @@ mod tests {
         assert_eq!(bytes[0], HandshakeType::ClientKeyExchange as u8);
         let body_len = ((bytes[1] as usize) << 16) | ((bytes[2] as usize) << 8) | bytes[3] as usize;
         let parsed =
-            TlcpClientKeyExchange::from_body(&bytes[4..4 + body_len], true, false, false).unwrap();
+            TlcpClientKeyExchange::from_body(&bytes[4..4 + body_len], true, false, false, false)
+                .unwrap();
         assert_eq!(
             parsed.as_ecc_ciphertext().expect("Ecc variant"),
             encrypted_pms.as_slice()
@@ -5165,7 +5502,7 @@ mod tests {
         let ciphertext: Vec<u8> = vec![0xCC; 320]; // fake SM9 ciphertext
         let cke = TlcpClientKeyExchange::new_ibc(ciphertext.clone());
         let bytes = cke.to_bytes();
-        let parsed = TlcpClientKeyExchange::from_body(&bytes[4..], false, true, false)
+        let parsed = TlcpClientKeyExchange::from_body(&bytes[4..], false, true, false, false)
             .expect("IBC CKE parse");
         let ct = parsed.as_ibc_ciphertext().expect("IBC variant");
         assert_eq!(ct, ciphertext.as_slice());

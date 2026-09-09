@@ -1,7 +1,7 @@
 [package]
 authors = ["Eric Zhang"]
 name = "gm-tlcp"
-version = "0.5.3"
+version = "0.6.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "TLCP (Transport Layer Cryptographic Protocol, GB/T 38636-2020) core library in pure Rust with SM2/SM3/SM4 support"
@@ -53,6 +53,19 @@ gm-sm9-rs = { path = "../gm-sm9-rs", version = "0.1", default-features = false, 
 # dep here to keep the pms module self-contained.
 elliptic-curve = "0.13"
 sm2 = { version = "0.13", features = ["arithmetic"] }
+
+# RSA primitive for the static-key RSA suites (E019/E01C/E059/E05A,
+# R-5). RSA is NOT a 国密 algorithm so we pull RustCrypto's `rsa`
+# crate directly into gm-tlcp (per 2026-09-08 user directive;
+# R-5 plan §3.8). The `sha2` feature is required for the SHA-256
+# PRF signature variant (E01C/E05A) — we currently use SM3-PRF for
+# all 12 suites per R-5 §8, but the digest infrastructure is
+# already in place for a future SHA-256-PRF feature flag (R-5 §9.1).
+rsa = { version = "0.9", default-features = false, features = ["std", "pem"] }
+sha2 = "0.10"
+signature = "2"
+sm3 = "0.5"  # for digest::Digest trait impl on Sm3Digest (R-5 helper)
+digest = "0.10"  # matches sm3 0.5's transitive dep; used for Sm3Core block API
 
 # 异步运行时（handshake / 流 I/O）
 tokio = { version = "1", features = ["io-util", "net", "sync"] }

@@ -99,6 +99,36 @@ pub const TLS_IBSDH_SM4_GCM_SM3: [u8; 2] = [0xE0, 0x55];
 /// [`TLS_IBSDH_SM4_GCM_SM3`] but with the CBC record layer.
 pub const TLS_IBSDH_SM4_CBC_SM3: [u8; 2] = [0xE0, 0x15];
 
+/// TLCP cipher suite: RSA + SM4-CBC + SM3 (static key)
+///
+/// GB/T 38636-2020 §6.4.5.2.1 表 2: code point `0xE019`.
+/// Added in gm-tlcp 0.6.0 (R-5); RSAES-PKCS1-v1_5 envelope
+/// on the static CKE; 48-byte RSA-PMS = `ProtocolVersion ||
+/// opaque random[46]` (matches GM/T 0024-2014 §6.4.5.8 c)).
+pub const TLS_RSA_SM4_CBC_SM3: [u8; 2] = [0xE0, 0x19];
+
+/// TLCP cipher suite: RSA + SM4-CBC + SHA-256 (static key)
+///
+/// GB/T 38636-2020 §6.4.5.2.1 表 2: code point `0xE01C`.
+/// Added in gm-tlcp 0.6.0 (R-5); same protocol as
+/// [`TLS_RSA_SM4_CBC_SM3`] but with the SHA-256 PRF (we treat
+/// both as SM3-PRF for 0.6.0; see R-5 plan §2 out-of-scope).
+pub const TLS_RSA_SM4_CBC_SHA256: [u8; 2] = [0xE0, 0x1C];
+
+/// TLCP cipher suite: RSA + SM4-GCM + SM3 (static key)
+///
+/// GB/T 38636-2020 §6.4.5.2.1 表 2: code point `0xE059`.
+/// Added in gm-tlcp 0.6.0 (R-5); same protocol as
+/// [`TLS_RSA_SM4_CBC_SM3`] but with the GCM record layer.
+pub const TLS_RSA_SM4_GCM_SM3: [u8; 2] = [0xE0, 0x59];
+
+/// TLCP cipher suite: RSA + SM4-GCM + SHA-256 (static key)
+///
+/// GB/T 38636-2020 §6.4.5.2.1 表 2: code point `0xE05A`.
+/// Added in gm-tlcp 0.6.0 (R-5); same protocol as
+/// [`TLS_RSA_SM4_CBC_SHA256`] but with the GCM record layer.
+pub const TLS_RSA_SM4_GCM_SHA256: [u8; 2] = [0xE0, 0x5A];
+
 /// Maximum TLCP record size
 pub const MAX_TLCP_RECORD_SIZE: usize = 16 * 1024;
 

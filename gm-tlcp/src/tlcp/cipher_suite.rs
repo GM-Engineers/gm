@@ -26,6 +26,7 @@
 use super::constants::{
     TLS_ECC_SM4_CBC_SM3, TLS_ECC_SM4_GCM_SM3, TLS_ECDHE_SM4_CBC_SM3, TLS_ECDHE_SM4_GCM_SM3,
     TLS_IBC_SM4_CBC_SM3, TLS_IBC_SM4_GCM_SM3, TLS_IBSDH_SM4_CBC_SM3, TLS_IBSDH_SM4_GCM_SM3,
+    TLS_RSA_SM4_CBC_SHA256, TLS_RSA_SM4_CBC_SM3, TLS_RSA_SM4_GCM_SHA256, TLS_RSA_SM4_GCM_SM3,
 };
 
 /// TLCP key-exchange algorithm (`KeyExchangeAlgorithm` per
@@ -154,6 +155,48 @@ impl TlcpCipherSuite {
         ecdhe: false,
     };
 
+    /// RSA + SM4-CBC + SM3 (static key, R-5)
+    pub const RSA_SM4_CBC_SM3: Self = Self {
+        id: TLS_RSA_SM4_CBC_SM3,
+        name: "RSA_SM4_CBC_SM3",
+        key_exchange: KeyExchangeMode::Rsa,
+        gcm: false,
+        ecdhe: false,
+    };
+
+    /// RSA + SM4-CBC + SHA-256 (static key, R-5)
+    ///
+    /// Spec ambiguity: we treat the PRF as SM3 (matches GmSSL
+    /// master + openHiTLS convention); see R-5 plan §2.
+    pub const RSA_SM4_CBC_SHA256: Self = Self {
+        id: TLS_RSA_SM4_CBC_SHA256,
+        name: "RSA_SM4_CBC_SHA256",
+        key_exchange: KeyExchangeMode::Rsa,
+        gcm: false,
+        ecdhe: false,
+    };
+
+    /// RSA + SM4-GCM + SM3 (static key, R-5)
+    pub const RSA_SM4_GCM_SM3: Self = Self {
+        id: TLS_RSA_SM4_GCM_SM3,
+        name: "RSA_SM4_GCM_SM3",
+        key_exchange: KeyExchangeMode::Rsa,
+        gcm: true,
+        ecdhe: false,
+    };
+
+    /// RSA + SM4-GCM + SHA-256 (static key, R-5)
+    ///
+    /// Spec ambiguity: we treat the PRF as SM3 (matches GmSSL
+    /// master + openHiTLS convention); see R-5 plan §2.
+    pub const RSA_SM4_GCM_SHA256: Self = Self {
+        id: TLS_RSA_SM4_GCM_SHA256,
+        name: "RSA_SM4_GCM_SHA256",
+        key_exchange: KeyExchangeMode::Rsa,
+        gcm: true,
+        ecdhe: false,
+    };
+
     /// True iff the suite uses a static (non-ephemeral) key
     /// agreement. Useful for distinguishing the SKE / CKE
     /// branches in the handshake state machine.
@@ -185,6 +228,10 @@ impl TlcpCipherSuite {
             TLS_IBC_SM4_CBC_SM3 => Some(Self::IBC_SM4_CBC_SM3),
             TLS_IBSDH_SM4_GCM_SM3 => Some(Self::IBSDH_SM4_GCM_SM3),
             TLS_IBSDH_SM4_CBC_SM3 => Some(Self::IBSDH_SM4_CBC_SM3),
+            TLS_RSA_SM4_GCM_SM3 => Some(Self::RSA_SM4_GCM_SM3),
+            TLS_RSA_SM4_CBC_SM3 => Some(Self::RSA_SM4_CBC_SM3),
+            TLS_RSA_SM4_GCM_SHA256 => Some(Self::RSA_SM4_GCM_SHA256),
+            TLS_RSA_SM4_CBC_SHA256 => Some(Self::RSA_SM4_CBC_SHA256),
             _ => None,
         }
     }
@@ -200,6 +247,10 @@ impl TlcpCipherSuite {
             Self::IBC_SM4_CBC_SM3,
             Self::IBSDH_SM4_GCM_SM3,
             Self::IBSDH_SM4_CBC_SM3,
+            Self::RSA_SM4_GCM_SM3,
+            Self::RSA_SM4_CBC_SM3,
+            Self::RSA_SM4_GCM_SHA256,
+            Self::RSA_SM4_CBC_SHA256,
         ]
     }
 }
@@ -246,11 +297,12 @@ mod tests {
     }
 
     #[test]
-    fn from_id_resolves_all_eight_suites() {
+    fn from_id_resolves_all_twelve_suites() {
         let all = TlcpCipherSuite::all();
         // 4 SM2-based (ECDHE/ECC × GCM/CBC) + 2 SM9-IBC (GCM/CBC)
-        // + 2 SM9-IBSDH (GCM/CBC, R-4.2) = 8 total.
-        assert_eq!(all.len(), 8);
+        // + 2 SM9-IBSDH (GCM/CBC, R-4.2) + 4 RSA (GCM/CBC × SM3/SHA-256, R-5)
+        // = 12 total (full GB/T 38636-2020 §6.4.5.2.1 表 2 set).
+        assert_eq!(all.len(), 12);
         for suite in all {
             assert_eq!(
                 TlcpCipherSuite::from_id(suite.id),

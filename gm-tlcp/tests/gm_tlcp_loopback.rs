@@ -155,6 +155,120 @@ async fn gm_tlcp_kap_pms_roundtrip_with_real_keys() {
 // because they require crate-private access to `verify_ske_signature`.
 
 // ============================================================================
+// RSA suites loopback regression tests (R-5, gm-tlcp 0.6.0)
+// ============================================================================
+//
+// These are the regression gate for the 4 RSA cipher suites
+// (E019/E01C/E059/E05A). They wire `TlcpAcceptor` + `TlcpConnector`
+// through `tokio::io::duplex`, complete a full RSA handshake (GCM or
+// CBC), and exchange a single app-data record round-trip to prove the
+// record layer also works post-handshake.
+//
+// Pre-flight: the server must complete step 5 (RSA-PKCS1-v1_5-signed
+// SKE) + step 8 (RSAES-PKCS1-v1_5-decrypted PMS) with the same 48-byte
+// PMS the client encrypted in step 7.5. This exercises:
+//   - the RSA-SKE signature verify (step 5) with SM3 PKCS#1 v1.5 DigestInfo
+//   - the RSAES-PKCS1-v1_5 envelope encrypt/decrypt (steps 7.5 / 8)
+//   - the master_secret derivation round-trip
+//
+// These tests do NOT require the `gmssl` CLI. The RSA keypair is
+// generated locally via `rsa_helpers::RsaKeyPair::generate(2048)`
+// (2048-bit modulus for speed; production should use 3072 or 4096).
+// The "RSA cert" sent in the Certificate message is a dummy 100-byte
+// DER blob: the connector step 5 SKE-verify path takes the cert bytes
+// verbatim as part of the signature input, but it does NOT extract
+// the RSA pubkey from the cert (the pubkey comes from
+// `with_rsa_certs(server_rsa_pub)`). So the cert just needs to match
+// the bytes the server signed over — which it does, by construction.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gm_tlcp_rsa_loopback_with_real_keys_gcm() {
+    run_rsa_loopback([0xE0, 0x59]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gm_tlcp_rsa_loopback_with_real_keys_cbc() {
+    run_rsa_loopback([0xE0, 0x19]).await;
+}
+
+async fn run_rsa_loopback(suite: [u8; 2]) {
+    use gm_tlcp::tlcp::*;
+
+    // 1. RSA keypair for the server. 2048-bit modulus keeps the test
+    //    snappy (~1s for keygen + a few encrypt/decrypt/sign/verify).
+    let rsa_kp = gm_tlcp::tlcp::rsa_helpers::RsaKeyPair::generate(2048).expect("rsa keypair gen");
+    let rsa_pub = rsa_kp.to_public_key().expect("rsa public key");
+
+    // 2. Configure both sides. RSA suites need no SM2 dual-certs; the
+    //    connector only needs the RSA pubkey (for SKE verify + CKE
+    //    encrypt); the acceptor only needs the RSA keypair + a dummy
+    //    RSA cert blob.
+    let rsa_cert_der: Vec<u8> = (0..100u8).collect(); // dummy DER blob
+    let acceptor = TlcpAcceptor::new().with_rsa_certs(rsa_kp, rsa_cert_der);
+
+    let connector = TlcpConnector::new()
+        .with_cipher_suites(vec![suite])
+        .with_rsa_certs(rsa_pub);
+
+    // 3. tokio::io::duplex transport (same pattern as the SM9 loopback
+    //    tests above; 16 KiB buffer is plenty for a 1-record exchange).
+    let (client_io, server_io) = tokio::io::duplex(16384);
+
+    // 4. Spawn server.
+    let server_handle = tokio::spawn(async move {
+        acceptor
+            .accept_with_certs(server_io)
+            .await
+            .expect("server: RSA handshake must succeed in 0.6.0")
+    });
+
+    // 5. Spawn client.
+    let client_handle = tokio::spawn(async move {
+        connector
+            .connect_with_certs(client_io)
+            .await
+            .expect("client: RSA handshake must succeed in 0.6.0")
+    });
+
+    // 6. Wait for handshake to complete. RSA keygen + 1 encrypt is
+    //    the dominant cost; budget 15s to be safe on slow CI.
+    let mut server_stream = tokio::time::timeout(std::time::Duration::from_secs(15), server_handle)
+        .await
+        .expect("server task timed out (>15s)")
+        .expect("server task panicked");
+
+    let mut client_stream = tokio::time::timeout(std::time::Duration::from_secs(15), client_handle)
+        .await
+        .expect("client task timed out (>15s)")
+        .expect("client task panicked");
+
+    // 7. Exchange a single app-data record to prove the record layer
+    //    works post-handshake (proves master_secret derivation was
+    //    correct on both sides).
+    let msg: &[u8] = b"hello-rsa";
+    client_stream.write_all(msg).await.expect("client write");
+    client_stream.flush().await.expect("client flush");
+
+    let mut buf = vec![0u8; 256];
+    let n = server_stream.read(&mut buf).await.expect("server read");
+    assert_eq!(
+        &buf[..n],
+        msg,
+        "server received wrong bytes -- RSA PMS derivation diverged"
+    );
+
+    // Server -> Client round-trip.
+    server_stream.write_all(msg).await.expect("server write");
+    server_stream.flush().await.expect("server flush");
+    let n = client_stream.read(&mut buf).await.expect("client read");
+    assert_eq!(
+        &buf[..n],
+        msg,
+        "client received wrong bytes -- RSA PMS derivation diverged"
+    );
+}
+
+// ============================================================================
 // SM9 IBC loopback regression tests (R-4.1-hotfix, gm-tlcp 0.5.2)
 // ============================================================================
 //

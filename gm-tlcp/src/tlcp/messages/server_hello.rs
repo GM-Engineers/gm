@@ -19,6 +19,7 @@ use crate::tlcp::HandshakeType;
 use crate::tlcp::constants::{
     TLS_ECC_SM4_CBC_SM3, TLS_ECC_SM4_GCM_SM3, TLS_ECDHE_SM4_CBC_SM3, TLS_ECDHE_SM4_GCM_SM3,
     TLS_IBC_SM4_CBC_SM3, TLS_IBC_SM4_GCM_SM3, TLS_IBSDH_SM4_CBC_SM3, TLS_IBSDH_SM4_GCM_SM3,
+    TLS_RSA_SM4_CBC_SHA256, TLS_RSA_SM4_CBC_SM3, TLS_RSA_SM4_GCM_SHA256, TLS_RSA_SM4_GCM_SM3,
 };
 
 /// TLCP ServerHello message
@@ -63,10 +64,9 @@ impl TlcpServerHello {
 
         let cipher_suite = [data[offset], data[offset + 1]];
         // GB/T 38636-2020 §6.4.5.2.1 表 2 defines 12 cipher suites (4
-        // ECDHE/ECC + 4 SM9 IBSDH/IBC + 4 RSA). gm-tlcp 0.5.x wires the
-        // 4 SM2 suites + the 2 SM9 IBC suites (R-4 / R-4.1-hotfix). The
-        // remaining 6 (SM9 IBSDH + RSA) are still pending R-4.2 / R-5 and
-        // are intentionally rejected here so callers get a clear error.
+        // ECDHE/ECC + 4 SM9 IBC/IBSDH + 4 RSA). All 12 are now wired
+        // in gm-tlcp 0.6.0 (R-5): the 4 SM2 suites + the 4 SM9 suites
+        // (R-4 + R-4.1-hotfix + R-4.2) + the 4 RSA suites (R-5).
         if !matches!(
             cipher_suite,
             TLS_ECDHE_SM4_GCM_SM3
@@ -77,10 +77,15 @@ impl TlcpServerHello {
                 | TLS_IBC_SM4_CBC_SM3
                 | TLS_IBSDH_SM4_GCM_SM3
                 | TLS_IBSDH_SM4_CBC_SM3
+                | TLS_RSA_SM4_GCM_SM3
+                | TLS_RSA_SM4_CBC_SM3
+                | TLS_RSA_SM4_GCM_SHA256
+                | TLS_RSA_SM4_CBC_SHA256
         ) {
             return Err(TlcpError::InvalidMessage(format!(
                 "ServerHello cipher_suite {:02X?} is not a known TLCP suite \
-                 (gm-tlcp 0.5.3 supports ECDHE/ECC + IBC + IBSDH; RSA pending R-5)",
+                 (gm-tlcp 0.6.0 supports all 12 GB/T 38636-2020 suites: \
+                 ECDHE/ECC + IBC + IBSDH + RSA)",
                 cipher_suite
             )));
         }

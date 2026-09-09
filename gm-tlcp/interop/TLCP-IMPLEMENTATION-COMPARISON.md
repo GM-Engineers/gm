@@ -588,10 +588,10 @@ applicable.
 | IBSDH_SM4_GCM_SM3 (0xE055) | ✓ | ✗ | ✗ | △ | ✗ |
 | IBC_SM4_CBC_SM3 (0xE017) | ✓ | ✗ (comment only) | ✗ | △ | ✗ |
 | IBC_SM4_GCM_SM3 (0xE057) | ✓ | ✗ | ✗ | △ | ✗ |
-| RSA_SM4_CBC_SM3 (0xE019) | △ (predecessor only) | ✗ | ✗ | ✓ | ✗ |
-| RSA_SM4_GCM_SM3 (0xE059) | △ | ✗ | ✗ | ✓ | ✗ |
-| RSA_SM4_CBC_SHA256 (0xE01C) | ✓ | ✗ | ✗ | ✓ | ✗ |
-| RSA_SM4_GCM_SHA256 (0xE05A) | ✓ | ✗ | ✗ | ✓ | ✗ |
+| RSA_SM4_CBC_SM3 (0xE019) | △ (predecessor only) | ✗ | ✗ | ✓ | ✓ (R-5) |
+| RSA_SM4_GCM_SM3 (0xE059) | △ | ✗ | ✗ | ✓ | ✓ (R-5) |
+| RSA_SM4_CBC_SHA256 (0xE01C) | ✓ | ✗ | ✗ | ✓ | ✓ (R-5) |
+| RSA_SM4_GCM_SHA256 (0xE05A) | ✓ | ✗ | ✗ | ✓ | ✓ (R-5) |
 | Session resumption / abbreviated HS | ✓ | ✗ | ✓ (via generic TLS 1.2) | ✓ (via generic) | △ (struct only) |
 | `signature_algorithms` extension | △ (not required by spec) | ✗ | ✓ | ✓ | ✗ |
 | GMT Unix time in ClientHello.random[0..4] | ✓ | — | — | — | ✓ |
@@ -777,7 +777,17 @@ If we rank purely on spec conformance (ignoring the interop cluster):
 
 6. **gm-tlcp 0.5.3** (post-R-4.2, 2026-09-09) — closes the C-5 **IBSDH half** that 0.5.2 left blocked. Adds the **SM9 IBSDH suites** (`IBSDH_SM4_GCM_SM3` / `IBSDH_SM4_CBC_SM3`, suite IDs `[0xE0, 0x55]` / `[0xE0, 0x15]`) end-to-end: (1) extends `ServerKeyExchangeBody` with `Ibsdh { ra, rb, sb }` variant (`uint16 ra_len || ra || uint16 rb_len || rb || uint16 sb_len || sb_der`, where `ra`/`rb` are 65-byte uncompressed SM9 G1 points and `sb` is the server's 32-byte SM3 key-confirmation value per GM/T 0044.3-2016 §7.2 B6); (2) extends `ClientKeyExchangeBody` with `Ibsdh { ra }` variant; (3) wires the **deferred-SKE-emit pattern** into `accept_with_certs` / `connect_with_certs` — the server sets `pending_ibsdh_ske = true` in step 5, defers SKE emission to after step 7.5 reads CKE (since the server needs the client's `R_A` first), runs `gm_sm9_rs::key_exchange::responder_process` to compute `R_B + S_B + SK_B`, then emits the SKE-IBSDH record carrying `(ra, rb, sb)`. Two new loopback tests in `tests/gm_tlcp_loopback.rs::gm_tlcp_sm9_ibsdh_loopback_with_real_keys_{gcm,cbc}` prove the full 2-round KEX handshake + app-data record round-trip work end-to-end. **Known limitation**: `client_id = server_id` v1 shortcut (single SM9 identity deployment); documented in CHANGELOG [0.5.3] as a compromise, follow-up PR can add asymmetric `client_id` support. GmSSL master does not implement SM9 IBSDH; building with `--features tlcp-gmssl-compat` and negotiating an IBSDH suite returns an explicit "not GmSSL-master-compatible" error (per the existing IBC exclusion pattern). **C-5 IBSDH half is now fully RESOLVED with regression coverage**; only the RSA half (E019/E01C/E059/E05A) remains pending R-5 / 0.6.0.
 
-7. **GmSSL master** — wire-format deviation on the ECDHE CKE body
+7. **gm-tlcp 0.6.0** (post-R-5, 2026-09-09) — closes the **C-5 RSA half** that 0.5.3 left blocked. Wires up the 4 RSA suites (`RSA_SM4_CBC_SM3` `[0xE0, 0x19]`, `RSA_SM4_CBC_SHA256` `[0xE0, 0x1C]`, `RSA_SM4_GCM_SM3` `[0xE0, 0x59]`, `RSA_SM4_GCM_SHA256` `[0xE0, 0x5A]`) end-to-end via RustCrypto `rsa = 0.9` (with `default-features = false, features = ["std", "pem"]`). Implementation details:
+   - **Step 5 (server SKE)**: re-uses the static-ECC `Ecc { signature }` body variant. The signature is `RSAES-PKCS1-v1_5(SM3(cr || sr || 3-byte-BE enc_cert_len || enc_cert_der))` per RFC 8017 §9.2, with the SM3 PKCS#1 v1.5 DigestInfo prefix (19-byte ASN.1 SEQUENCE for SM3 OID 1.3.6.1.4.1.20145.2.7) encoded inline by `rsa_helpers::sm3_pkcs1_v15_encoding`. Signature bytes are **raw**, NOT DER (TLCP RSA-SKE does not wrap in ASN.1).
+   - **Step 8 (server PMS decrypt)**: server recovers the 48-byte PMS via `RSAES-PKCS1-v1_5` envelope decrypt (RFC 8017 §7.2). Plaintext layout: `ProtocolVersion (2B) || random (46B)` per GB/T 38636-2020 §6.4.5.8 c).
+   - **Step 5 (client SKE verify)**: re-uses the static-ECC `Ecc { signature }` body shape; client re-builds the signature input and verifies via `RsaVerifier::verify(&input, &sig)`.
+   - **Step 7.5 (client CKE emit)**: client generates a 48-byte PMS (`TLCP_VERSION_1_0 || 46 random bytes`) and RSAES-PKCS1-v1_5-encrypts it under the server's RSA public key.
+
+   **New `pub mod rsa_helpers`** wraps RustCrypto's rsa 0.9 in thin newtypes (`RsaKeyPair`, `RsaPubKey`, `RsaSigner`, `RsaVerifier`, `RsaEncryptor`, `RsaDecryptor`); 6 unit tests cover keygen + sign/verify roundtrip + encrypt/decrypt roundtrip + tamper rejection + DigestInfo ASN.1 layout. **Implementation strategy**: sidesteps the `digest 0.10/0.11` version conflict between `sm3 0.5` (re-exports `digest 0.10`) and `rsa 0.9` (re-exports `digest 0.11`) by using rsa 0.9's **low-level API** (`RsaPrivateKey::sign(SignatureScheme, &hashed_digest)` + `RsaPublicKey::verify(SignatureScheme, &hashed, &sig)`) + manual SM3 DigestInfo prefix concatenation. The Pkcs1v15Sign scheme is reused for both sign AND verify (rsa 0.9 has no separate Verify struct).
+
+   **New builder methods**: `TlcpAcceptor::with_rsa_certs(rsa_keypair, rsa_cert_der)` (single cert, unlike SM2 dual-cert) and `TlcpConnector::with_rsa_certs(server_rsa_pub)` (also appends the 4 RSA suites to the connector's preference list). Two new loopback tests in `tests/gm_tlcp_loopback.rs::gm_tlcp_rsa_loopback_with_real_keys_{gcm,cbc}` prove the full handshake + app-data record round-trip work end-to-end. **Known limitations**: (1) SHA-256 PRF for the two `_SHA256` suites (E01C/E05A) — spec is ambiguous; gm-tlcp 0.6.0 uses SM3-PRF for all 12 suites (matches GmSSL + openHiTLS convention); (2) openHiTLS / Tongsuo send a single-Certificate for RSA suites; gm-tlcp 0.6.0 still emits the dual-cert layout (sends the same RSA cert in both slots), so strict-spec peers may reject this — fix deferred to a follow-up PR that extends `TlcpCertPair` for 1-cert mode; (3) GmSSL master 2026-06+ does not implement RSA-SKE under TLCP record-layer 0x0101, so loopback is the only available interop signal for RSA suites. **C-5 is now fully RESOLVED across all 3 KEX families** (SM9 IBC + SM9 IBSDH + RSA); all 12 cipher suites defined in GB/T 38636-2020 §6.4.5.2.1 表 2 are now wired end-to-end.
+
+8. **GmSSL master** — wire-format deviation on the ECDHE CKE body
    (outer u16 prefix; same as gm-tlcp ≤ 0.2.x default). KDF order is
    spec-conformant. Static-ECC SKE uses interpretation C (ECDHE-style
    SKE body, not sig-only). Smaller code base, fewer features, but
