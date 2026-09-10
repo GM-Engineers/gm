@@ -820,9 +820,30 @@ If we rank purely on spec conformance (ignoring the interop cluster):
 
     **Verification** (gates preserved from 0.6.2): all 7 gates green · 125 lib / 13 loopback / 32 integration passed (preserved). **Audit tally post-0.6.3**: 7 Critical resolved (C-1..C-5), **1 Critical new (F4, scope = R-9)**, 3 Major resolved, 6 Minor resolved, 2 Doc resolved. **gm-tlcp 0.6.3 is the new audit-baseline with first verified cross-impl interop evidence**.
 
+13. **gm-tlcp 0.6.3 (R-10 addendum, 2026-09-10)** — **External upstream tracking filed + verified** for R-9 / R-10 closure. **Production source unchanged at 0.6.3** (no code patches; only audit/COMPARISON/CHANGELOG/README doc updates). R-10 finished the external-upstream tracking loop:
+
+    - **GmSSL issue [#1920](https://github.com/guanzhi/GmSSL/issues/1920) filed** (2026-09-10, by EricZHANG1688): the F4 deadlock against `tools/tlcp_server.c::do_send_select`. Body was first created from the 189-line draft `GmSSL-F4-ISSUE-DRAFT.md`; two scratch-pad lines were trimmed via `awk 'NR>4'`, then the just-created issue was edited with `gh issue edit 1920 --body-file /tmp/gmssl-f4-body-clean.md` to swap in the clean 185-line body. WebFetch confirmed the issue renders cleanly from `## 标题 Title` onward. Full submission record at [`R9-4C-SUBMISSION-RECORD.md`](R9-4C-SUBMISSION-RECORD.md).
+    - **Tongsuo issue [#836](https://github.com/Tongsuo-Project/Tongsuo/issues/836) comment verified (already-submitted)**: comment id `5557341448` by EricZHANG1688 was posted 2026-09-06T06:03:33Z (the 239-line bundled-only repro draft). Tongsuo maintainer pr000000f replied 2026-09-09 acknowledging the NTLS root cause ("NTLS handshake init reuses TLS protocol-version query function") and committed to fix #836 + open 2 sub-issues. Sub-issues [#840](https://github.com/Tongsuo-Project/Tongsuo/issues/840) (Path 2) and [#841](https://github.com/Tongsuo-Project/Tongsuo/issues/841) (NTLS security level) were created by pr000000f on 2026-09-09 as placeholders (both currently "No description provided"). Full tracking record at [`R10-STATUS-RECORD.md`](R10-STATUS-RECORD.md).
+
+    **Action**: F4 remains `External-Upstream-Blocker`; the upstream tracker URLs are now pinned in our audit. gm-tlcp source unchanged. No 0.6.4 release. The 7 `#[ignore]`-d `gmssl_interop.rs` tests remain `#[ignore]`-d; once gmssl-master resolves the deadlock (issue [#1920](https://github.com/guanzhi/GmSSL/issues/1920) closed), those tests can be re-evaluated for inclusion in CI. Reference: [`AUDIT-2026-09-06-v2.md`](AUDIT-2026-09-06-v2.md) v2-rev13 (this revision).
+
+    **Verification**: all 7 gates preserved (no code changes; doc-only edit). **Audit tally post-R-10 (unchanged)**: 7 Critical resolved, 0 Critical blocked, 3 Major resolved, 0 Major blocked, 6 Minor resolved, 0 Minor blocked, 2 Doc resolved, 0 Doc blocked, **1 External-Upstream-Blocker (F4) — now with pinned upstream URLs**. **gm-tlcp 0.6.3 + R-10 upstream tracking is the new audit-baseline**.
+
+12. **gm-tlcp 0.6.3 (R-9 addendum, 2026-09-09)** — **F4 External-Upstream-Blocker reclassification** after R-9.1 empirical diagnostic. **Production source unchanged at 0.6.3** (no code patches; only test comment + audit/COMPARISON doc updates). R-9.1 captured both processes mid-hang via `sample(1)`:
+
+    - **gmssl server**: 99.6% in `do_send_select -> __select` (data-loop echo path); no time in any actual record-encryption work.
+    - **gm-tlcp client**: 100% in `mio::Selector::select` (tokio reactor parked, waiting for I/O readiness).
+    - **netstat**: server recv-Q=59 (client data waiting in kernel buffer), client recv-Q=0 (server echo never reached the client).
+
+    Verdict: classic deadlock, not a wire-format mismatch. The three record-layer hypotheses from R-8 (H1 GCM nonce per RFC 5288 §3, H2 GCM AAD per RFC 5246 §6.2.3.3, H3 CBC padding) are **eliminated by code-level comparison** (see [`F4-DIAGNOSTIC-2026-09-09.md`](F4-DIAGNOSTIC-2026-09-09.md) §5). Strong hypothesis H-A: gmssl-master `tools/tlcp_server.c::do_send_select` state-machine bug — `tls_send` keeps returning `TLS_ERROR_SEND_AGAIN` while `__select` reports the socket writable. Both 500ms and 1500ms pre-write sleeps fail; this is a hard deadlock, not a timing race.
+
+    **Action**: F4 severity downgraded from `Critical` to `External-Upstream-Blocker`. gm-tlcp source unchanged. No 0.6.4 release. The 7 `#[ignore]`-d `gmssl_interop.rs` tests remain `#[ignore]`-d; once gmssl-master resolves the deadlock, those tests can be re-evaluated for inclusion in CI. Tracking issue: gmssl-master (URL TBD → resolved as [#1920](https://github.com/guanzhi/GmSSL/issues/1920) in R-10). Reference: [`AUDIT-2026-09-06-v2.md`](AUDIT-2026-09-06-v2.md) v2-rev12 (initial), v2-rev13 (R-10 closure with pinned upstream URLs).
+
+    **Verification**: all 7 gates preserved (no code changes; test comment-only edit verified by full re-run). **Audit tally post-R-9**: 7 Critical resolved, 0 Critical blocked, 3 Major resolved, 0 Major blocked, 6 Minor resolved, 0 Minor blocked, 2 Doc resolved, 0 Doc blocked, **1 External-Upstream-Blocker (F4)**. **gm-tlcp 0.6.3 + F4-External-Upstream-Blocker is the new audit-baseline**.
+
 ### 3.6 Findings and follow-up
 
-**As of gm-tlcp 0.6.1 (R-6, 2026-09-09), this comparison is informational only — no substantive defects remain in gm-tlcp.** The canonical open-finding tally lives in [`AUDIT-2026-09-06-v2.md`](AUDIT-2026-09-06-v2.md) v2-rev10 (2026-09-09). This section groups the historical + forward-looking notes into three categories.
+**As of gm-tlcp 0.6.1 (R-6, 2026-09-09), this comparison is informational only — no substantive defects remain in gm-tlcp.** The canonical open-finding tally lives in [`AUDIT-2026-09-06-v2.md`](AUDIT-2026-09-06-v2.md) v2-rev13 (2026-09-10, R-10 closure with pinned upstream URLs). This section groups the historical + forward-looking notes into three categories.
 
 #### 3.6.1 Resolved (historical)
 

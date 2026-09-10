@@ -318,13 +318,22 @@ async fn gmssl_tlcp_handshake_and_app_data() {
     // Brief sleep to let the gmssl server fully enter its data-loop state
     // after sending its Finished. Without this, the first app-data write
     // can race the server's transition from `do_handshake_select` to the
-    // app-data select loop. Sampling reveals that the gmssl master
-    // server (3.3.0-dev) transiently stalls in `do_send_select -> __select`
-    // immediately after `tlcp_do_accept` returns 1; the pre-write sleep
-    // gives the server time to reach the data-loop `select(fd, READ)`
-    // before we drop our first 64-byte record into the kernel buffer.
-    // Empirically 500ms is enough on this macOS host; 100ms is the
-    // boundary at which the test starts flaking on slower CI runners.
+    // app-data select loop.
+    //
+    // R-9.1 diagnostic (`gm-tlcp/interop/F4-DIAGNOSTIC-2026-09-09.md`)
+    // confirmed F4 is a HARD gmssl-master upstream deadlock — both
+    // 500ms and 1500ms pre-write sleeps fail. The gmssl server spends
+    // 99.6% of its hung time in `do_send_select -> __select` while the
+    // gm-tlcp client is parked in `mio::Selector::select`. The server's
+    // `tls_send` keeps returning SEND_AGAIN while the kernel TCP send
+    // buffer stays full — the client is the only reader, and a busy-loop
+    // in `do_send_select` never gives the client a chance to drain.
+    // H1/H2/H3 (nonce/AAD/padding) are eliminated by code-level
+    // comparison in the R-9.1 doc. F4 is therefore a gmssl-master
+    // state-machine bug, NOT a gm-tlcp record-layer defect. Tracked as
+    // audit F4 / External-Upstream-Blocker; no gm-tlcp code fix
+    // possible. The pre-write sleep is kept here as a no-op for the
+    // 500ms-1000ms race window, not as a fix for F4 itself.
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     client
         .write_application_data(request)

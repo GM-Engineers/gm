@@ -7,6 +7,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documented — F4 External-Upstream-Blocker reclassification (R-9)
+
+R-9 closes audit F4 (filed at v2-rev11 / R-8) with empirical evidence rather than a gm-tlcp code fix. Per [`gm-tlcp/interop/F4-DIAGNOSTIC-2026-09-09.md`](interop/F4-DIAGNOSTIC-2026-09-09.md), both processes were sampled mid-hang via `sample(1)`:
+
+- **gmssl server** spent 99.6% of its hung time in `do_send_select -> __select` (data-loop echo path); no time in any actual record-encryption work.
+- **gm-tlcp client** spent 100% in `mio::Selector::select` (tokio reactor parked, waiting for I/O readiness).
+- `netstat` showed server recv-Q=59 (client data waiting in kernel buffer) and client recv-Q=0 (server echo never reached the client) — classic deadlock, not a wire-format mismatch.
+
+The three record-layer hypotheses from R-8 (H1 GCM nonce per RFC 5288 §3, H2 GCM AAD per RFC 5246 §6.2.3.3, H3 CBC padding) are **eliminated by code-level comparison**. Strong hypothesis H-A: gmssl-master `tools/tlcp_server.c::do_send_select` state-machine bug — `tls_send` keeps returning `TLS_ERROR_SEND_AGAIN` while `__select` reports the socket writable. Both 500ms and 1500ms pre-write sleeps fail; this is a hard deadlock, not a timing race.
+
+#### Code changes
+
+None for gm-tlcp production source. Only the `tests/gmssl_interop.rs::gmssl_tlcp_handshake_and_app_data` 500ms pre-write sleep comment is updated to reference the R-9.1 diagnostic and clarify that the sleep does NOT fix F4 (it remains a defensive no-op for the 500ms-1000ms post-handshake race window). Production `gm-tlcp 0.6.3` source is unchanged; no version bump; no `0.6.4` release.
+
+#### Action taken
+
+F4 severity downgraded from `Critical` to `External-Upstream-Blocker` in `AUDIT-2026-09-06-v2.md` v2-rev12 (this revision). Tracking issue against gmssl-master to be opened (URL will be added once filed). The 7 `#[ignore]`-d `gmssl_interop.rs` tests remain `#[ignore]`-d; once gmssl-master resolves the deadlock, those tests can be re-evaluated for inclusion in CI.
+
+#### Verification
+
+All 7 verification gates preserved (no code changes to compile):
+- `cargo +stable fmt --check` clean
+- `cargo +stable clippy --lib --tests -- -D warnings` clean
+- `cargo +stable test --lib` 125 passed (preserved)
+- `cargo +stable test --test gm_tlcp_loopback` 13 passed (preserved)
+- `cargo +stable test --test integration_tlcp` 32 passed (preserved)
+- `cargo +stable doc --no-deps` clean
+- `cargo +stable test --features tlcp-strict --lib` 125 passed (preserved)
+
+**Audit tally post-R-9**: 7 Critical resolved, 0 Critical blocked, 3 Major resolved, 0 Major blocked, 6 Minor resolved, 0 Minor blocked, 2 Doc resolved, 0 Doc blocked, **1 External-Upstream-Blocker (F4)**.
+
+### Documented — R-10 external upstream tracking closure (2026-09-10)
+
+R-10 finished the external-upstream tracking loop that R-9 opened. No code change; no version bump; no `0.6.4` release. Two upstream submissions, both verified via GitHub REST API before this commit:
+
+#### R-10.1 — Tongsuo #836 state-machine NTLS rejection re-verified
+
+Re-ran the R-8 harness against the Tongsuo 8.3.0 source tree + Docker-based `tongsuo-bin` (Ubuntu 22.04, static ELF, `/root/tongsuo`):
+
+- **Path 1** (`-ntls -enable_ntls` only on server side) — client hangs at `statem_lib.c:101-105` short-circuit (`(0x0101 >> 8) == 0x01 ≠ SSL3_VERSION_MAJOR`); identical to PR8 evidence captured at PR-8 close-out.
+- **Path 2** (`-ntls -enable_ntls` on both sides, current `gm-tlcp` SKE wire) — server returns `no shared cipher` at `ssl/statem_ntls/statem_srvr.c:1478`; client emits `SSL alert 40 handshake_failure` immediately. **Reproduced live on 2026-09-10** (record at `interop/tongsuo/upstream/R10-1-VERIFY-2026-09-10.md`).
+- **Path 3** (regular `state_machine` path with `-ntls -enable_ntls`) — symmetric mirror of Path 2; same `no shared cipher` rejection. Documented but not re-run live (Path 2 is the canonical reproduction).
+
+#### R-10.2 — Tongsuo #836 comment verified (already-submitted by user)
+
+Confirmed via GitHub REST API that the 239-line `ISSUE-836-comment-bundled-repro-2026-09-06.md` was already manually submitted by EricZHANG1688 on **2026-09-06T06:03:33Z** (comment id **5557341448**). Tongsuo maintainer pr000000f replied on 2026-09-09 (comment id 5598372285) acknowledging the NTLS root cause ("NTLS handshake init reuses TLS protocol-version query function") and committed to fix #836 + open 2 sub-issues. pr000000f then opened sub-issues [#840](https://github.com/Tongsuo-Project/Tongsuo/issues/840) (Path 2) and [#841](https://github.com/Tongsuo-Project/Tongsuo/issues/841) (NTLS security level) on 2026-09-09; both currently "No description provided" placeholders. gm-tlcp will NOT populate these unsolicited.
+
+#### R-9.4c — GmSSL #1920 filed (F4 deadlock upstream tracking)
+
+Submitted https://github.com/guanzhi/GmSSL/issues/1920 on 2026-09-10 by EricZHANG1688 via `gh issue create -R guanzhi/GmSSL`. Body was first created from the 189-line draft `GmSSL-F4-ISSUE-DRAFT.md`; two scratch-pad lines (status meta + redundant H1) were trimmed via `awk 'NR>4'`, then the just-created issue was edited with `gh issue edit 1920 --body-file /tmp/gmssl-f4-body-clean.md` to swap in the clean 185-line body. WebFetch confirmed the issue renders cleanly from `## 标题 Title` onward. Full submission record at [`interop/R9-4C-SUBMISSION-RECORD.md`](interop/R9-4C-SUBMISSION-RECORD.md).
+
+#### Audit doc updates (v2-rev12 → v2-rev13)
+
+Four files updated, all doc-only:
+
+- [`AUDIT-2026-09-06-v2.md`](interop/AUDIT-2026-09-06-v2.md): v2-rev13 header + F4 row + Final tally row all reference upstream URLs ([#1920](https://github.com/guanzhi/GmSSL/issues/1920), [#836](https://github.com/Tongsuo-Project/Tongsuo/issues/836), [#840](https://github.com/Tongsuo-Project/Tongsuo/issues/840), [#841](https://github.com/Tongsuo-Project/Tongsuo/issues/841)); "URL TBD" placeholders removed.
+- [`TLCP-IMPLEMENTATION-COMPARISON.md`](interop/TLCP-IMPLEMENTATION-COMPARISON.md): entry #13 added (R-10 addendum); entry #12 updated with resolved upstream URL; §3.6 reference updated to v2-rev13.
+- `README.md` (zh-CN): R-10 status bullet added; F4 deadlock line now references upstream tracker.
+- `README.en.md`: F4 line updated with pinned upstream URL.
+
+#### Verification
+
+All 7 verification gates preserved (no code changes to compile):
+- `cargo +stable fmt --check` clean
+- `cargo +stable clippy --lib --tests -- -D warnings` clean
+- `cargo +stable test --lib` 125 passed (preserved)
+- `cargo +stable test --test gm_tlcp_loopback` 13 passed (preserved)
+- `cargo +stable test --test integration_tlcp` 32 passed (preserved)
+- `cargo +stable doc --no-deps` clean
+- `cargo +stable test --features tlcp-strict --lib` 125 passed (preserved)
+
+**Audit tally post-R-10 (unchanged from R-9)**: 7 Critical resolved, 0 Critical blocked, 3 Major resolved, 0 Major blocked, 6 Minor resolved, 0 Minor blocked, 2 Doc resolved, 0 Doc blocked, **1 External-Upstream-Blocker (F4) — now with pinned upstream URLs**.
+
+#### Lessons captured
+
+1. **Always verify external state via API before acting.** The R-10 plan
+   initially mis-stated R-10.2 as "pending user authorization"; in
+   fact the user had already submitted on 2026-09-06. Catching this
+   earlier via GitHub REST API would have saved one round-trip. The
+   corrective is: any plan that touches a long-lived external resource
+   (upstream issue / PR / registry) must `curl /api/...` to confirm
+   the latest state on the day of execution.
+
+2. **Sub-issue placeholders require followup, not auto-population.**
+   pr000000f opening #840 + #841 with empty bodies is a "I will
+   populate later" signal. gm-tlcp's obligation is to wait, not to
+   populate them with our own content. If they remain empty for
+   >30 days, a polite ping is acceptable; unsolicited contribution
+   is not.
+
 ## [0.6.3] - 2026-09-09
 
 ### Documented — GmSSL cross-impl interop verification (R-8)
