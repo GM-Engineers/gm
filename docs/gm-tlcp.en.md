@@ -11,7 +11,7 @@ TLCP is structurally similar to TLS 1.3 but **not interoperable with it**:
 - Uses **SM2** (signature + encryption + key exchange), **SM3** (hash), **SM4** (block cipher)
 - SM2/SM9 suites require **dual certificates** (sign cert + enc cert); RSA suites follow GB/T 38636-2020 §6.4.5.5 single-cert layout (a dual-cert compat mode is retained)
 - Protocol version byte is `[0x01, 0x01]` (TLCP), not `[0x03, 0x03]` (TLS 1.3)
-- Defines **12 cipher suites** (GB/T 38636-2020 §6.4.5.2.1 表 2), all 12 implemented by gm-tlcp with end-to-end in-process loopback regression coverage (`tests/gm_tlcp_loopback.rs` 21 tests where gm-tlcp plays both client and server through `tokio::io::duplex`)
+- Defines **12 cipher suites** (GB/T 38636-2020 §6.4.5.2.1 表 2), all 12 implemented by gm-tlcp with end-to-end in-process loopback regression coverage (`tests/gm_tlcp_loopback.rs` 21 tests total: 16 full handshake-loopback + 1 PMS-only KAT + 4 support-module)
 
 | ID | Name | Key Exchange | Notes |
 |----|------|--------------|-------|
@@ -143,7 +143,7 @@ For step-by-step instructions on generating a test PKI with `gmssl sm2keygen` an
 |---|---|---|
 | **in-process loopback** | ✅ all 12 suites | `tests/gm_tlcp_loopback.rs` 21 tests total: 16 where gm-tlcp plays both client and server through `tokio::io::duplex` for the full handshake + app-data round-trip (covering all 12 cipher suites + 4 RSA single-cert variants), 1 PMS-only KAT (`gm_tlcp_kap_pms_roundtrip_with_real_keys`), and 4 support-module tests |
 | **GmSSL 3.3.0-dev master** | ✅ handshake / ❌ APP_DATA | All 9 handshake messages byte-for-byte verified (`tlcp-gmssl-compat` mode, R-8). F4 = record-layer deadlock (External-Upstream-Blocker, filed upstream as [gmssl #1920](https://github.com/guanzhi/GmSSL/issues/1920)) |
-| **openHiTLS `s_server -tlcp`** | ✅ ECDHE up-to-Finished | Server-side handshake passes; `Decrypt Error (51)` after client Finished is a known open issue (ECDHE x̂ transform disagreement, tracked separately) |
+| **openHiTLS `s_server -tlcp`** | ✅ wire format / ❌ Finished | CKE wire format passes (R-1: default mode no longer has the `uint16` length prefix, matching openHiTLS expectations); SKE wire format passes (R-3: static-ECC follows interpretation-B); ECDHE `x̂` transform disagrees with openHiTLS, server rejects client Finished (`Decrypt Error (51)`), tracked as an open issue |
 | **Tongsuo 8.3.0** | ❌ state-machine rejects 0x0101 | NTLS state machine does not accept the TLCP version byte; [Tongsuo #836](https://github.com/Tongsuo-Project/Tongsuo/issues/836) submitted by EricZHANG1688, maintainer confirmed root cause and opened sub-issues [#840](https://github.com/Tongsuo-Project/Tongsuo/issues/840) + [#841](https://github.com/Tongsuo-Project/Tongsuo/issues/841) |
 
 To run the GmSSL interop tests locally you need `gmssl` on `PATH`:

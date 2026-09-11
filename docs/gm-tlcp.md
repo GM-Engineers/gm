@@ -11,7 +11,7 @@ TLCP 在结构上类似 TLS 1.3，但**与 TLS 1.3 不兼容**：
 - 使用 **SM2**（签名 + 加密 + 密钥交换）、**SM3**（哈希）、**SM4**（分组密码）
 - SM2/SM9 套件需要**双证书**（签名证书 + 加密证书）；RSA 套件按 GB/T 38636-2020 §6.4.5.5 走单证书 layout（兼容模式仍保留双证书）
 - 协议版本字节为 `[0x01, 0x01]`（TLCP），而非 `[0x03, 0x03]`（TLS 1.3）
-- 定义了 **12 套密码套件**（GB/T 38636-2020 §6.4.5.2.1 表 2），gm-tlcp 已实现全部 12 套，且全部具备端到端 in-process loopback 回归测试（`tests/gm_tlcp_loopback.rs` 21 个测试，gm-tlcp 同时作 client + server 经 `tokio::io::duplex` 自测）
+- 定义了 **12 套密码套件**（GB/T 38636-2020 §6.4.5.2.1 表 2），gm-tlcp 已实现全部 12 套，且全部具备端到端 in-process loopback 回归覆盖（`tests/gm_tlcp_loopback.rs` 共 21 个测试：16 完整 handshake-loopback + 1 PMS-only KAT + 4 support-module）
 
 | ID | 名称 | 密钥交换 | 说明 |
 |----|------|----------|------|
@@ -142,7 +142,7 @@ TLCP SM2/SM9 套件要求每个对端拥有**两张独立的 SM2 证书**：
 |---|---|---|
 | **in-process loopback** | ✅ 全部 12 套件 | `tests/gm_tlcp_loopback.rs` 共 21 个测试：16 个 gm-tlcp 作为 client + server 通过 `tokio::io::duplex` 完成完整握手 + app-data 来回（覆盖全部 12 个 cipher suites + 4 个 RSA single-cert 变体），加 1 个 PMS-only KAT (`gm_tlcp_kap_pms_roundtrip_with_real_keys`) 加 4 个 support-module 测试 |
 | **GmSSL 3.3.0-dev master** | ✅ handshake / ❌ APP_DATA | 9 个握手消息 byte-for-byte 通过（`tlcp-gmssl-compat` 模式，R-8）。F4 = record-layer 死锁（External-Upstream-Blocker，已提交 [gmssl #1920](https://github.com/guanzhi/GmSSL/issues/1920)） |
-| **openHiTLS `s_server -tlcp`** | ✅ ECDHE up-to-Finished | server 侧 handshake 通过；client Finished 后 `Decrypt Error (51)` 为已知 issue，ECDHE x̂ transform 与 openHiTLS 不一致（tracked separately） |
+| **openHiTLS `s_server -tlcp`** | ✅ wire format / ❌ Finished | CKE wire format通过（R-1: 默认模式不再有 `uint16` 前缀，匹配 openHiTLS 期望）；SKE wire format 通过（R-3: static-ECC 走 interpretation-B）；ECDHE x̂ transform 与 openHiTLS 不一致，server 拒收 client Finished（`Decrypt Error (51)`），跟踪为 open issue |
 | **Tongsuo 8.3.0** | ❌ state-machine 拒绝 0x0101 | NTLS 状态机不接受 TLCP 版本字节；[Tongsuo #836](https://github.com/Tongsuo-Project/Tongsuo/issues/836) 已由 EricZHANG1688 提交，维护者已确认根因并开 sub-issue [#840](https://github.com/Tongsuo-Project/Tongsuo/issues/840) + [#841](https://github.com/Tongsuo-Project/Tongsuo/issues/841) |
 
 本地运行 GmSSL 互操作测试需要 `gmssl` 在 `PATH`：
