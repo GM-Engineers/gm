@@ -48,8 +48,8 @@ gm/                          # 工作空间
 
 ```toml
 [dependencies]
-gm-crypto = "0.2"
-gm-tlcp   = "0.1"
+gm-crypto = "0.3"
+gm-tlcp   = "0.6"
 gm-sm9-rs = "0.1"
 ```
 
@@ -58,7 +58,8 @@ use gm_crypto::sm2::{Sm2KeyPair, Sm2Signer};
 use gm_crypto::sm3::Sm3Hasher;
 use gm_crypto::sm4::Sm4Cipher;
 use gm_sm9_rs::{SignMasterKey, Signer, Verifier};
-use gm_tlcp::{TlcpAcceptor, TlcpConnector, TlcpCipherSuite};
+use gm_tlcp::{TlcpAcceptor, TlcpConnector, TLS_ECDHE_SM4_GCM_SM3};
+use rand::rng;
 
 // SM2/SM3/SM4（SM2 含密钥交换）
 let key_pair = Sm2KeyPair::generate().unwrap();
@@ -70,19 +71,24 @@ let hash = Sm3Hasher::hash(b"data").unwrap();
 let cipher = Sm4Cipher::new(b"0123456789abcdef").unwrap();
 let (ct, tag) = cipher.encrypt_gcm(b"secret", b"0123456789ab", b"").unwrap();
 
-// SM9 基于身份的签名
-let mut rng = rand::thread_rng();
+// SM9 基于身份的签名（rand 0.10 将 `thread_rng` 重命名为 `rng`）
+let mut rng = rand::rng();
 let master = SignMasterKey::generate(&mut rng)?;
 let user_key = master.extract_key(b"alice@example.com")?;
 let signer = Signer::new(user_key);
-let sig = signer.sign(b"message")?;
+let sig = signer.sign(b"message", &mut rng)?;
 let verifier = Verifier::new(b"alice@example.com", &master.ppubs);
 assert!(verifier.verify(b"message", &sig)?);
 
 // TLCP 握手（服务端示例 — 完整代码见 gm-tlcp 文档）
+// `with_dual_certs` 需要 4 个参数：2 个证书 (DER) + 2 个 SM2 密钥对。
+// `with_cipher_suites` 在 TlcpConnector 上（不在 TlcpAcceptor 上）。
+// let sign_key = Sm2KeyPair::from_private_key_pem(&sign_pem)?;
+// let enc_key  = Sm2KeyPair::from_private_key_pem(&enc_pem)?;
 // let acceptor = TlcpAcceptor::new()
-//     .with_dual_certs(sign_cert_der, enc_cert_der, sign_pub_65)
-//     .with_cipher_suites(vec![TlcpCipherSuite::TLS_ECDHE_SM4_GCM_SM3]);
+//     .with_dual_certs(sign_cert_der, enc_cert_der, sign_key, enc_key);
+// let connector = TlcpConnector::new()
+//     .with_cipher_suites(vec![TLS_ECDHE_SM4_GCM_SM3]);
 ```
 
 ## 第三方组件
