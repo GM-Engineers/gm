@@ -2,7 +2,7 @@
 
 > 上次更新：2026-06-29
 > 英文版：[deployment.en.md](./deployment.en.md)
-> 版本：1.1 | 适用于：gm-tls v0.2.0+ / gm-tlcp v0.1.0+ / gm-crypto v0.2.0+ / gm-kms v0.1.0+
+> 版本：1.2 | 适用于：gm-tls v0.2.1+ / gm-tlcp v0.6.4+ / gm-crypto v0.3.0+ / gm-kms v0.2.1+
 
 ## 目录
 

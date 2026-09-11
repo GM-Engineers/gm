@@ -1,7 +1,7 @@
 # gm Project Deployment Guide
 
 > Last Updated: 2026-06-29
-> Version: 1.1 | Applicable to: gm-tls v0.2.0+ / gm-tlcp v0.1.0+ / gm-crypto v0.2.0+ / gm-kms v0.1.0+
+> Version: 1.2 | Applicable to: gm-tls v0.2.1+ / gm-tlcp v0.6.4+ / gm-crypto v0.3.0+ / gm-kms v0.2.1+
 
 **[中文版本](./deployment.md)**
 
