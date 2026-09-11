@@ -2,7 +2,7 @@
 authors = ["Eric Zhang"]
 rust-version = "1.85"
 name = "gm-ca"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "GM/CA - Generic CA service for SM2 certificates"

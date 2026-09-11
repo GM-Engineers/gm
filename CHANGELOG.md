@@ -18,6 +18,36 @@ All notable changes to the GM cryptographic library suite.
   failed CI for these reasons) are auto-closed by Dependabot when
   this change reaches `main`.
 
+### Added
+
+#### `gm-ca` 0.2.0
+
+- **`CertProfile`** (in `gm_ca::cert_profile`) — declarative spec
+  for what extensions a cert should carry. Presets:
+  `CertProfile::default`, `server_end_entity`, `client_end_entity`,
+  `intermediate_ca`, `root_ca`.
+- **`CaSigner::sign_csr_with_profile(csr, days, &profile)`** —
+  replaces the v0.1.x `sign_csr(csr, days)`. Default profile
+  reproduces the v0.1.x wire-format extension set.
+- **`CaSigner::renew_certificate_with_profile(cert_pem, days, &profile)`**
+  — replaces the v0.1.x `renew_certificate(cert_pem, days)`.
+- **`CaSigner::self_sign_ca(days, &profile)`** — new method for
+  self-signing the CA cert (trust anchor). Default profile is
+  `CertProfile::root_ca()` (`keyCertSign | cRLSign` +
+  `BasicConstraints CA:TRUE`).
+- **AuthorityKeyIdentifier** emitted by default on every cert —
+  `keyIdentifier = SM3(CA pubkey)[:20]` per RFC 7093 Method 1.
+  Required by GmSSL master for TLCP chain walks.
+- **BasicConstraints emitted by default** — `CA:FALSE` for end-entity
+  certs, `CA:TRUE` (with optional `pathLenConstraint`) for CA certs.
+
+### Breaking
+
+- **`gm-ca` 0.2.0** — `CaSigner::sign_csr` removed (use
+  `sign_csr_with_profile`), `CaSigner::renew_certificate` removed
+  (use `renew_certificate_with_profile`). Old methods are removed,
+  not deprecated.
+
 ## [0.3.0] - 2026-09-05
 
 **Headline change**: TLCP (GB/T 38636-2020) has been **extracted out of

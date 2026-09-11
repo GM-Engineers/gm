@@ -6,6 +6,7 @@
 use asn1::{ObjectIdentifier, SequenceWriter};
 use elliptic_curve::sec1::ToEncodedPoint;
 use gm_ca::cert::CaSigner;
+use gm_ca::cert_profile::CertProfile;
 use gm_crypto::sm2::Sm2KeyPair;
 use gm_tls::gm::{HandshakeOptions, accept_gm_rust, connect_gm_rust};
 use std::time::Duration;
@@ -233,25 +234,25 @@ async fn test_full_chain_grpc_ca_plus_tls_handshake() {
         .expect("failed to build client CSR");
     let client_csr_pem = csr_to_pem(&client_csr_der);
 
-    // 4. Sign both certs with our test CA
+    // 4. Sign both leaf certs with our test CA. Default profile reproduces
+    // the v0.1.x wire-format extension set (digitalSignature +
+    // keyEncipherment, serverAuth + clientAuth, SKI, SAN).
     // Server cert: signed by our test CA (ca_signer), not docker gm-ca-server
     let (_, server_cert_pem) = ca_signer
-        .sign_csr(server_csr_pem.as_bytes(), 365)
+        .sign_csr_with_profile(server_csr_pem.as_bytes(), 365, &CertProfile::default())
         .expect("sign server cert failed");
 
     let (_, client_cert_pem) = ca_signer
-        .sign_csr(client_csr_pem.as_bytes(), 365)
+        .sign_csr_with_profile(client_csr_pem.as_bytes(), 365, &CertProfile::default())
         .expect("sign client cert via CaSigner failed");
 
-    // CA self-signed cert for trust chain
-    let ca_pubkey = ca_keypair.public_key().to_encoded_point(false);
-    let ca_pubkey_bytes = ca_pubkey.as_bytes();
-    let ca_csr_der = build_sm2_csr_der("Test GM CA", ca_pubkey_bytes, &ca_keypair)
-        .expect("failed to build CA CSR");
-    let ca_csr_pem = csr_to_pem(&ca_csr_der);
-    let (_, ca_cert_pem) = ca_signer
-        .sign_csr(ca_csr_pem.as_bytes(), 3650)
-        .expect("sign CA cert failed");
+    // CA self-signed cert (trust anchor). Use self_sign_ca directly with
+    // the root_ca profile — keyCertSign + cRLSign + BasicConstraints CA:TRUE
+    // + AKI/SKI per GmSSL -gen_authority_key_id / -gen_subject_key_id
+    // semantics. Avoids the intermediate CSR dance.
+    let ca_cert_pem = ca_signer
+        .self_sign_ca(3650, &CertProfile::root_ca())
+        .expect("self-sign CA cert failed");
 
     // 5. Write to temp files
     let temp_dir = tempfile::tempdir().expect("failed to create temp dir");

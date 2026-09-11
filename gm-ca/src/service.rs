@@ -2,6 +2,7 @@
 
 use crate::ca::v1 as ca_v1;
 use crate::cert::{CaSigner, extract_csr_subject_cn};
+use crate::cert_profile::CertProfile;
 use crate::db::DbStore;
 use crate::metrics;
 use ca_v1::{
@@ -89,14 +90,17 @@ impl CaService for CaServiceImpl {
         let req = request.into_inner();
         let csr_bytes = req.csr_pem.as_bytes();
 
-        // Sign CSR and get serial + PEM
-        let (serial_hex, cert_pem) =
-            self.signer
-                .sign_csr(csr_bytes, req.validity_days)
-                .map_err(|e| {
-                    metrics::record_error("sign_failed");
-                    Status::invalid_argument(e.to_string())
-                })?;
+        // Sign CSR and get serial + PEM. The default profile reproduces
+        // the v0.1.x wire-format extension set (digitalSignature +
+        // keyEncipherment, serverAuth + clientAuth, SKI, SAN) plus an
+        // explicit BasicConstraints CA:FALSE.
+        let (serial_hex, cert_pem) = self
+            .signer
+            .sign_csr_with_profile(csr_bytes, req.validity_days, &CertProfile::default())
+            .map_err(|e| {
+                metrics::record_error("sign_failed");
+                Status::invalid_argument(e.to_string())
+            })?;
 
         // Extract subject CN from CSR for database storage
         let subject_cn = extract_csr_subject_cn(csr_bytes).map_err(|e| {
@@ -178,10 +182,16 @@ impl CaService for CaServiceImpl {
             }));
         }
 
-        // Issue new certificate with same subject/public key, new validity
+        // Issue new certificate with same subject/public key, new validity.
+        // Default profile preserves v0.1.x wire-format (matches the prior
+        // behavior of `renew_certificate`).
         let new_cert_pem = self
             .signer
-            .renew_certificate(&existing.certificate_pem, req.validity_days)
+            .renew_certificate_with_profile(
+                &existing.certificate_pem,
+                req.validity_days,
+                &CertProfile::default(),
+            )
             .map_err(|e| {
                 metrics::record_error("renew_failed");
                 Status::invalid_argument(e.to_string())

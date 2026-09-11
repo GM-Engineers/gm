@@ -116,7 +116,6 @@ impl KeyUsageBits {
     /// `decipherOnly` (bit 8) is set, and we compute `unused-bits`
     /// from the highest set bit position so encoders downstream can
     /// round-trip the value via x509-parser.
-    #[allow(dead_code)] // consumed in Phase 2
     pub(crate) fn to_der_bytes(&self) -> Vec<u8> {
         // bit position -> byte index + mask
         // (pos / 8, 0x80 >> (pos % 8))
@@ -200,7 +199,6 @@ impl KeyUsageBits {
 /// ClientAuth). CodeSigning / EmailProtection / TimeStamping / OCSP
 /// are exposed for completeness; gm-ca does not check any of these
 /// against an actual TLS peer so including them is purely declarative.
-#[allow(dead_code)] // consumed in Phase 2
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtendedKeyUsage {
     ServerAuth,
@@ -231,7 +229,6 @@ impl ExtendedKeyUsage {
     }
 
     /// Encode the SEQUENCE OF KeyPurposeId value (the `extnValue` body).
-    #[allow(dead_code)] // consumed in Phase 2 cert.rs integration
     pub(crate) fn build_ext_key_usage_value(purposes: &[ExtendedKeyUsage]) -> Vec<u8> {
         use gm_der::encode_oid;
         let mut inner = Vec::new();
@@ -252,7 +249,6 @@ impl ExtendedKeyUsage {
 /// - `iPAddress` = OCTET STRING, tag `[7]` (context, primitive, IMPLICIT)
 /// - `uniformResourceIdentifier` = IA5String, tag `[6]`
 /// - `rfc822Name` = IA5String, tag `[1]`
-#[allow(dead_code)] // consumed in Phase 2
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GeneralName {
     DnsName(String),
@@ -263,7 +259,6 @@ pub enum GeneralName {
 
 impl GeneralName {
     /// Encode the IMPLICIT-tagged GeneralName body bytes (no outer SEQUENCE).
-    #[allow(dead_code)] // consumed in Phase 2 cert.rs integration
     pub(crate) fn to_der(&self) -> Vec<u8> {
         use gm_der::der_len;
         match self {
@@ -308,7 +303,6 @@ impl GeneralName {
     }
 
     /// Build the SubjectAltName extension `extnValue` OCTET STRING content.
-    #[allow(dead_code)] // consumed in Phase 2 cert.rs integration
     pub(crate) fn build_san_value(sans: &[GeneralName]) -> Vec<u8> {
         let mut inner = Vec::new();
         for gn in sans {
