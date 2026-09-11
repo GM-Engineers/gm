@@ -5,7 +5,7 @@ All notable changes to the `gm-crypto` crate will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.1] - 2026-09-11
 
 ### Added
 
@@ -47,6 +47,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `x509` module: doc comment expanded to mention PKCS#10 CSR generation
   alongside the existing cert parsing helpers.
+
+## [Unreleased]
+
+### Added
+
+### Changed
+
+### Fixed
+
 
 ## [0.3.0] - 2026-09-07
 
@@ -119,5 +128,6 @@ removed. The crate's public surface is fully backwards-compatible with
 the 0.1.x series.
 
 [Unreleased]: https://github.com/GM-Engineers/gm/compare/main...HEAD
+[0.3.1]: https://github.com/GM-Engineers/gm/compare/gm-crypto-v0.3.0...gm-crypto-v0.3.1
 [0.3.0]: https://github.com/GM-Engineers/gm/compare/gm-crypto-v0.2.0...gm-crypto-v0.3.0
 [0.2.0]: https://github.com/GM-Engineers/gm/releases/tag/gm-crypto-v0.2.0
