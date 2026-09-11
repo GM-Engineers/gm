@@ -7,7 +7,7 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "GM/CA — gRPC-based CA service for SM2 + TLCP certificates (RsaCaSigner behind `rsa` feature, TLCP profile presets behind `tlcp-profiles` feature)"
 repository = "https://github.com/GM-Engineers/gm"
-keywords = ["ca", "certificate", "sm2", "rsa", "tlcp", "pki", "gm"]
+keywords = ["ca", "certificate", "sm2", "pki", "gm"]
 categories = ["cryptography"]
 readme = "README.md"
 
