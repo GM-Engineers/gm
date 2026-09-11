@@ -13,6 +13,7 @@ pub mod ca {
     }
 }
 pub mod cert;
+pub mod cert_profile;
 pub mod db;
 pub mod error;
 pub mod metrics;
