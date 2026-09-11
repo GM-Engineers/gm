@@ -40,6 +40,20 @@ metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"] }
 subtle = "2"
 zeroize = { version = "1", features = ["derive"] }
+# Optional: RSA CA signer for the TLCP RSA suites (E019/E01C/E059/E05A).
+# Gated behind the `rsa` feature flag so the default GM/CA build stays
+# strictly SM2 + 国密. Versions synced with gm-tlcp 0.6.x.
+rsa  = { version = "0.9", default-features = false, optional = true, features = ["std", "pem", "sha2"] }
+sha2 = { version = "0.10", optional = true }
+sha1 = { version = "0.10", optional = true }
+
+[features]
+# The `rsa` feature enables `RsaCaSigner` for issuing X.509 certs with
+# RSA SPKI + sha256WithRSAEncryption signatures. Required for the TLCP
+# RSA cipher suites (GB/T 38636-2020 §6.4.5.2.1 表 2 — E019/E01C/E059/E05A).
+# Off by default to keep the 国密-only CA build default-clean; the SM2
+# signing path is the canonical path for GM systems.
+rsa = ["dep:rsa", "dep:sha2", "dep:sha1"]
 
 [dev-dependencies]
 tokio-test = "0.4"

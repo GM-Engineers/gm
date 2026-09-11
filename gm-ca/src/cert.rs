@@ -184,21 +184,16 @@ impl CaSigner {
         rand::rng().fill_bytes(&mut serial_bytes);
         serial_bytes[0] &= 0x7F;
 
-        // Issuer == Subject for self-signed root. Build subject DN from CN.
+        // Issuer == Subject for self-signed root.
         let subject_der = der_name(self.ca_subject_cn.as_bytes());
 
-        // Build the SPKI DER (full SubjectPublicKeyInfo) for our own key.
-        let spki_alg = der_algorithm_identifier_for_spki();
-        let spki_key = der_bit_string(&self.ca_pub_65);
-        let spki = der_sequence(&[spki_alg, spki_key].concat());
+        // SM2-specific algorithm identifiers and key-id derivation.
+        let sig_alg_id = sm2_sig_alg_id();
+        let spki_alg_id = sm2_spki_alg_id();
+        let subject_key_id = sm3_key_id(&self.ca_pub_65);
+        let ca_key_id = subject_key_id; // self-signed
 
-        // Extensions per profile. CA's own pubkey is the SPKI subject.
-        let extensions = Some(build_extensions(
-            &self.ca_pub_65,
-            &self.ca_pub_65,
-            &[],
-            profile,
-        ));
+        let extensions = Some(build_extensions(&subject_key_id, &ca_key_id, &[], profile));
 
         let tbs_der = build_tbs_certificate(
             &serial_bytes,
@@ -206,7 +201,9 @@ impl CaSigner {
             not_after,
             self.ca_subject_cn.as_bytes(),
             &subject_der,
-            &spki,
+            sig_alg_id.clone(),
+            spki_alg_id,
+            self.ca_pub_65.clone(),
             extensions,
         )?;
 
@@ -216,7 +213,7 @@ impl CaSigner {
             .sign(&tbs_der)
             .map_err(|e| CaError::SigningFailed(format!("self-sign failed: {}", e)))?;
 
-        let cert_der = build_certificate_der(&tbs_der, &signature);
+        let cert_der = build_certificate_der(&tbs_der, sig_alg_id, &signature);
         let pem_obj = pem::Pem::new("CERTIFICATE", cert_der);
         Ok(pem::encode(&pem_obj))
     }
@@ -303,9 +300,12 @@ impl CaSigner {
         let extensions = if sans.is_empty() && !profile.include_basic_constraints {
             None
         } else {
+            // SM2 key-id derivation: SM3(subject_pubkey_65)[:20].
+            let subject_key_id = sm3_key_id(spki_bytes);
+            let ca_key_id = sm3_key_id(&self.ca_pub_65);
             Some(build_extensions(
-                spki_bytes,
-                &self.ca_pub_65,
+                &subject_key_id,
+                &ca_key_id,
                 &sans,
                 profile,
             ))
@@ -318,7 +318,9 @@ impl CaSigner {
             not_after,
             self.ca_subject_cn.as_bytes(),
             subject_der,
-            spki_bytes,
+            sm2_sig_alg_id(),
+            sm2_spki_alg_id(),
+            spki_bytes.to_vec(),
             extensions,
         )?;
 
@@ -330,7 +332,7 @@ impl CaSigner {
             .map_err(|e| CaError::SigningFailed(format!("signing failed: {}", e)))?;
 
         // Build full Certificate DER
-        let cert_der = build_certificate_der(&tbs_der, &signature);
+        let cert_der = build_certificate_der(&tbs_der, sm2_sig_alg_id(), &signature);
 
         // Encode as PEM
         let pem_obj = pem::Pem::new("CERTIFICATE", cert_der);
@@ -388,9 +390,11 @@ impl CaSigner {
         let extensions = if sans.is_empty() && !profile.include_basic_constraints {
             None
         } else {
+            let subject_key_id = sm3_key_id(&cert_info.spki_bytes);
+            let ca_key_id = sm3_key_id(&self.ca_pub_65);
             Some(build_extensions(
-                &cert_info.spki_bytes,
-                &self.ca_pub_65,
+                &subject_key_id,
+                &ca_key_id,
                 &sans,
                 profile,
             ))
@@ -402,7 +406,9 @@ impl CaSigner {
             not_after,
             self.ca_subject_cn.as_bytes(),
             &cert_info.subject_der,
-            &cert_info.spki_bytes,
+            sm2_sig_alg_id(),
+            sm2_spki_alg_id(),
+            cert_info.spki_bytes.clone(),
             extensions,
         )?;
 
@@ -412,7 +418,7 @@ impl CaSigner {
             .sign(&tbs_der)
             .map_err(|e| CaError::SigningFailed(format!("signing failed: {}", e)))?;
 
-        let cert_der = build_certificate_der(&tbs_der, &signature);
+        let cert_der = build_certificate_der(&tbs_der, sm2_sig_alg_id(), &signature);
         let pem_obj = pem::Pem::new("CERTIFICATE", cert_der);
         Ok(pem::encode(&pem_obj))
     }
@@ -453,7 +459,7 @@ impl CaSigner {
 
         // TBSCertList: version, signature, issuer, thisUpdate, nextUpdate, revokedCerts, extensions
         let tbs_version = der_explicit_context(0, &der_integer_positive(b"\x02\x01\x01")); // v2
-        let tbs_sig_alg = der_algorithm_identifier();
+        let tbs_sig_alg = sm2_sig_alg_id();
         let tbs_issuer = der_name(self.ca_subject_cn.as_bytes());
         let tbs_this_update = utctime(now);
         let tbs_next_update = utctime(now + time::Duration::days(7));
@@ -481,7 +487,7 @@ impl CaSigner {
 
         // Full CRL DER: TBS || AlgorithmIdentifier || BIT STRING
         let sig_bits = der_bit_string(&signature);
-        let crl = der_sequence(&[tbs_der, der_algorithm_identifier(), sig_bits].concat());
+        let crl = der_sequence(&[tbs_der, sm2_sig_alg_id(), sig_bits].concat());
 
         Ok(crl)
     }
@@ -533,15 +539,15 @@ fn build_basic_constraints(is_ca: bool, path_len: Option<u8>) -> Vec<u8> {
 ///   AuthorityKeyIdentifier ::= SEQUENCE {
 ///       keyIdentifier [0] EXPLICIT OCTET STRING OPTIONAL, ...
 ///   }
-/// The OCTET STRING content is `SM3(ca_pubkey_65)[:20]` per
-/// RFC 7093 §2 Method 1 (hash the BIT STRING subjectPublicKey *value*,
-/// not the full SPKI).
-fn build_authority_key_id(ca_pubkey_65: &[u8]) -> Vec<u8> {
-    use gm_crypto::sm3::Sm3Hasher;
-    let hash = Sm3Hasher::hash(ca_pubkey_65).expect("SM3 hash should not fail for bytes");
-    let key_id = der_octet_string(&hash[..20]); // 04 14 <20 bytes>
-    der_sequence(&[der_explicit_context(0, &key_id)].concat())
-    // → 30 <len> A0 <len> 04 14 <20 bytes>
+/// The OCTET STRING content is the 20-byte key-id (already hashed by the
+/// caller per RFC 7093 §2 Method 1: SM3[:20] for SM2 certs, SHA-1[:20]
+/// for RSA certs to interop with the global PKI). The hash function is
+/// chosen by the caller; this helper is purely DER layout.
+///
+/// Produces: `30 <len> A0 <len> 04 14 <20 bytes>`
+pub(crate) fn build_authority_key_id_from_hash(key_id: &[u8]) -> Vec<u8> {
+    let key_id_tlv = der_octet_string(key_id);
+    der_sequence(&[der_explicit_context(0, &key_id_tlv)].concat())
 }
 
 /// Build a complete Extensions SEQUENCE for a certificate, driven by
@@ -554,21 +560,21 @@ fn build_authority_key_id(ca_pubkey_65: &[u8]) -> Vec<u8> {
 ///   5. SubjectKeyIdentifier   — not critical per §4.2.1.2
 ///   6. AuthorityKeyIdentifier — not critical per §4.2.1.1
 ///
-/// `subject_pubkey_65` and `ca_pubkey_65` are 65-byte uncompressed SEC1
-/// SM2 public keys (`04 || x || y`). They feed SKI / AKI per RFC 7093
-/// §2 Method 1.
+/// `subject_key_id` and `ca_key_id` are 20-byte key-identifier values
+/// already computed by the caller (the hash function is algorithm-
+/// specific: SM3[:20] for SM2 certs, SHA-1[:20] for RSA certs). This
+/// helper is algorithm-agnostic.
 ///
 /// Returns the SEQUENCE OF Extension bytes — caller wraps in `[3] EXPLICIT`
 /// via `build_tbs_certificate`. Returns an empty SEQUENCE when the profile
 /// disables every optional extension (caller should treat `None` as
 /// "omit extensions entirely" instead).
-fn build_extensions(
-    subject_pubkey_65: &[u8],
-    ca_pubkey_65: &[u8],
+pub(crate) fn build_extensions(
+    subject_key_id: &[u8],
+    ca_key_id: &[u8],
     sans: &[GeneralName],
     profile: &CertProfile,
 ) -> Vec<u8> {
-    use gm_crypto::sm3::Sm3Hasher;
     let mut exts: Vec<Vec<u8>> = Vec::new();
 
     // 1. BasicConstraints — emit when include_basic_constraints
@@ -616,38 +622,48 @@ fn build_extensions(
         ));
     }
 
-    // 5. SubjectKeyIdentifier — SM3(subject_pubkey_65)[:20] in OCTET STRING
+    // 5. SubjectKeyIdentifier — pre-computed 20-byte key id in OCTET STRING
     if profile.include_ski {
-        let hash = Sm3Hasher::hash(subject_pubkey_65).expect("SM3 hash should not fail for bytes");
         exts.push(build_extension(
             SUBJECT_KEY_ID_OID,
             false,
-            &der_octet_string(&hash[..20]),
+            &der_octet_string(subject_key_id),
         ));
     }
 
-    // 6. AuthorityKeyIdentifier — SM3(ca_pubkey_65)[:20] in [0] EXPLICIT
+    // 6. AuthorityKeyIdentifier — pre-computed 20-byte key id in [0] EXPLICIT
     if profile.include_aki {
         exts.push(build_extension(
             AUTHORITY_KEY_ID_OID,
             false,
-            &build_authority_key_id(ca_pubkey_65),
+            &build_authority_key_id_from_hash(ca_key_id),
         ));
     }
 
     der_sequence_v(&exts)
 }
 
-fn der_algorithm_identifier() -> Vec<u8> {
-    // SEQUENCE { OID, NULL } - uses SM2 signature OID
+/// SM2 SPKI AlgorithmIdentifier: SEQUENCE { OID(sm2), NULL }
+/// OID: 1.2.156.10197.1.301
+fn sm2_spki_alg_id() -> Vec<u8> {
+    let oid = encode_oid(SM2_PK_OID);
+    der_sequence(&[oid, vec![0x05, 0x00]].concat())
+}
+
+/// SM2 Signature AlgorithmIdentifier: SEQUENCE { OID(sm3WithSM2), NULL }
+/// OID: 1.2.156.10197.1.501
+fn sm2_sig_alg_id() -> Vec<u8> {
     let oid = encode_oid(SM2_SIG_OID);
     der_sequence(&[oid, vec![0x05, 0x00]].concat())
 }
 
-fn der_algorithm_identifier_for_spki() -> Vec<u8> {
-    // SEQUENCE { OID, NULL } - uses SM2 public key OID for SPKI
-    let oid = encode_oid(SM2_PK_OID);
-    der_sequence(&[oid, vec![0x05, 0x00]].concat())
+/// SM3(pubkey_bytes)[:20] — RFC 7093 §2 Method 1 key-id derivation for SM2 certs.
+fn sm3_key_id(pubkey_bytes: &[u8]) -> [u8; 20] {
+    use gm_crypto::sm3::Sm3Hasher;
+    let hash = Sm3Hasher::hash(pubkey_bytes).expect("SM3 hash should not fail for bytes");
+    let mut out = [0u8; 20];
+    out.copy_from_slice(&hash[..20]);
+    out
 }
 
 fn der_name(cn: &[u8]) -> Vec<u8> {
@@ -732,13 +748,39 @@ fn utctime_from_datetime(dt: sqlx::types::chrono::DateTime<Utc>) -> Vec<u8> {
     }
 }
 
-fn build_tbs_certificate(
+/// Algorithm-agnostic TBSCertificate builder (RFC 5280 §4.1):
+///
+///   TBSCertificate ::= SEQUENCE {
+///     version         [0] EXPLICIT Version DEFAULT v1,
+///     serialNumber         CertificateSerialNumber,
+///     signature            AlgorithmIdentifier,
+///     issuer               Name,
+///     validity             Validity,
+///     subject              Name,
+///     subjectPublicKeyInfo SubjectPublicKeyInfo,
+///     ...
+///     extensions      [3] EXPLICIT Extensions OPTIONAL
+///   }
+///
+/// `sig_alg_id` and `spki_alg_id` are pre-built DER-encoded
+/// AlgorithmIdentifier values; `spki_pubkey_bitstring` is the BIT STRING
+/// content (e.g. 65-byte uncompressed SM2 point, or PKCS#1 RSAPublicKey
+/// DER for RSA). The SPKI is assembled here from those pieces so callers
+/// don't have to duplicate that layout.
+///
+/// Nine arguments is over clippy's default threshold but the call sites
+/// are confined to `CaSigner` (SM2) and `RsaCaSigner` (RSA); a builder
+/// type would only obscure the DER layout.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_tbs_certificate(
     serial: &[u8],
     not_before: time::OffsetDateTime,
     not_after: time::OffsetDateTime,
     issuer_cn: &[u8],
     subject_der: &[u8],
-    spki_bytes: &[u8],
+    sig_alg_id: Vec<u8>,
+    spki_alg_id: Vec<u8>,
+    spki_pubkey_bitstring: Vec<u8>,
     extensions: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, CaError> {
     // [0] EXPLICIT version v3
@@ -747,9 +789,6 @@ fn build_tbs_certificate(
 
     // SerialNumber
     let serial_der = der_integer_positive(serial);
-
-    // Signature AlgorithmIdentifier
-    let sig_alg = der_algorithm_identifier();
 
     // Issuer Name
     let issuer = der_name(issuer_cn);
@@ -760,14 +799,12 @@ fn build_tbs_certificate(
     // Subject (use raw DER from CSR)
     let subject = subject_der.to_vec();
 
-    // SubjectPublicKeyInfo - properly DER-encoded as SEQUENCE { AlgorithmIdentifier, BIT_STRING }
-    let spki_alg = der_algorithm_identifier_for_spki();
-    let spki_key = der_bit_string(spki_bytes);
-    let spki = der_sequence(&[spki_alg, spki_key].concat());
+    // SubjectPublicKeyInfo: SEQUENCE { AlgorithmIdentifier, BIT STRING(content) }
+    let spki = der_sequence(&[spki_alg_id, der_bit_string(&spki_pubkey_bitstring)].concat());
 
     // Build TBSCertificate
     let mut tbs_parts: Vec<Vec<u8>> = vec![
-        version, serial_der, sig_alg, issuer, validity, subject, spki,
+        version, serial_der, sig_alg_id, issuer, validity, subject, spki,
     ];
 
     // Append [3] EXPLICIT Extensions if present
@@ -778,10 +815,18 @@ fn build_tbs_certificate(
     Ok(der_sequence_v(&tbs_parts))
 }
 
-fn build_certificate_der(tbs: &[u8], signature: &[u8]) -> Vec<u8> {
-    let sig_alg = der_algorithm_identifier();
+/// Algorithm-agnostic Certificate wrapper (RFC 5280 §4.1):
+///
+///   Certificate ::= SEQUENCE {
+///     tbsCertificate     TBSCertificate,
+///     signatureAlgorithm AlgorithmIdentifier,
+///     signatureValue     BIT STRING
+///   }
+///
+/// `sig_alg_id` must match the AlgorithmIdentifier inside the TBS.
+pub(crate) fn build_certificate_der(tbs: &[u8], sig_alg_id: Vec<u8>, signature: &[u8]) -> Vec<u8> {
     let sig_bits = der_bit_string(signature);
-    der_sequence(&[tbs.to_vec(), sig_alg, sig_bits].concat())
+    der_sequence(&[tbs.to_vec(), sig_alg_id, sig_bits].concat())
 }
 
 // ============================================================================

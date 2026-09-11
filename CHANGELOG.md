@@ -20,7 +20,27 @@ All notable changes to the GM cryptographic library suite.
 
 ### Added
 
-#### `gm-ca` 0.2.0
+#### `gm-ca` 0.2.0 (Phase 4)
+
+- **`RsaCaSigner` (feature `rsa`)** — X.509 CA signer backed by an
+  RSA private key. Mirror of `CaSigner` (SM2) for the TLCP RSA
+  cipher suites ([GB/T 38636-2020] §6.4.5.2.1 表 2)
+  E019/E01C/E059/E05A. Cert chain uses `rsaEncryption` SPKI +
+  `sha256WithRSAEncryption` signatures (the wire format general
+  X.509 verifiers expect — GmSSL master, openHiTLS, OpenSSL);
+  SKI/AKI key-ids use SHA-1 per RFC 7093 §2 Method 1 for global
+  PKI interop. API surface parallels `CaSigner` 1-for-1:
+  `self_sign_ca`, `sign_csr_with_profile`, `renew_certificate_with_profile`,
+  plus `from_pkcs8_pem`. RSA CSRs are signature-verified with
+  sha256WithRSAEncryption before issuing; SM2-signed CSRs are
+  rejected (would produce algorithm-mismatch cert).
+
+- **`rsa` Cargo feature** (off by default) — enables
+  `RsaCaSigner` and pulls `rsa = "0.9"` + `sha2 = "0.10"` +
+  `sha1 = "0.10"` (versions synced with gm-tlcp 0.6.x). The
+  default GM/CA build stays strictly SM2 + 国密.
+
+#### `gm-ca` 0.2.0 (Phase 3)
 
 - **`CertProfile`** (in `gm_ca::cert_profile`) — declarative spec
   for what extensions a cert should carry. Presets:
@@ -381,3 +401,5 @@ permission race, etc). Replaced over a 5-attempt fix sequence:
 - `rand 0.8.5` unsound (fixed in 0.2.0 with migration to 0.10)
 - `atomic-polyfill` unmaintained transitive dependency
 - `rsa` crate Marvin Attack (awaiting upstream sqlx update)
+
+[GB/T 38636-2020]: https://openstd.samr.gov.cn/

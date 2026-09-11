@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`RsaCaSigner` (feature `rsa`)** — X.509 CA signer backed by an
+  RSA private key, mirror of `CaSigner` for the SM2 path. Produces
+  certs with `rsaEncryption` (1.2.840.113549.1.1.1) SPKI and
+  `sha256WithRSAEncryption` (1.2.840.113549.1.1.11) signatures —
+  the surface expected by general-purpose X.509 verifiers
+  (GmSSL master, openHiTLS, OpenSSL) for the TLCP RSA suites
+  ([GB/T 38636-2020] §6.4.5.2.1 表 2 — E019/E01C/E059/E05A).
+  SKI/AKI key-ids use SHA-1 per RFC 7093 §2 Method 1 (interop
+  with global PKI; SM3 is reserved for SM2 certs). Methods:
+  `self_sign_ca`, `sign_csr_with_profile` (CSR must use
+  `rsaEncryption`; SM2-signed CSRs are rejected up front),
+  `renew_certificate_with_profile`, `from_pkcs8_pem`. RSA CSRs
+  are signature-verified with sha256WithRSAEncryption before
+  issuing.
+
+- **`rsa` Cargo feature** (off by default) — enables
+  `RsaCaSigner` and pulls `rsa = "0.9"` + `sha2 = "0.10"` +
+  `sha1 = "0.10"` (versions synced with gm-tlcp 0.6.x). Default
+  build stays strictly SM2 + 国密; the SM2 path is the canonical
+  CA signer.
+
+### Internal
+
+- **`cert::build_tbs_certificate`, `cert::build_certificate_der`,
+  `cert::build_extensions` refactored to be algorithm-agnostic.**
+  They now take pre-built `sig_alg_id`, `spki_alg_id`, and 20-byte
+  `subject_key_id` / `ca_key_id` values instead of SM2-specific
+  pubkey bytes. The SM2 `CaSigner` path uses thin SM2 wrappers
+  (`sm2_sig_alg_id`, `sm2_spki_alg_id`, `sm3_key_id`) and the
+  new `RsaCaSigner` path uses RSA wrappers (`rsa_sig_alg_id`,
+  `rsa_spki_alg_id`, `sha1_key_id`). No behavior change to
+  existing SM2 callers.
+
+[GB/T 38636-2020]: https://openstd.samr.gov.cn/
+
 ## [0.2.0] - 2026-09-11
 
 ### Breaking Changes
