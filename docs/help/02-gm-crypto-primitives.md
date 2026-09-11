@@ -1,6 +1,6 @@
 # 国密算法原语详解 / National Cryptography Algorithm Primitives Deep Dive
 
-> 上次更新 / Last Updated: 2026-06-29
+> 上次更新 / Last Updated: 2026-09-11
 > 文档版本 / Doc Version: 2026-05-21
 > 对应代码 / Corresponding Code: `gm-crypto/src/`
 > 阅读对象 / Target Audience: 密码学实现者、安全审计者 / Cryptography implementers, security auditors

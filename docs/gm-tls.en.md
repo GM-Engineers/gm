@@ -1,6 +1,6 @@
 # gm-tls Guide
 
-> Last Updated:2026-06-30
+> Last Updated: 2026-09-11
 
 
 ## Adding Dependencies

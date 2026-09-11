@@ -1,6 +1,6 @@
 # gm 项目（国密 GM/T 算法库）技术文档索引 / gm Project (Chinese National Cryptography GM/T) Technical Documentation Index
 
-> 上次更新 / Last Updated: 2026-06-29
+> 上次更新 / Last Updated: 2026-09-11
 > 文档版本 / Doc Version: 2026-05-21
 > 项目路径 / Project Path: `gm`
 > 阅读对象 / Target Audience: 项目维护者、核心开发者 / Project maintainers, core developers

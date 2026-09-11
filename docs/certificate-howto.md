@@ -1,6 +1,6 @@
 # 证书操作指南
 
-> 上次更新：2026-06-29
+> 上次更新：2026-09-11
 > 英文版：[certificate-howto.en.md](./certificate-howto.en.md)
 
 本文档介绍如何使用本项目套件生成、验证和管理 SM2 证书。

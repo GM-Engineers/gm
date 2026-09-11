@@ -1,6 +1,6 @@
 # Certificate Operations Guide
 
-> Last Updated: 2026-06-29
+> Last Updated: 2026-09-11
 
 This document describes how to use the project suite to generate, verify, and manage SM2 certificates.
 

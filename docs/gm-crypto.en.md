@@ -1,6 +1,6 @@
 # gm-crypto Guide
 
-> Last Updated: 2026-06-29
+> Last Updated: 2026-09-11
 
 Pure Rust implementation of national cryptography (GM) algorithms: SM2 (sign/encrypt), SM3 (hash), and SM4 (symmetric encryption). All algorithms use `zeroize` to automatically zeroize sensitive key material on `Drop`, and `OsRng` as the secure random source.
 

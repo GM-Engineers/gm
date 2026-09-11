@@ -1,6 +1,6 @@
 # 测试策略与 KAT 详解 / Testing Strategy and KAT Deep Dive
 
-> 上次更新 / Last Updated: 2026-06-30
+> 上次更新 / Last Updated: 2026-09-11
 > 文档版本 / Doc Version: 2026-05-02
 > 对应代码 / Corresponding Code: `gm-crypto/src/kat.rs`, `gm-*/tests/`
 > 阅读对象 / Target Audience: 测试维护者、密码模块验证人员 / Test maintainers, cryptographic module validators

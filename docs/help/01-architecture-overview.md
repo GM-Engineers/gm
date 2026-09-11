@@ -1,6 +1,6 @@
 # gm 项目架构总览 / gm Project Architecture Overview
 
-> 上次更新 / Last Updated: 2026-06-29
+> 上次更新 / Last Updated: 2026-09-11
 > 文档版本 / Doc Version: 2026-05-21
 > 项目路径 / Project Path: `gm`
 > 阅读对象 / Target Audience: 开发者、维护者 / Developers, maintainers

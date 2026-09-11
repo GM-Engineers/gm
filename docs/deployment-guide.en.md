@@ -1,6 +1,6 @@
 # GM/TLS Production Deployment Guide
 
-> Last Updated: 2026-06-29
+> Last Updated: 2026-09-11
 
 This guide covers production deployment of `gm-tls` services using SM2/SM3/SM4
 cryptographic algorithms (GM/T 0003/0004/0005-2012). It addresses the security

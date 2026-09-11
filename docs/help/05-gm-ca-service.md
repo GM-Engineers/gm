@@ -1,6 +1,6 @@
 # gm-ca 证书授权服务详解 / gm-ca Certificate Authority Service Deep Dive
 
-> 上次更新 / Last Updated: 2026-06-29
+> 上次更新 / Last Updated: 2026-09-11
 > 文档版本 / Doc Version: 2026-05-02
 > 对应代码 / Corresponding Code: `gm-ca/src/` (~1,580 LOC)
 > 阅读对象 / Target Audience: CA 服务维护者 / CA service maintainers

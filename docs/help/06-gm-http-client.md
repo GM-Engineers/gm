@@ -1,6 +1,6 @@
 # gm-http-client 安全客户端详解 / gm-http-client Secure Client Deep Dive
 
-> 上次更新 / Last Updated: 2026-06-29
+> 上次更新 / Last Updated: 2026-09-11
 > 文档版本 / Doc Version: 2026-05-02
 > 对应代码 / Corresponding Code: `gm-http-client/src/` (~1,056 LOC)
 > 阅读对象 / Target Audience: 客户端维护者 / Client maintainers
