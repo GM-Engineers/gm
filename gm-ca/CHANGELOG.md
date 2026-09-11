@@ -54,6 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   | `tlcp_server_sign_ecc` | digitalSignature \| keyAgreement | serverAuth | SM2 |
   | `tlcp_server_enc_ecc` | keyEncipherment \| keyAgreement \| dataEncipherment | (none — GmSSL convention) | SM2 |
   | `tlcp_client_sign_ecc` | digitalSignature \| keyAgreement | clientAuth | SM2 |
+  | `tlcp_client_enc_ecc` (Phase 9) | keyEncipherment \| keyAgreement \| dataEncipherment | clientAuth | SM2 |
   | `tlcp_server_rsa` (gated `rsa`) | digitalSignature \| keyEncipherment | serverAuth | RSA |
   | `tlcp_client_rsa` (gated `rsa`) | digitalSignature \| keyEncipherment | clientAuth | RSA |
 

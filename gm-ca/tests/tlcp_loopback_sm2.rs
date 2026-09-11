@@ -49,7 +49,9 @@
 
 use gm_ca::cert::CaSigner;
 use gm_ca::cert_profile::CertProfile;
-use gm_ca::profiles::tlcp::{tlcp_client_sign_ecc, tlcp_server_enc_ecc, tlcp_server_sign_ecc};
+use gm_ca::profiles::tlcp::{
+    tlcp_client_enc_ecc, tlcp_client_sign_ecc, tlcp_server_enc_ecc, tlcp_server_sign_ecc,
+};
 use gm_crypto::sm2::Sm2KeyPair;
 use gm_crypto::x509::{CsrBuilder, extract_sm2_pubkey_from_der};
 use gm_tlcp::tlcp::{TlcpAcceptor, TlcpConnector};
@@ -70,8 +72,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// sign + enc certs via the same `CaSigner` so the chain `[client_sign,
 /// client_enc, root_ca]` is fully self-consistent.
 async fn run_ecc_loopback(suite: [u8; 2]) {
-    use gm_ca::cert_profile::{ExtendedKeyUsage, KeyUsageBits};
-
     // 1. Root CA via CaSigner (SM2). We keep the DER for the client cert
     //    chain — the connector requires the CA in the chain so its
     //    AKI chain walk can resolve.
@@ -162,18 +162,8 @@ async fn run_ecc_loopback(suite: [u8; 2]) {
         .expect("CsrBuilder::new_sm2")
         .build_pem(&client_enc_key)
         .expect("build_pem");
-    let client_enc_profile = CertProfile {
-        key_usage: KeyUsageBits {
-            key_encipherment: true,
-            key_agreement: true,
-            data_encipherment: true,
-            ..Default::default()
-        },
-        ext_key_usage: vec![ExtendedKeyUsage::ClientAuth],
-        ..Default::default()
-    };
     let (_, client_enc_pem) = ca_signer
-        .sign_csr_with_profile(client_enc_csr.as_bytes(), 365, &client_enc_profile)
+        .sign_csr_with_profile(client_enc_csr.as_bytes(), 365, &tlcp_client_enc_ecc())
         .expect("sign_csr_with_profile (client enc cert)");
     let client_enc_cert_der = pem::parse(client_enc_pem.as_bytes())
         .expect("PEM parse (client enc)")

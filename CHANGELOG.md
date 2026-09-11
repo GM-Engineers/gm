@@ -20,6 +20,19 @@ All notable changes to the GM cryptographic library suite.
 
 ### Added
 
+#### `gm-ca` 0.2.0 (Phase 9)
+
+- **`tlcp_client_enc_ecc()` preset** — closes the inline client
+  enc profile that Phase 6b's `tests/tlcp_loopback_sm2.rs`
+  needed for the ECC client cert. Same KU bits as
+  `tlcp_server_enc_ecc()` (`keyEncipherment | keyAgreement |
+  dataEncipherment`) + the **mandatory** `clientAuth` EKU
+  (§6.4.6.2.2 b) marks it as "应包括" for the client side,
+  contrasting with the server side's "可包括" / GmSSL
+  convention of no EKU). Refactors `tests/tlcp_loopback_sm2.rs`
+  to use the preset instead of constructing an inline
+  `CertProfile`. profiles::tlcp test count: 5 → 6.
+
 #### `gm-ca` 0.2.0 (Phase 6b)
 
 - **`tests/tlcp_loopback_sm2.rs`** — 5 in-process loopback tests

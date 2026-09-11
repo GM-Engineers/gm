@@ -9,7 +9,7 @@
 //!
 //! [`GB/T 38636-2020`]: https://openstd.samr.gov.cn/
 //!
-//! This module exposes 5 preset constructors that produce `CertProfile`
+//! This module exposes 6 preset constructors that produce `CertProfile`
 //! values with the KU / EKU / BC layout the spec / GmSSL master /
 //! openHiTLS implementations expect:
 //!
@@ -18,10 +18,11 @@
 //! | [`tlcp_server_sign_ecc`] | digitalSignature \| keyAgreement | serverAuth | SM2 | `tlcp-profiles` |
 //! | [`tlcp_server_enc_ecc`] | keyEncipherment \| keyAgreement \| dataEncipherment | (none) | SM2 | `tlcp-profiles` |
 //! | [`tlcp_client_sign_ecc`] | digitalSignature \| keyAgreement | clientAuth | SM2 | `tlcp-profiles` |
+//! | [`tlcp_client_enc_ecc`] | keyEncipherment \| keyAgreement \| dataEncipherment | clientAuth | SM2 | `tlcp-profiles` |
 //! | [`tlcp_server_rsa`] | digitalSignature \| keyEncipherment | serverAuth | RSA | `tlcp-profiles` + `rsa` |
 //! | [`tlcp_client_rsa`] | digitalSignature \| keyEncipherment | clientAuth | RSA | `tlcp-profiles` + `rsa` |
 //!
-//! ## Common field defaults (all 5 presets)
+//! ## Common field defaults (all 6 presets)
 //!
 //!   * `is_ca = false`
 //!   * `ca_path_len_constraint = None`
@@ -147,6 +148,35 @@ pub fn tlcp_client_sign_ecc() -> CertProfile {
         KeyUsageBits {
             digital_signature: true,
             key_agreement: true,
+            ..Default::default()
+        },
+        vec![ExtendedKeyUsage::ClientAuth],
+    )
+}
+
+/// TLCP client **enc** cert (ECC / SM2). Used by the 4 static-ECDH /
+/// fixed-ECDH suites on the client side to transport the client's
+/// static ECDH public key (the server SM2-PKE-encrypts the 48-byte PMS
+/// under this key during step 8 of the ECC handshake).
+///
+/// KU: `keyEncipherment | keyAgreement | dataEncipherment` — same layout
+/// as [`tlcp_server_enc_ecc`] because the bit positions are algorithm-
+/// driven, not role-driven; the role difference lives entirely in the
+/// EKU below.
+///
+/// EKU: `clientAuth`. Unlike the server-side enc preset (no EKU per
+/// §6.4.6.1.2 b) + GmSSL convention), the client-side enc preset MUST
+/// include `clientAuth` — the server's `CertificateRequest` step checks
+/// the client chain's EKU before accepting client cert auth. Without
+/// `clientAuth` some strict verifiers reject the cert. §6.4.6.2.2 b)
+/// marks clientAuth as "应包括" (should include) for the client enc
+/// cert, contrasting with the server's "可包括" (may include).
+pub fn tlcp_client_enc_ecc() -> CertProfile {
+    leaf_cert_profile(
+        KeyUsageBits {
+            key_encipherment: true,
+            key_agreement: true,
+            data_encipherment: true,
             ..Default::default()
         },
         vec![ExtendedKeyUsage::ClientAuth],
@@ -296,6 +326,33 @@ mod tests {
         assert_ne!(
             p.ext_key_usage, server.ext_key_usage,
             "client and server sign certs must have different EKUs"
+        );
+    }
+
+    #[test]
+    fn tlcp_client_enc_ecc_has_key_agreement_key_encipherment_with_clientauth() {
+        let p = tlcp_client_enc_ecc();
+        assert_leaf_basics(&p, &[ExtendedKeyUsage::ClientAuth]);
+        assert_eq!(
+            p.key_usage.to_der_bytes(),
+            TLCP_ECC_ENC_KU_BYTES,
+            "KU bytes must match server_enc_ecc (same KU; only EKU differs)"
+        );
+        // The only difference from server_enc_ecc must be the EKU —
+        // clientAuth here (mandatory for client cert auth) vs empty there
+        // (GmSSL convention + §6.4.6.1.2 b) optional).
+        let server = tlcp_server_enc_ecc();
+        assert_ne!(
+            p.ext_key_usage, server.ext_key_usage,
+            "client and server enc certs must have different EKUs (clientAuth vs empty)"
+        );
+        // Spot-check the bit layout invariant: the client's enc KU is
+        // intentionally distinct from the client's sign KU — we don't
+        // want a future refactor accidentally collapsing them.
+        let client_sign = tlcp_client_sign_ecc();
+        assert_ne!(
+            p.key_usage, client_sign.key_usage,
+            "client_enc must not match client_sign KU"
         );
     }
 
