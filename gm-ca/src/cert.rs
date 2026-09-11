@@ -895,31 +895,12 @@ mod tests {
         let ca_pub_65 = ca_key.public_key_bytes_uncompressed();
         let ca_signer = CaSigner::new(ca_key, "Test CA");
 
-        // Build minimal CRI: version 0, subject CN, SPKI, [0] empty attrs.
-        let cn_oid = encode_oid(CN_OID);
-        let sm2_pk_oid = encode_oid(SM2_PK_OID);
-        let cn_value = der_utf8_string(b"leaf.example.com");
-        let atv = der_sequence(&[cn_oid, cn_value].concat());
-        let set = der_set(&[atv]);
-        let subject = der_sequence(&[set].concat());
-        let alg = der_sequence(&[sm2_pk_oid, vec![0x05, 0x00]].concat());
-        let bs = der_bit_string(&leaf_pub_65);
-        let spki = der_sequence(&[alg, bs].concat());
-        let version = der_integer_positive(&[0x00]);
-        let attrs = vec![0xA0u8, 0x00];
-        let cri = der_sequence(&[version, subject, spki, attrs].concat());
-
-        let signer = gm_crypto::sm2::Sm2Signer::new(&leaf_key).expect("signer");
-        let sig = signer.sign(&cri).expect("sign cri");
-        let sig_alg = der_sequence(&[encode_oid(SM2_SIG_OID), vec![0x05, 0x00]].concat());
-        // BIT STRING wrapping: tag 03, length, 0x00 unused-bits, sig bytes
-        let sig_payload_len = 1 + sig.len();
-        let mut sig_value = vec![0x03];
-        sig_value.extend_from_slice(&gm_der::der_len(sig_payload_len));
-        sig_value.push(0x00);
-        sig_value.extend_from_slice(&sig);
-        let csr_der = der_sequence(&[cri, sig_alg, sig_value].concat());
-        let csr_pem = pem::encode(&pem::Pem::new("CERTIFICATE REQUEST", csr_der));
+        // Build the CSR with CsrBuilder (replaces ~25 lines of naked DER
+        // that lived here pre-Phase-3).
+        let csr_pem = gm_crypto::x509::CsrBuilder::new_sm2("leaf.example.com", &leaf_pub_65)
+            .expect("CsrBuilder::new_sm2")
+            .build_pem(&leaf_key)
+            .expect("CsrBuilder::build_pem");
 
         let (_, cert_pem) = ca_signer
             .sign_csr_with_profile(csr_pem.as_bytes(), 365, &CertProfile::default())

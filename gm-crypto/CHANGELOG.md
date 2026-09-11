@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`x509::CsrBuilder`** (in [`src/x509.rs`](src/x509.rs)) — PKCS#10
+  CertificationRequest (RFC 2986) builder for SM2. The CSR produced here
+  is wire-compatible with:
+    - `gm_ca::cert::CaSigner::sign_csr_with_profile(csr_pem, days, &profile)`
+      (which round-trips through x509-parser before signing).
+    - GmSSL master `gmssl req` (standard SM2 SPKI + sigAlg encoding).
+    - openHiTLS / Tongsuo TLCP / TLS 1.3 + SM cert chain tooling.
+
+  Public API:
+  ```rust
+  use gm_crypto::x509::CsrBuilder;
+  use gm_crypto::sm2::Sm2KeyPair;
+
+  let keypair = Sm2KeyPair::generate()?;
+  let pubkey_65 = keypair.public_key_bytes_uncompressed();
+  let csr_pem = CsrBuilder::new_sm2("server.example.com", &pubkey_65)?
+      .build_pem(&keypair)?;
+  ```
+
+  - `new_sm2(cn, pubkey_65)` — validate 65-byte uncompressed SEC1 pubkey.
+  - `build_cri_der()` — unsigned CRI body (RFC 2986 §4.1).
+  - `sign(key_pair)` — full CSR DER (RFC 2986 §4.2) using SM3withSM2
+    (OID 1.2.156.10197.1.501) with the GM/TLS standard distid.
+  - `build_pem(key_pair)` — `build_pem` shortcut.
+  - `subject_cn()` / `sm2_pubkey()` — read-only accessors.
+
+  RSA CSR signing is NOT supported here. RSA cert issuance lives in
+  gm-ca's `rsa` feature flag (Phase 4+).
+
+  Five unit tests cover:
+    - input validation (length + 0x04 prefix)
+    - CRI round-trip via x509-parser
+    - CSR PEM round-trip + signature verification via `Sm2Verifier`.
+
+### Changed
+
+- `x509` module: doc comment expanded to mention PKCS#10 CSR generation
+  alongside the existing cert parsing helpers.
+
 ## [0.3.0] - 2026-09-07
 
 ### Added

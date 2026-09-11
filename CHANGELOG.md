@@ -41,6 +41,19 @@ All notable changes to the GM cryptographic library suite.
 - **BasicConstraints emitted by default** — `CA:FALSE` for end-entity
   certs, `CA:TRUE` (with optional `pathLenConstraint`) for CA certs.
 
+#### `gm-crypto` 0.4.0 (pending)
+
+- **`x509::CsrBuilder`** — PKCS#10 CertificationRequest (RFC 2986)
+  builder for SM2. Public API: `new_sm2`, `build_cri_der`,
+  `sign`, `build_pem`. Wire-compatible with `gm-ca`'s
+  `sign_csr_with_profile`, GmSSL `gmssl req`, and the SM2 SPKI
+  encoding used by openHiTLS / Tongsuo. This lets `gm-ca`'s
+  test fixtures (and any future end-user tooling) build CSRs
+  without the ~120 lines of naked DER construction that lived
+  in `tests/service_tests.rs` and `tests/full_chain_test.rs`
+  pre-Phase-3. The 5 unit tests round-trip through x509-parser
+  and verify the SM3withSM2 signature.
+
 ### Breaking
 
 - **`gm-ca` 0.2.0** — `CaSigner::sign_csr` removed (use

@@ -3,8 +3,6 @@
 //! Tests the gRPC CA service (CaServiceImpl) with an in-memory SQLite database
 //! to avoid requiring a running PostgreSQL instance.
 
-use asn1::{ObjectIdentifier, SequenceWriter};
-use elliptic_curve::sec1::ToEncodedPoint;
 use gm_ca::ca::v1::{
     CaService, GetCertificateRequest, GetCrlRequest, RenewCertificateRequest,
     RevokeCertificateRequest, SignCertificateRequest,
@@ -13,14 +11,10 @@ use gm_ca::cert::CaSigner;
 use gm_ca::db::DbStore;
 use gm_ca::service::CaServiceImpl;
 use gm_crypto::sm2::Sm2KeyPair;
+use gm_crypto::x509::CsrBuilder;
 use sqlx::any::AnyPoolOptions;
 use std::sync::Arc;
 use tonic::Request;
-
-// SM2 public key OID: 1.2.156.10197.1.301
-const SM2_PK_OID_BYTES: &[u8] = &[0x2A, 0x8C, 0xD8, 0xE3, 0x65, 0x6A, 0x01, 0x01];
-// CN OID: 2.5.4.3
-const CN_OID_BYTES: &[u8] = &[0x55, 0x04, 0x03];
 
 /// Install sqlx any drivers before running tests.
 fn init() {
@@ -45,137 +39,16 @@ async fn create_test_service() -> CaServiceImpl {
     CaServiceImpl::new(signer, Arc::new(store))
 }
 
-/// Helper to write DER SEQUENCE length (handles >127 bytes)
-fn der_len(len: usize) -> Vec<u8> {
-    if len < 128 {
-        vec![len as u8]
-    } else if len < 0x100 {
-        vec![0x81, len as u8]
-    } else if len < 0x10000 {
-        vec![0x82, (len >> 8) as u8, len as u8]
-    } else {
-        vec![0x83, (len >> 16) as u8, (len >> 8) as u8, len as u8]
-    }
-}
-
-/// Build the CRI (CertificationRequestInfo) portion of a CSR.
-fn build_cri(subject_cn: &str, public_key_bytes: &[u8]) -> Vec<u8> {
-    // Build CN OID DER
-    let cn_oid_der = {
-        let mut v = vec![0x06];
-        v.push(CN_OID_BYTES.len() as u8);
-        v.extend_from_slice(CN_OID_BYTES);
-        v
-    };
-
-    // Build SM2 PK OID DER
-    let sm2_pk_oid_der = {
-        let mut v = vec![0x06];
-        v.push(SM2_PK_OID_BYTES.len() as u8);
-        v.extend_from_slice(SM2_PK_OID_BYTES);
-        v
-    };
-
-    // Build subject name: SEQUENCE { SET { SEQUENCE { OID, UTF8String } } }
-    let cn_value = subject_cn.as_bytes();
-    let subject_name = {
-        // Inner SEQUENCE: OID + UTF8String
-        let mut inner_seq = vec![0x30];
-        let inner_len = cn_oid_der.len() + 2 + cn_value.len();
-        inner_seq.extend_from_slice(&der_len(inner_len));
-        inner_seq.extend_from_slice(&cn_oid_der);
-        inner_seq.push(0x0C); // UTF8String
-        inner_seq.push(cn_value.len() as u8);
-        inner_seq.extend_from_slice(cn_value);
-
-        // SET wrapper
-        let mut set = vec![0x31];
-        set.extend_from_slice(&der_len(inner_seq.len()));
-        set.extend_from_slice(&inner_seq);
-
-        // Outer SEQUENCE
-        let mut seq = vec![0x30];
-        seq.extend_from_slice(&der_len(set.len()));
-        seq.extend_from_slice(&set);
-        seq
-    };
-
-    // Build SPKI: SEQUENCE { AlgorithmIdentifier, BIT STRING }
-    let spki = {
-        // AlgorithmIdentifier: SEQUENCE { OID, NULL }
-        let alg_content = {
-            let mut v = Vec::new();
-            v.extend_from_slice(&sm2_pk_oid_der);
-            v.extend_from_slice(&[0x05, 0x00]); // NULL
-            v
-        };
-        let mut alg_id = vec![0x30];
-        alg_id.extend_from_slice(&der_len(alg_content.len()));
-        alg_id.extend_from_slice(&alg_content);
-
-        // BIT STRING: 03 <len> 00 <pubkey>
-        let bit_string_content_len = 1 + public_key_bytes.len();
-        let mut bit_string = vec![0x03];
-        bit_string.extend_from_slice(&der_len(bit_string_content_len));
-        bit_string.push(0x00); // no unused bits
-        bit_string.extend_from_slice(public_key_bytes);
-
-        // SEQUENCE wrapper
-        let spki_content_len = alg_id.len() + bit_string.len();
-        let mut seq = vec![0x30];
-        seq.extend_from_slice(&der_len(spki_content_len));
-        seq.extend_from_slice(&alg_id);
-        seq.extend_from_slice(&bit_string);
-        seq
-    };
-
-    // Build CRI: SEQUENCE { version, subject, spki, [0] empty }
-    let version = vec![0x02, 0x01, 0x00]; // INTEGER 0
-    let attributes = vec![0xA0, 0x00]; // [0] empty
-
-    let cri_content_len = version.len() + subject_name.len() + spki.len() + attributes.len();
-    let mut cri = vec![0x30];
-    cri.extend_from_slice(&der_len(cri_content_len));
-    cri.extend_from_slice(&version);
-    cri.extend_from_slice(&subject_name);
-    cri.extend_from_slice(&spki);
-    cri.extend_from_slice(&attributes);
-
-    cri
-}
-
-/// Build a PKCS#10 CSR PEM for testing.
+/// Build a PKCS#10 CSR PEM for testing using `gm_crypto::x509::CsrBuilder`.
+/// Replaces the ~130 lines of naked DER construction that lived here in
+/// pre-Phase-3 gm-ca.
 fn build_test_csr_pem(subject_cn: &str) -> String {
     let keypair = Sm2KeyPair::generate().expect("failed to generate key");
-    let pubkey = keypair.public_key().to_encoded_point(false);
-    let pubkey_bytes = pubkey.as_bytes();
-
-    let cri = build_cri(subject_cn, pubkey_bytes);
-
-    // Sign CRI
-    let signer = gm_crypto::sm2::Sm2Signer::new(&keypair).unwrap();
-    let sig = signer.sign(&cri).unwrap();
-
-    // Build sigAlg: SEQUENCE { OID }
-    let sm2_sig_oid = ObjectIdentifier::from_string("1.2.156.10197.1.501").unwrap();
-    let sig_alg = asn1::write_single(&SequenceWriter::new(&|w| {
-        w.write_element(&sm2_sig_oid)?;
-        Ok(())
-    }))
-    .unwrap();
-
-    // Build sigValue: BIT STRING
-    let sig_value = asn1::write_single(&asn1::BitString::new(&sig, 0).unwrap()).unwrap();
-
-    // Build full CSR: SEQUENCE { CRI, sigAlg, sigValue }
-    let inner_len = cri.len() + sig_alg.len() + sig_value.len();
-    let mut csr = vec![0x30];
-    csr.extend_from_slice(&der_len(inner_len));
-    csr.extend_from_slice(&cri);
-    csr.extend_from_slice(&sig_alg);
-    csr.extend_from_slice(&sig_value);
-
-    pem::encode(&pem::Pem::new("CERTIFICATE REQUEST", csr))
+    let pubkey_65 = keypair.public_key_bytes_uncompressed();
+    CsrBuilder::new_sm2(subject_cn, &pubkey_65)
+        .expect("CsrBuilder::new_sm2")
+        .build_pem(&keypair)
+        .expect("CsrBuilder::build_pem")
 }
 
 #[tokio::test]
