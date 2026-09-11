@@ -17,6 +17,8 @@ pub mod cert_profile;
 pub mod db;
 pub mod error;
 pub mod metrics;
+#[cfg(feature = "tlcp-profiles")]
+pub mod profiles;
 #[cfg(feature = "rsa")]
 pub mod rsa_signer;
 pub mod service;

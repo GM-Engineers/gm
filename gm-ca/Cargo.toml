@@ -54,6 +54,14 @@ sha1 = { version = "0.10", optional = true }
 # Off by default to keep the 国密-only CA build default-clean; the SM2
 # signing path is the canonical path for GM systems.
 rsa = ["dep:rsa", "dep:sha2", "dep:sha1"]
+# The `tlcp-profiles` feature exposes `gm_ca::profiles::tlcp` — a set
+# of TLCP-specific `CertProfile` presets (server_sign_ecc, server_enc_ecc,
+# client_sign_ecc, plus server_rsa / client_rsa when combined with the
+# `rsa` feature). These presets emit the KU/EKU/BC layout the GB/T 38636
+# §6.4.6 spec / GmSSL master / openHiTLS expect for TLCP end-entity
+# certs. Off by default to keep the base `CertProfile` API surface
+# minimal for non-TLCP deployments.
+tlcp-profiles = []
 
 [dev-dependencies]
 tokio-test = "0.4"

@@ -20,6 +20,18 @@ All notable changes to the GM cryptographic library suite.
 
 ### Added
 
+#### `gm-ca` 0.2.0 (Phase 5)
+
+- **`tlcp-profiles` Cargo feature** (off by default) — enables
+  `gm_ca::profiles::tlcp` exposing 5 TLCP end-entity `CertProfile`
+  preset constructors matching the KU/EKU layout
+  [GB/T 38636-2020] §6.4.6 / GmSSL master / openHiTLS expect:
+  `tlcp_server_sign_ecc` / `tlcp_server_enc_ecc` /
+  `tlcp_client_sign_ecc` (SM2) plus `tlcp_server_rsa` /
+  `tlcp_client_rsa` (RSA, behind the `rsa` feature). The enc cert
+  preset deliberately omits EKU (per spec EKU is optional;
+  GmSSL/openHiTLS both emit none for the enc cert).
+
 #### `gm-ca` 0.2.0 (Phase 4)
 
 - **`RsaCaSigner` (feature `rsa`)** — X.509 CA signer backed by an

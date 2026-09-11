@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`tlcp-profiles` Cargo feature** (off by default) — enables the
+  new `gm_ca::profiles::tlcp` submodule exposing 5 TLCP end-entity
+  `CertProfile` preset constructors matching the KU/EKU layout that
+  [GB/T 38636-2020] §6.4.6 / GmSSL master / openHiTLS expect:
+
+  | Preset | KU bits | EKU | Algorithm |
+  |---|---|---|---|
+  | `tlcp_server_sign_ecc` | digitalSignature \| keyAgreement | serverAuth | SM2 |
+  | `tlcp_server_enc_ecc` | keyEncipherment \| keyAgreement \| dataEncipherment | (none — GmSSL convention) | SM2 |
+  | `tlcp_client_sign_ecc` | digitalSignature \| keyAgreement | clientAuth | SM2 |
+  | `tlcp_server_rsa` (gated `rsa`) | digitalSignature \| keyEncipherment | serverAuth | RSA |
+  | `tlcp_client_rsa` (gated `rsa`) | digitalSignature \| keyEncipherment | clientAuth | RSA |
+
+  The enc cert preset deliberately has **no EKU** because GB/T 38636
+  §6.4.6.1.2 b) marks EKU as optional and GmSSL/openHiTLS both emit
+  none — matching that keeps TLCP enc certs GmSSL-chain-walkable.
+  Presets leave `sans` empty so callers push their own
+  `GeneralName::DnsName` / `IpAddress` entries before passing the
+  profile to `CaSigner`/`RsaCaSigner`.
+
+[GB/T 38636-2020]: https://openstd.samr.gov.cn/
+
 - **`RsaCaSigner` (feature `rsa`)** — X.509 CA signer backed by an
   RSA private key, mirror of `CaSigner` for the SM2 path. Produces
   certs with `rsaEncryption` (1.2.840.113549.1.1.1) SPKI and
