@@ -6,6 +6,37 @@ All notable changes to the GM cryptographic library suite.
 
 ### Added
 
+#### `gm-crypto` 0.3.1 (Phase 3 / post-release)
+
+- **`gm-crypto` 0.3.1 published** — `cargo publish --registry crates-io
+  -p gm-crypto` succeeded after version bump 0.3.0 → 0.3.1 (patch,
+  additive) and description widened to mention `X.509 PKCS#10 CSR
+  generation via x509::CsrBuilder`. Tag `gm-crypto-v0.3.1` annotated
+  and pushed to github/gitcode/gitee. docs.rs
+  `https://docs.rs/gm-crypto/0.3.1/gm_crypto/` is built and HTTP 200.
+  CHANGELOG `[Unreleased]` block migrated to `[0.3.1] - 2026-09-11`
+  with new empty `[Unreleased]` placeholder; link footnote extended
+  with the `[0.3.1]` compare URL.
+
+#### `gm-der` 0.1.0 (skipped — already on crates.io)
+
+- **`gm-der` 0.1.0 was already on crates.io** under the same name and
+  description, so the first-publish attempt hit "crate already
+  exists on crates.io index". We still committed a fresh
+  `gm-der/CHANGELOG.md` (initial-release entry) so the crates.io
+  detail page picks up the markdown on next publish. No source
+  changes — the existing 0.1.0 already reflects the initial commit
+  (8891ea4). Skipped publishing; no `gm-der-v0.1.0` tag was created.
+
+#### `gm-http-client` 0.1.0 (skipped — already on crates.io)
+
+- **`gm-http-client` 0.1.0 was already on crates.io** (published
+  2026-08-01 by `EricZHANG1688`, 31.7 KiB, 19 downloads, 4 source
+  files). The published source matches the local working tree
+  byte-for-byte at the `gm-http-client/0.1.0` commit hash from
+  the initial open-source commit (8891ea4). Skipped publishing; no
+  tag was created.
+
 #### `gm-ca` 0.2.0 release prep (Phase 10)
 
 - **`gm-ca` 0.2.0 release prep** — README + README.en.md updated to
