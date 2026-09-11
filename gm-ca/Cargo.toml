@@ -66,6 +66,12 @@ tlcp-profiles = []
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3"
+# gm-tlcp is used by `tests/tlcp_loopback.rs` (Phase 6a / Phase 4g) to do
+# in-process loopback handshakes against the 4 TLCP RSA suites using
+# certs issued by `RsaCaSigner`. `default-features = false` skips the
+# optional `tlcp-gmssl-compat` flag (we only need the default GB/T 38636
+# spec-compliant wire format).
+gm-tlcp = { path = "../gm-tlcp", version = "0.6", default-features = false }
 
 [build-dependencies]
 tonic-build = { version = "0.14", features = ["transport"] }

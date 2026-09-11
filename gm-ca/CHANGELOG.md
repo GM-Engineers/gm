@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`tests/tlcp_loopback.rs` (Phase 6a / Phase 4g close-out)** —
+  5 in-process loopback tests that prove `RsaCaSigner`-issued
+  X.509 certs round-trip through gm-tlcp's 4 RSA cipher suites
+  ([GB/T 38636-2020] §6.4.5.2.1 表 2 — E019/E01C/E059/E05A) plus a
+  wire-format introspection test (rsaEncryption SPKI +
+  sha256WithRSAEncryption outer signature). Replaces the dummy
+  100-byte DER blob `gm-tlcp`'s own loopback tests use with a
+  real RSA cert signed via `RsaCaSigner::sign_csr_with_profile`
+  and `with_rsa_certs_single` (R-7 / GB/T §6.4.5.5 single-Cert
+  emission). File is gated behind `#[cfg(feature = "rsa")]` so
+  default builds stay SM2-only and slim; `cargo test
+  --features rsa` runs them (≈40s wall-clock, RSA-2048 keygen
+  dominates). Dev-dep `gm-tlcp = { version = "0.6",
+  default-features = false }` added under `[dev-dependencies]`.
+
 - **`tlcp-profiles` Cargo feature** (off by default) — enables the
   new `gm_ca::profiles::tlcp` submodule exposing 5 TLCP end-entity
   `CertProfile` preset constructors matching the KU/EKU layout that

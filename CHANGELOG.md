@@ -20,6 +20,21 @@ All notable changes to the GM cryptographic library suite.
 
 ### Added
 
+#### `gm-ca` 0.2.0 (Phase 6a)
+
+- **`tests/tlcp_loopback.rs`** — 5 in-process loopback tests
+  proving `RsaCaSigner`-issued X.509 certs round-trip through
+  gm-tlcp's 4 RSA cipher suites ([GB/T 38636-2020] §6.4.5.2.1
+  表 2 — E019/E01C/E059/E05A) plus a wire-format introspection
+  test. Replaces the dummy 100-byte DER blob in gm-tlcp's own
+  loopback tests with a real cert signed via
+  `RsaCaSigner::sign_csr_with_profile` + `with_rsa_certs_single`
+  (R-7, GB/T §6.4.5.5 single-Cert emission). Gated behind
+  `#[cfg(feature = "rsa")]` so default builds stay SM2-only;
+  ≈40s wall-clock when run via `cargo test --features rsa`.
+  Dev-dep `gm-tlcp = { version = "0.6", default-features = false }`
+  added.
+
 #### `gm-ca` 0.2.0 (Phase 5)
 
 - **`tlcp-profiles` Cargo feature** (off by default) — enables
