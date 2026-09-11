@@ -5,7 +5,7 @@
 //!
 //! ## Why a profile
 //!
-//! The original [`CaSigner::sign_csr`](crate::cert::CaSigner::sign_csr)
+//! The original [`CaSigner::sign_csr_with_profile`](crate::cert::CaSigner::sign_csr_with_profile)
 //! API hard-codes a single "end-entity" extension set: KeyUsage =
 //! `digitalSignature | keyEncipherment`, EKU = `serverAuth | clientAuth`,
 //! plus SKI + SAN. That's fine for gm-ca v0.1.x (which only signs
@@ -27,7 +27,7 @@
 //!
 //! ## TLCP-specific presets
 //!
-//! When the `tlcp-profiles` feature is enabled, [`profiles::tlcp`]
+//! When the `tlcp-profiles` feature is enabled, [`crate::profiles::tlcp`]
 //! exposes the 6 standard TLCP end-entity profiles (server sign, server
 //! enc, client sign, client enc, plus the RSA variants behind the
 //! `rsa` feature) matching the exact KU/EKU layout the TLCP spec /
@@ -317,7 +317,7 @@ impl GeneralName {
 // =============================================================================
 
 /// Declarative specification of the extension set + flags a certificate
-/// should carry. Used by [`CaSigner::sign_csr`](crate::cert::CaSigner::sign_csr)
+/// should carry. Used by [`CaSigner::sign_csr_with_profile`](crate::cert::CaSigner::sign_csr_with_profile)
 /// to determine which X.509 extensions to emit.
 ///
 /// The struct is plain data — no hidden defaults — so callers can

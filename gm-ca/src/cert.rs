@@ -537,10 +537,10 @@ fn build_basic_constraints(is_ca: bool, path_len: Option<u8>) -> Vec<u8> {
 
 /// Build AuthorityKeyIdentifier extension value (RFC 5280 §4.2.1.1):
 ///   AuthorityKeyIdentifier ::= SEQUENCE {
-///       keyIdentifier [0] EXPLICIT OCTET STRING OPTIONAL, ...
+///       keyIdentifier \[0\] EXPLICIT OCTET STRING OPTIONAL, ...
 ///   }
 /// The OCTET STRING content is the 20-byte key-id (already hashed by the
-/// caller per RFC 7093 §2 Method 1: SM3[:20] for SM2 certs, SHA-1[:20]
+/// caller per RFC 7093 §2 Method 1: SM3[\:20] for SM2 certs, SHA-1[\:20]
 /// for RSA certs to interop with the global PKI). The hash function is
 /// chosen by the caller; this helper is purely DER layout.
 ///
@@ -562,10 +562,10 @@ pub(crate) fn build_authority_key_id_from_hash(key_id: &[u8]) -> Vec<u8> {
 ///
 /// `subject_key_id` and `ca_key_id` are 20-byte key-identifier values
 /// already computed by the caller (the hash function is algorithm-
-/// specific: SM3[:20] for SM2 certs, SHA-1[:20] for RSA certs). This
+/// specific: SM3[\:20] for SM2 certs, SHA-1[\:20] for RSA certs). This
 /// helper is algorithm-agnostic.
 ///
-/// Returns the SEQUENCE OF Extension bytes — caller wraps in `[3] EXPLICIT`
+/// Returns the SEQUENCE OF Extension bytes — caller wraps in \[3\] EXPLICIT
 /// via `build_tbs_certificate`. Returns an empty SEQUENCE when the profile
 /// disables every optional extension (caller should treat `None` as
 /// "omit extensions entirely" instead).
@@ -657,7 +657,7 @@ fn sm2_sig_alg_id() -> Vec<u8> {
     der_sequence(&[oid, vec![0x05, 0x00]].concat())
 }
 
-/// SM3(pubkey_bytes)[:20] — RFC 7093 §2 Method 1 key-id derivation for SM2 certs.
+/// SM3(pubkey_bytes)[\:20] — RFC 7093 §2 Method 1 key-id derivation for SM2 certs.
 fn sm3_key_id(pubkey_bytes: &[u8]) -> [u8; 20] {
     use gm_crypto::sm3::Sm3Hasher;
     let hash = Sm3Hasher::hash(pubkey_bytes).expect("SM3 hash should not fail for bytes");
@@ -751,7 +751,7 @@ fn utctime_from_datetime(dt: sqlx::types::chrono::DateTime<Utc>) -> Vec<u8> {
 /// Algorithm-agnostic TBSCertificate builder (RFC 5280 §4.1):
 ///
 ///   TBSCertificate ::= SEQUENCE {
-///     version         [0] EXPLICIT Version DEFAULT v1,
+///     version         \[0\] EXPLICIT Version DEFAULT v1,
 ///     serialNumber         CertificateSerialNumber,
 ///     signature            AlgorithmIdentifier,
 ///     issuer               Name,
@@ -759,7 +759,7 @@ fn utctime_from_datetime(dt: sqlx::types::chrono::DateTime<Utc>) -> Vec<u8> {
 ///     subject              Name,
 ///     subjectPublicKeyInfo SubjectPublicKeyInfo,
 ///     ...
-///     extensions      [3] EXPLICIT Extensions OPTIONAL
+///     extensions      \[3\] EXPLICIT Extensions OPTIONAL
 ///   }
 ///
 /// `sig_alg_id` and `spki_alg_id` are pre-built DER-encoded
