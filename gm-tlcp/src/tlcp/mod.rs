@@ -2297,16 +2297,20 @@ impl TlcpConnector {
                 let ciphertext = enc
                     .encrypt_der(&pms_bytes)
                     .map_err(|e| TlcpError::HandshakeFailed(format!("sm2 encrypt: {}", e)))?;
-                let mut body = Vec::with_capacity(2 + ciphertext.len());
-                body.push((ciphertext.len() >> 8) as u8);
-                body.push(ciphertext.len() as u8);
-                body.extend_from_slice(&ciphertext);
-                let mut msg = Vec::with_capacity(4 + body.len());
-                msg.push(HandshakeType::ClientKeyExchange as u8);
-                msg.push((body.len() >> 16) as u8);
-                msg.push((body.len() >> 8) as u8);
-                msg.push(body.len() as u8);
-                msg.extend_from_slice(&body);
+                // Route through the same `TlcpClientKeyExchange::to_bytes`
+                // serializer used by the ECDHE / RSA / IBC / IBSDH branches
+                // so the wire framing honours the active feature flag
+                // (spec-default = no u16 prefix, tlcp-gmssl-compat = u16
+                // prefix). Previously this branch hand-rolled `[u16 len ||
+                // ciphertext]` regardless of feature flag, which broke the
+                // spec-default parser (it does not strip the u16 prefix) and
+                // caused the CKE ciphertext to reach `Sm2Decryptor::decrypt`
+                // with a 2-byte prefix — producing
+                // "ciphertext must start with 0x534D (versioned), 0x30 (DER),
+                // or 0x04 (raw C1||C3||C2)" on every static-ECC handshake.
+                // Surfaced by the gm-tlcp 0.6.3 ECDHE/ECC end-to-end loopback
+                // regression gate (`tests/gm_tlcp_loopback.rs::run_ecdhe_or_ecc_loopback`).
+                let msg = TlcpClientKeyExchange::new_ecc(ciphertext).to_bytes();
                 (msg, pms_bytes)
             } else {
                 // ECDHE: TLCP ECDHE PMS derivation per GB/T 38636-2020
@@ -3844,14 +3848,35 @@ impl TlcpAcceptor {
                         //    cert chain we recorded in step 7. Without
                         //    that we can't compute Z_client and the KDF
                         //    will diverge from the peer's.
+                        //
+                        // Wire layout per GB/T 38636-2020 §6.4.5.5 (and
+                        // what `connect_with_certs` emits via
+                        // `with_client_certs`): the leaf **sign** cert is
+                        // index 0, the leaf **enc** cert is index 1, the
+                        // issuing CA follows. We need the **enc** cert
+                        // for ECDHE SM2 KAP Z_client.
+                        //
+                        // The pre-fix code used `client_certs.first()`
+                        // here, which returned the **sign** cert — its
+                        // SM2 public keypair is distinct from the enc
+                        // keypair (gmssl certgen uses different
+                        // `key_usage` + `key_agreement` flags), so the
+                        // server's Z_client diverged from the connector's
+                        // Z_client by ~32 bytes and the master_secret
+                        // diverged accordingly. Symptom: GCM auth failure
+                        // on the client's Finished record (server's
+                        // record-layer keys did not match the client's).
+                        // Surfaced by the gm-tlcp 0.6.3 ECDHE end-to-end
+                        // loopback regression gate
+                        // (`tests/gm_tlcp_loopback.rs::run_ecdhe_or_ecc_loopback`).
                         let client_enc_cert_der =
-                            server_hs.client_certs.first().ok_or_else(|| {
+                            server_hs.client_certs.get(1).ok_or_else(|| {
                                 TlcpError::HandshakeFailed(
                                     "tlcp-strict server ECDHE PMS needs the client \
-                                 to send a non-empty Certificate message in reply \
-                                 to our CertificateRequest; configure the \
-                                 TlcpConnector with with_client_certs(..., \
-                                 Some(enc_key_pem), ...)."
+                                 to send BOTH a sign cert (chain index 0) and an enc \
+                                 cert (chain index 1) in reply to our CertificateRequest; \
+                                 configure TlcpConnector::with_client_certs(.., \
+                                 [sign_der, enc_der, ..], Some(enc_key_pem), ..)."
                                         .to_string(),
                                 )
                             })?;

@@ -5,7 +5,7 @@ All notable changes to the `gm-tlcp` crate will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.4] - 2026-09-11
 
 ### Documented — F4 External-Upstream-Blocker reclassification (R-9)
 
@@ -19,7 +19,7 @@ The three record-layer hypotheses from R-8 (H1 GCM nonce per RFC 5288 §3, H2 GC
 
 #### Code changes
 
-None for gm-tlcp production source. Only the `tests/gmssl_interop.rs::gmssl_tlcp_handshake_and_app_data` 500ms pre-write sleep comment is updated to reference the R-9.1 diagnostic and clarify that the sleep does NOT fix F4 (it remains a defensive no-op for the 500ms-1000ms post-handshake race window). Production `gm-tlcp 0.6.3` source is unchanged; no version bump; no `0.6.4` release.
+None for gm-tlcp production source at the time of R-9. Only the `tests/gmssl_interop.rs::gmssl_tlcp_handshake_and_app_data` 500ms pre-write sleep comment is updated to reference the R-9.1 diagnostic and clarify that the sleep does NOT fix F4 (it remains a defensive no-op for the 500ms-1000ms post-handshake race window). Production `gm-tlcp 0.6.3` source unchanged at this point; no standalone version bump for R-9 alone. R-9 was bundled into 0.6.4 together with R-10 (also doc-only) and R-11 (the actual code change).
 
 #### Action taken
 
@@ -40,7 +40,7 @@ All 7 verification gates preserved (no code changes to compile):
 
 ### Documented — R-10 external upstream tracking closure (2026-09-10)
 
-R-10 finished the external-upstream tracking loop that R-9 opened. No code change; no version bump; no `0.6.4` release. Two upstream submissions, both verified via GitHub REST API before this commit:
+R-10 finished the external-upstream tracking loop that R-9 opened. No code change at the time of R-10; no standalone version bump. R-10 was bundled into 0.6.4 together with R-9 (also doc-only) and R-11 (the actual code change). Two upstream submissions, both verified via GitHub REST API before this commit:
 
 #### R-10.1 — Tongsuo #836 state-machine NTLS rejection re-verified
 
@@ -96,6 +96,91 @@ All 7 verification gates preserved (no code changes to compile):
    populate them with our own content. If they remain empty for
    >30 days, a polite ping is acceptable; unsolicited contribution
    is not.
+
+### Fixed — ECDHE / static-ECC end-to-end loopback + 2 latent wire-format bugs (R-11)
+
+Closes the long-standing 6-case gap on the GB/T 38636-2020 §6.4.5.2.1 表 2 standard cipher suites:
+the 4 standard SM2 suites (ECDHE_SM4_GCM/CBC, ECC_SM4_GCM/CBC) and the 2 SHA-256-PRF RSA suites
+(RSA_SM4_GCM_SHA256, RSA_SM4_CBC_SHA256) now each have a real in-process loopback regression
+gate (`tests/gm_tlcp_loopback.rs`). Surfacing this gate caught **two latent wire-format bugs**
+that had been hiding since the 0.3.x days:
+
+1. **Server-side ECDHE PMS used the client's *sign* cert instead of the *enc* cert** for
+   `Z_client` computation ([`src/tlcp/mod.rs`](src/tlcp/mod.rs) `accept_with_certs` step 8). The
+   pre-fix code read `server_hs.client_certs.first()` (sign cert) when it should read
+   `client_certs.get(1)` (enc cert) — the two are distinct SM2 keypairs in any
+   `gmssl certgen` deployment. Symptom: `GCM decryption failed` / `CBC invalid padding` on
+   the client's `Finished` record, every ECDHE handshake, with the master_secret diverging
+   by exactly the Z_client difference (~32 bytes SM3 hash).
+2. **Connector static-ECC `ClientKeyExchange` wire bytes always included a redundant `uint16`
+   length prefix** ([`src/tlcp/mod.rs`](src/tlcp/mod.rs) `connect_with_certs` step 7.5), but
+   the spec-default `TlcpClientKeyExchange::from_body` parser only strips the prefix under
+   `--features tlcp-gmssl-compat`. In spec-default mode the encrypted PMS reached
+   `Sm2Decryptor::decrypt` with a 2-byte leading length prefix, triggering
+   `"ciphertext must start with 0x534D (versioned), 0x30 (DER), or 0x04 (raw C1||C3||C2)"` on
+   every static-ECC handshake. Fixed by routing through `TlcpClientKeyExchange::new_ecc(.).to_bytes()`
+   so the wire framing honours the active feature flag (matching how the ECDHE / RSA / IBC /
+   IBSDH branches already worked).
+
+### Added — end-to-end loopback regression gate for all 12 cipher suites
+
+`tests/gm_tlcp_loopback.rs` now covers the full GB/T 38636-2020 表 2 suite set as
+**gm-tlcp ↔ gm-tlcp in-process handshakes** over `tokio::io::duplex` (no `gmssl` CLI needed
+for the RSA + SM9 paths; the ECDHE/ECC paths use the same `support::cert_setup::generate_test_certs`
+helper as `tests/gmssl_interop.rs`):
+
+| Suite ID | Loopback test |
+|---|---|
+| `0xE051` `ECDHE_SM4_GCM_SM3`   | `gm_tlcp_ecdhe_loopback_with_real_keys_gcm` (NEW) |
+| `0xE011` `ECDHE_SM4_CBC_SM3`   | `gm_tlcp_ecdhe_loopback_with_real_keys_cbc` (NEW) |
+| `0xE053` `ECC_SM4_GCM_SM3`     | `gm_tlcp_ecc_loopback_with_real_keys_gcm` (NEW) |
+| `0xE013` `ECC_SM4_CBC_SM3`     | `gm_tlcp_ecc_loopback_with_real_keys_cbc` (NEW) |
+| `0xE057` `IBC_SM4_GCM_SM3`     | `gm_tlcp_sm9_ibc_loopback_with_real_keys_gcm` (R-4.1-hotfix) |
+| `0xE017` `IBC_SM4_CBC_SM3`     | `gm_tlcp_sm9_ibc_loopback_with_real_keys_cbc` (R-4.1-hotfix) |
+| `0xE055` `IBSDH_SM4_GCM_SM3`   | `gm_tlcp_sm9_ibsdh_loopback_with_real_keys_gcm` (R-4.2) |
+| `0xE015` `IBSDH_SM4_CBC_SM3`   | `gm_tlcp_sm9_ibsdh_loopback_with_real_keys_cbc` (R-4.2) |
+| `0xE059` `RSA_SM4_GCM_SM3`     | `gm_tlcp_rsa_loopback_with_real_keys_gcm` + `gm_tlcp_rsa_single_cert_loopback_with_real_keys_gcm` (R-5 + R-7) |
+| `0xE019` `RSA_SM4_CBC_SM3`     | `gm_tlcp_rsa_loopback_with_real_keys_cbc` + `gm_tlcp_rsa_single_cert_loopback_with_real_keys_cbc` (R-5 + R-7) |
+| `0xE05A` `RSA_SM4_GCM_SHA256`  | `gm_tlcp_rsa_loopback_with_real_keys_gcm_sha256` + `gm_tlcp_rsa_single_cert_loopback_with_real_keys_gcm_sha256` (NEW) |
+| `0xE01C` `RSA_SM4_CBC_SHA256`  | `gm_tlcp_rsa_loopback_with_real_keys_cbc_sha256` + `gm_tlcp_rsa_single_cert_loopback_with_real_keys_cbc_sha256` (NEW) |
+
+Plus the pre-existing `gm_tlcp_kap_pms_roundtrip_with_real_keys` PMS-only KAT (audit's PR-A
+regression gate) and 4 `support::*` unit tests = **21 tests total** (was 13). Each handshake-loopback
+test wires `TlcpAcceptor` + `TlcpConnector` through `tokio::io::duplex`, completes the full handshake
+for one suite, then exchanges a single app-data record round-trip to prove the record-layer keys
+match on both sides (i.e. master_secret derivation was correct on both sides).
+
+### Verification
+
+- `cargo +stable fmt --check` clean
+- `cargo +stable clippy --lib --tests --all-features -- -D warnings` clean (same gate as the
+  audit's verification step)
+- `cargo +stable test --lib` 125 passed (preserved — no new unit tests; this PR is loopback-only)
+- `cargo +stable test --test gm_tlcp_loopback` **21 passed** (was 13; +8 = +6 cipher-suite tests +
+  +0 already-counted PMA roundtrip + +4 support = 21)
+- `cargo +stable test --test integration_tlcp` 32 passed (preserved; the 5 `#[ignore]`-d
+  `test_tlcp_production_ecdhe_*` stubs remain `#[ignore]`-d — the real gate is now the
+  `gm_tlcp_ecdhe_loopback_with_real_keys_*` / `gm_tlcp_ecc_loopback_with_real_keys_*`
+  loopback tests, which use real X.509 certs instead of raw pubkey bytes)
+- `cargo +stable doc --no-deps` clean
+
+### Migration guide
+
+None for gm-tlcp's wire format. The two bug fixes restore spec-mandated behaviour:
+
+- The ECDHE PMS fix changes the *server's* `Z_client` derivation source from the client's
+  sign-cert pubkey to the client's enc-cert pubkey. Peers that have been working with gm-tlcp
+  ECDHE would have been failing already (the server's Finished-key derivation could not have
+  agreed with the client's — see the symptoms above); this fix closes that latent gap.
+- The static-ECC connector fix changes the *connector's* emitted CKE body from
+  `[u16 prefix ‖ ciphertext]` (which `gmssl tlcp_server` master and any spec-strict peer
+  reject in spec-default mode) to `[ciphertext]` (the spec-mandated layout). Any peer that
+  was somehow working with the previous connector output was already accepting non-spec
+  framing; switching to spec-mandated framing can onlyens improve interop.
+
+No production API changed. `tlcp-gmssl-compat` mode is unaffected by both fixes
+(the feature flag has been broken since 0.6.0 per audit C-2 / R-2; pre-existing
+`#[ignore]` semantics remain).
 
 ## [0.6.3] - 2026-09-09
 

@@ -521,8 +521,12 @@ async fn run_sm9_ibsdh_loopback(suite: [u8; 2]) {
 }
 
 // ============================================================================
-// RSA single-Cert loopback regression tests (R-7, gm-tlcp 0.6.2)
+// RSA single-Cert loopback regression tests (R-7, gm-tlcp 0.6.2+)
 // ============================================================================
+//
+// R-11 follow-up (gm-tlcp 0.6.4+) added single-Cert variants for the
+// RSA-SHA256 suites as well; see the "RSA SHA-256-PRF suites" section
+// above for the E05A / E01C coverage.
 //
 // These are the regression gate for the single-Certificate wire-format
 // for the 4 RSA suites (E019/E01C/E059/E05A). Per GB/T 38636-2020
@@ -623,4 +627,256 @@ async fn run_rsa_single_cert_loopback(suite: [u8; 2]) {
         msg,
         "client received wrong bytes -- RSA single-cert PMS derivation diverged"
     );
+}
+
+// ============================================================================
+// RSA SHA-256-PRF suites loopback regression tests (R-11 follow-up, gm-tlcp
+// 0.6.4+)
+// ============================================================================
+//
+// These tests close the last 2-case gap on the R-5 RSA suite set:
+// E05A (`TLS_RSA_SM4_GCM_SHA256`) and E01C (`TLS_RSA_SM4_CBC_SHA256`).
+// Per GB/T 38636-2020 §6.3 the PRF for these two suites is SHA-256 in the
+// strict reading, but the gm-tlcp 0.6.0 release (R-5 §2) treats all 12
+// suites as SM3-PRF to match GmSSL master + openHiTLS convention — see
+// CHANGELOG 0.6.0 "SHA-256 PRF for the two `_SHA256` suites" note. So the
+// wire-level PRF discriminator is currently a no-op; we still want these
+// two suites to round-trip end-to-end against themselves (gm-tlcp as both
+// client AND server over `tokio::io::duplex`) to prove the suite-id dispatch
+// (E01C / E05A) and the single-cert + dual-cert RSA emitters both work.
+//
+// These tests mirror the structure of the R-5 / R-7 RSA-SM3-PRF loopback
+// tests above (`run_rsa_loopback` / `run_rsa_single_cert_loopback`); only
+// the suite ID changes.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gm_tlcp_rsa_loopback_with_real_keys_gcm_sha256() {
+    run_rsa_loopback([0xE0, 0x5A]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gm_tlcp_rsa_loopback_with_real_keys_cbc_sha256() {
+    run_rsa_loopback([0xE0, 0x1C]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gm_tlcp_rsa_single_cert_loopback_with_real_keys_gcm_sha256() {
+    run_rsa_single_cert_loopback([0xE0, 0x5A]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gm_tlcp_rsa_single_cert_loopback_with_real_keys_cbc_sha256() {
+    run_rsa_single_cert_loopback([0xE0, 0x1C]).await;
+}
+
+// ============================================================================
+// ECDHE / static-ECC suites loopback regression tests (R-11, gm-tlcp
+// 0.6.4+)
+// ============================================================================
+//
+// These four tests close the long-standing 4-case gap on the
+// GB/T 38636-2020 §6.4.5.2.1 表 2 standard SM2 suites:
+//   * E051 `TLS_ECDHE_SM4_GCM_SM3`
+//   * E011 `TLS_ECDHE_SM4_CBC_SM3`
+//   * E053 `TLS_ECC_SM4_GCM_SM3`
+//   * E013 `TLS_ECC_SM4_CBC_SM3`
+//
+// The previous audit-trail note at the top of this file
+// (line 8-13, "The full in-process loopback test was attempted but the
+// gm-tlcp handshake state machine has pre-existing wire-format bugs")
+// dates back to PR-A / gm-tlcp 0.2.1. The intervening releases have since
+// closed the relevant Critical findings (C-1/C-2/C-3/C-4 in
+// `interop/AUDIT-2026-09-06-v2.md`), so a true client+server loopback
+// over `tokio::io::duplex` is now feasible.
+//
+// These tests use the same `support::cert_setup::generate_test_certs`
+// helper that `tests/gmssl_interop.rs` uses for cross-impl interop:
+// the helper requires `gmssl` on PATH and self-skips if absent. The
+// real X.509 DER certs + SM3-PBKDF2-encrypted SM2 keys are produced by
+// `gmssl certgen`/`reqsign`/`sm2keygen` and loaded via
+// `support::gmssl_key::load_sm2_key_from_gmssl_pem` (pure-Rust SM3-PBKDF2
+// + SM4-CBC walker).
+//
+// Pre-flight (per suite):
+//   - ECDHE: server emits ECDHE-style SKE
+//     (`ECParameters ‖ pub ‖ sig_len ‖ sig`) signed by the server's sign
+//     key; client verifies, sends its own ephemeral pub in CKE; both sides
+//     derive the SM2 KAP PMS per GB/T 32918.3-2016 §6.4 (48 bytes).
+//   - Static-ECC: server emits spec-B sig-only SKE
+//     (`u16 sig_len ‖ sig_der`) over `cr ‖ sr ‖ enc_cert`; client
+//     SM2-encrypts a 48-byte PMS under the server's enc cert (R-3 / 0.4.0);
+//     server SM2-decrypts.
+//   - Both: GCM (default) or CBC (suite flag) record layer.
+//
+// Wire-format side-effects we exercise end-to-end:
+//   - SKE shape auto-detection (ECParameters prefix vs sig-only)
+//   - Server-side PMS derivation (SM2 KAP for ECDHE; SM2 PKE for ECC)
+//   - Master secret + key block derivation round-trip
+//   - GCM / CBC record-layer round-trip
+
+async fn run_ecdhe_or_ecc_loopback(suite: [u8; 2]) {
+    use gm_tlcp::tlcp::*;
+
+    // These tests need real X.509 certs to feed the DER cert slot of
+    // `with_dual_certs` AND to feed `with_client_certs` on the connector
+    // side (the connector replies to CertificateRequest with a client
+    // chain). The helper needs `gmssl` on PATH; mirror the skip semantics
+    // of `tests/gmssl_interop.rs`.
+    if !gmssl_present() {
+        eprintln!(
+            "skipping suite {:02X}{:02X} ECDHE/ECC loopback: gmssl not on PATH",
+            suite[0], suite[1]
+        );
+        return;
+    }
+
+    let tmp = std::env::temp_dir().join(format!(
+        "gm-tlcp-ecdhe-ecc-{}-{:02x}{:02x}-{}",
+        std::process::id(),
+        suite[0],
+        suite[1],
+        if suite[0] == 0xE0 && (suite[1] == 0x53 || suite[1] == 0x13) {
+            "ecc"
+        } else {
+            "ecdhe"
+        }
+    ));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let certs = generate_test_certs(&tmp).expect("generate GmSSL cert hierarchy");
+
+    // ---- Server-side key material -----------------------------------------
+    // `with_dual_certs` takes DER-encoded sign + enc certs plus the two
+    // SM2 private keys. Load the keys via the test-only SM3-PBKDF2 +
+    // SM4-CBC walker.
+    let server_sign_kp =
+        load_sm2_key_from_gmssl_pem(&certs.sign_key, PASSWORD).expect("decrypt server sign.key");
+    let server_enc_kp =
+        load_sm2_key_from_gmssl_pem(&certs.enc_key, PASSWORD).expect("decrypt server enc.key");
+
+    let acceptor = TlcpAcceptor::new().with_dual_certs(
+        certs.sign_cert_der.clone(),
+        certs.enc_cert_der.clone(),
+        server_sign_kp,
+        server_enc_kp,
+    );
+
+    // ---- Client-side key material -----------------------------------------
+    // The connector must:
+    //   1. Know the server's sign pubkey + distid for SKE verification
+    //      (`with_server_sign_key`). The 65-byte SEC1 pubkey is extracted
+    //      from the server's sign cert by `generate_test_certs` (already
+    //      DER-decoded into `certs.sign_pub_65`).
+    //   2. Reply to a server CertificateRequest with a client cert chain
+    //      `[client_sign, client_enc, ca]` (the CA must be in the chain
+    //      because GmSSL's AKI lacks directory_name — same constraint
+    //      `build_gmssl_compatible_connector` in `gmssl_interop.rs`
+    //      documents).
+    //   3. Provide the client's signing key (for CertificateVerify) AND
+    //      encryption key (for ECDHE Z_client / static-ECC client-side
+    //      PMS encrypt). Both come from the test-only unencrypted SEC1
+    //      PEMs produced by `generate_test_certs`.
+    let client_sign_pem =
+        std::fs::read_to_string(&certs.client_key_unenc).expect("read client.key.unenc.pem");
+    let client_enc_key_pem = {
+        let enc_kp = load_sm2_key_from_gmssl_pem(&certs.client_enc_key, PASSWORD)
+            .expect("decrypt client.enc.key");
+        enc_kp.private_key_pem().expect("client enc SEC1 PEM")
+    };
+    let client_enc_cert_der =
+        support::cert_setup::read_pem_to_der(&certs.client_enc_crt, "CERTIFICATE")
+            .expect("decode client.enc.crt PEM");
+    let ca_cert_der = support::cert_setup::read_pem_to_der(&certs.ca_cert, "CERTIFICATE")
+        .expect("decode ca.crt PEM");
+
+    let connector = TlcpConnector::new()
+        .with_cipher_suites(vec![suite])
+        .with_server_sign_key(certs.sign_pub_65.clone(), "1234567812345678".to_string())
+        .with_client_certs(
+            vec![
+                certs.client_cert_der.clone(),
+                client_enc_cert_der,
+                ca_cert_der,
+            ],
+            client_sign_pem,
+            Some(client_enc_key_pem),
+            Some(PASSWORD.to_string()),
+        );
+
+    // ---- Wire up the duplex transport --------------------------------------
+    let (client_io, server_io) = tokio::io::duplex(32768);
+
+    // Spawn server.
+    let server_handle = tokio::spawn(async move {
+        acceptor
+            .accept_with_certs(server_io)
+            .await
+            .expect("server: ECDHE/ECC handshake must succeed end-to-end")
+    });
+
+    // Spawn client.
+    let client_handle = tokio::spawn(async move {
+        connector
+            .connect_with_certs(client_io)
+            .await
+            .expect("client: ECDHE/ECC handshake must succeed end-to-end")
+    });
+
+    // Wait for handshake. SM2 ECDHE + keypair decrypt + SM2 KAP pairing
+    // can take a moment on slow CI; budget 20s.
+    let mut server_stream = tokio::time::timeout(std::time::Duration::from_secs(20), server_handle)
+        .await
+        .expect("server task timed out (>20s)")
+        .expect("server task panicked");
+
+    let mut client_stream = tokio::time::timeout(std::time::Duration::from_secs(20), client_handle)
+        .await
+        .expect("client task timed out (>20s)")
+        .expect("client task panicked");
+
+    // ---- App-data round-trip ----------------------------------------------
+    // Use a non-empty payload that touches both directions to prove
+    // record-layer keys match on both sides. A short ASCII payload is
+    // enough — the test goal is master_secret derivation + Finished
+    // verify, not throughput.
+    let msg: &[u8] = b"hello-sm2-loopback";
+    client_stream.write_all(msg).await.expect("client write");
+    client_stream.flush().await.expect("client flush");
+
+    let mut buf = vec![0u8; 256];
+    let n = server_stream.read(&mut buf).await.expect("server read");
+    assert_eq!(
+        &buf[..n],
+        msg,
+        "server received wrong bytes -- ECDHE/ECC PMS or record-layer key derivation diverged"
+    );
+
+    // Server -> Client round-trip.
+    server_stream.write_all(msg).await.expect("server write");
+    server_stream.flush().await.expect("server flush");
+    let n = client_stream.read(&mut buf).await.expect("client read");
+    assert_eq!(
+        &buf[..n],
+        msg,
+        "client received wrong bytes -- ECDHE/ECC PMS or record-layer key derivation diverged"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gm_tlcp_ecdhe_loopback_with_real_keys_gcm() {
+    run_ecdhe_or_ecc_loopback([0xE0, 0x51]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gm_tlcp_ecdhe_loopback_with_real_keys_cbc() {
+    run_ecdhe_or_ecc_loopback([0xE0, 0x11]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gm_tlcp_ecc_loopback_with_real_keys_gcm() {
+    run_ecdhe_or_ecc_loopback([0xE0, 0x53]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gm_tlcp_ecc_loopback_with_real_keys_cbc() {
+    run_ecdhe_or_ecc_loopback([0xE0, 0x13]).await;
 }
