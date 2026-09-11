@@ -92,8 +92,10 @@ use std::error::Error;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // The default connector offers 10 cipher suites (4 SM2 ECDHE/ECC + 4 SM9 IBC
-    // + all 4 RSA, except the 2 SM9 IBSDH); the SM3 distid defaults to
+    // The default connector offers 10 cipher suites (4 SM2 ECDHE/ECC + 2 SM9 IBC
+    // + 4 RSA GCM/CBC × SM3/SHA256 PRF); the SM9 IBSDH suites (E055/E015)
+    // are NOT in the default list and need explicit
+    // `with_cipher_suites(...)` to add. The SM3 distid defaults to
     // "1234567812345678" (the GmSSL / Tongsuo convention).
     let connector = TlcpConnector::new();
 
@@ -139,7 +141,7 @@ For step-by-step instructions on generating a test PKI with `gmssl sm2keygen` an
 
 | Peer | Status | Verified scope |
 |---|---|---|
-| **in-process loopback** | ✅ all 12 suites | `tests/gm_tlcp_loopback.rs` 21 tests where gm-tlcp plays both client and server through `tokio::io::duplex` for the full handshake + app-data round-trip |
+| **in-process loopback** | ✅ all 12 suites | `tests/gm_tlcp_loopback.rs` 21 tests total: 16 where gm-tlcp plays both client and server through `tokio::io::duplex` for the full handshake + app-data round-trip (covering all 12 cipher suites + 4 RSA single-cert variants), 1 PMS-only KAT (`gm_tlcp_kap_pms_roundtrip_with_real_keys`), and 4 support-module tests |
 | **GmSSL 3.3.0-dev master** | ✅ handshake / ❌ APP_DATA | All 9 handshake messages byte-for-byte verified (`tlcp-gmssl-compat` mode, R-8). F4 = record-layer deadlock (External-Upstream-Blocker, filed upstream as [gmssl #1920](https://github.com/guanzhi/GmSSL/issues/1920)) |
 | **openHiTLS `s_server -tlcp`** | ✅ ECDHE up-to-Finished | Server-side handshake passes; `Decrypt Error (51)` after client Finished is a known open issue (ECDHE x̂ transform disagreement, tracked separately) |
 | **Tongsuo 8.3.0** | ❌ state-machine rejects 0x0101 | NTLS state machine does not accept the TLCP version byte; [Tongsuo #836](https://github.com/Tongsuo-Project/Tongsuo/issues/836) submitted by EricZHANG1688, maintainer confirmed root cause and opened sub-issues [#840](https://github.com/Tongsuo-Project/Tongsuo/issues/840) + [#841](https://github.com/Tongsuo-Project/Tongsuo/issues/841) |

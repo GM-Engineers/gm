@@ -92,9 +92,10 @@ use std::error::Error;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // 默认 connector 提供 10 套密码套件（4 SM2 ECDHE/ECC + 4 SM9 IBC + 4 RSA
-    // 中除 2 个 IBSDH 外的全部）；走 SM3 distid = "1234567812345678"
-    // （GmSSL / Tongsuo 约定）。
+    // 默认 connector 提供 10 套密码套件（4 SM2 ECDHE/ECC + 2 SM9 IBC + 4 RSA
+    // GCM/CBC × SM3/SHA256 PRF）；不含 SM9 IBSDH 套件 (E055/E015)，
+    // 需用 `with_cipher_suites(...)` 显式添加。SM3 distid 默认
+    // "1234567812345678"（GmSSL / Tongsuo 约定）。
     let connector = TlcpConnector::new();
 
     let stream = tokio::net::TcpStream::connect("127.0.0.1:8443").await?;
@@ -139,7 +140,7 @@ TLCP SM2/SM9 套件要求每个对端拥有**两张独立的 SM2 证书**：
 
 | 对端 | 状态 | 验证范围 |
 |---|---|---|
-| **in-process loopback** | ✅ 全部 12 套件 | `tests/gm_tlcp_loopback.rs` 21 个测试：gm-tlcp 同时作 client + server 通过 `tokio::io::duplex` 完成完整握手 + app-data 来回 |
+| **in-process loopback** | ✅ 全部 12 套件 | `tests/gm_tlcp_loopback.rs` 共 21 个测试：16 个 gm-tlcp 作为 client + server 通过 `tokio::io::duplex` 完成完整握手 + app-data 来回（覆盖全部 12 个 cipher suites + 4 个 RSA single-cert 变体），加 1 个 PMS-only KAT (`gm_tlcp_kap_pms_roundtrip_with_real_keys`) 加 4 个 support-module 测试 |
 | **GmSSL 3.3.0-dev master** | ✅ handshake / ❌ APP_DATA | 9 个握手消息 byte-for-byte 通过（`tlcp-gmssl-compat` 模式，R-8）。F4 = record-layer 死锁（External-Upstream-Blocker，已提交 [gmssl #1920](https://github.com/guanzhi/GmSSL/issues/1920)） |
 | **openHiTLS `s_server -tlcp`** | ✅ ECDHE up-to-Finished | server 侧 handshake 通过；client Finished 后 `Decrypt Error (51)` 为已知 issue，ECDHE x̂ transform 与 openHiTLS 不一致（tracked separately） |
 | **Tongsuo 8.3.0** | ❌ state-machine 拒绝 0x0101 | NTLS 状态机不接受 TLCP 版本字节；[Tongsuo #836](https://github.com/Tongsuo-Project/Tongsuo/issues/836) 已由 EricZHANG1688 提交，维护者已确认根因并开 sub-issue [#840](https://github.com/Tongsuo-Project/Tongsuo/issues/840) + [#841](https://github.com/Tongsuo-Project/Tongsuo/issues/841) |
