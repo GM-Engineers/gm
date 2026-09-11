@@ -20,6 +20,25 @@ All notable changes to the GM cryptographic library suite.
 
 ### Added
 
+#### `gm-ca` 0.2.0 (Phase 6b)
+
+- **`tests/tlcp_loopback_sm2.rs`** — 5 in-process loopback tests
+  proving `CaSigner` (SM2)-issued dual certs (sign + enc) round-
+  trip through gm-tlcp's 4 ECC TLCP cipher suites
+  ([GB/T 38636-2020] §6.4.5.2.1 表 2 — E051/E011/E053/E013) plus
+  a wire-format introspection test. Mirrors Phase 6a's RSA
+  loopback but replaces the GmSSL-CLI dependency in
+  `tests/gm_tlcp_loopback.rs::run_ecdhe_or_ecc_loopback` with
+  `CaSigner`-issued certs using the Phase 5
+  `tlcp_server_sign_ecc` / `tlcp_server_enc_ecc` profile
+  presets. Client cert chain `[client_sign, client_enc,
+  root_ca]` also issued by `CaSigner` (server CertificateRequest
+  step is non-skippable for ECC suites). Gated behind
+  `#[cfg(feature = "tlcp-profiles")]`. Wall-clock ≈0.3s when
+  run via `cargo test --features tlcp-profiles` (SM2 ECDHE
+  pairing is much cheaper than RSA-2048 keygen in the RSA
+  loopback file).
+
 #### `gm-ca` 0.2.0 (Phase 6a)
 
 - **`tests/tlcp_loopback.rs`** — 5 in-process loopback tests

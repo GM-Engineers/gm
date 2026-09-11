@@ -24,6 +24,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dominates). Dev-dep `gm-tlcp = { version = "0.6",
   default-features = false }` added under `[dev-dependencies]`.
 
+- **`tests/tlcp_loopback_sm2.rs` (Phase 6b close-out)** —
+  5 in-process loopback tests that prove `CaSigner` (SM2) +
+  the Phase 5 `tlcp_server_sign_ecc` / `tlcp_server_enc_ecc`
+  profile presets produce dual certs (sign + enc) wire-
+  compatible with gm-tlcp's 4 ECC TLCP cipher suites
+  ([GB/T 38636-2020] §6.4.5.2.1 表 2 — E051/E011/E053/E013)
+  plus a wire-format introspection test (SM2 SPKI OID +
+  sm3WithSM2 outer signature OID). Mirrors Phase 6a's RSA
+  loopback but replaces the GmSSL-CLI dependency of
+  `tests/gm_tlcp_loopback.rs::run_ecdhe_or_ecc_loopback`
+  with `CaSigner`-issued certs issued from the same root SM2
+  CA. Client cert chain `[client_sign, client_enc, root_ca]`
+  is also issued by `CaSigner` (server `CertificateRequest`
+  step is non-skippable for ECC suites per the `with_client_certs`
+  hard requirement). File is gated behind
+  `#[cfg(feature = "tlcp-profiles")]` so default builds stay
+  SM2-only; `cargo test --features tlcp-profiles` runs them
+  (≈0.3s wall-clock — SM2 ECDHE pairing is much cheaper than
+  the RSA-2048 keygen in the RSA loopback file).
+
 - **`tlcp-profiles` Cargo feature** (off by default) — enables the
   new `gm_ca::profiles::tlcp` submodule exposing 5 TLCP end-entity
   `CertProfile` preset constructors matching the KU/EKU layout that
