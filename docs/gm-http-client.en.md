@@ -1,6 +1,6 @@
 # gm-http-client Guide
 
-> Last Updated:2026-06-29
+> Last Updated: 2026-09-11
 
 HTTPS client based on gm-tls with TLS 1.3 + SM encryption (standard TLS 1.3 with SM cipher suites, **not** TLCP), built-in SSRF protection, connection pooling, and response size limits.
 

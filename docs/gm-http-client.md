@@ -1,6 +1,6 @@
 # gm-http-client 使用指南
 
-> 上次更新：2026-06-29
+> 上次更新：2026-09-11
 > 英文版：[gm-http-client.en.md](./gm-http-client.en.md)
 
 

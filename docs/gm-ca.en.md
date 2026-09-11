@@ -1,6 +1,6 @@
 # gm-ca Deployment Guide
 
-> Last Updated:2026-06-29
+> Last Updated: 2026-09-11
 
 gm-ca provides an SM2 Certificate Authority service via gRPC, offering certificate issuance, renewal, revocation, querying, and CRL (Certificate Revocation List) management.
 

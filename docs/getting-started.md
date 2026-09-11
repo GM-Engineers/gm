@@ -1,6 +1,6 @@
 # 快速入门
 
-> 上次更新：2026-06-29
+> 上次更新：2026-09-11
 > 英文版：[getting-started.en.md](./getting-started.en.md)
 
 
@@ -69,11 +69,11 @@ fn main() {
 }
 ```
 
-运行：
+运行（以集成测试形式验证，gm-crypto 仓库中 examples/ 目录当前为空）：
 
 
 ```bash
-cargo run --example sm2_sign
+cargo test -p gm-crypto --test sm2 test_sm2_sign_verify
 ```
 
 ## 第二个例子：TLS 1.3 + SM 客户端（gm-tls）
@@ -247,10 +247,11 @@ your-project/
 
 ## 下一步
 
-|需求|文档|
-|----------|-------------------|
-| 想深入了解密码学 API |
-| 需要自定义 TLS 行为 |
-| 想部署 CA 服务 |
-| 需要 HTTPS 客户端 |
-| 需要 SM9 基于身份的密码| `gm-sm9-rs` crate（签名/加密，双后端） |
+| 需求 | 文档 |
+|------|------|
+| 想深入了解密码学 API | [`docs/gm-crypto.md`](./gm-crypto.md) |
+| 需要自定义 TLS 行为 | [`docs/gm-tls.md`](./gm-tls.md)（TLS 1.3 + SM） |
+| 想部署 CA 服务 | [`docs/deployment.md`](./deployment.md) |
+| 需要 HTTPS 客户端 | [`docs/gm-http-client.md`](./gm-http-client.md) |
+| 需要 TLCP 双证书握手 | [`docs/gm-tlcp.md`](./gm-tlcp.md)（GB/T 38636-2020） |
+| 需要 SM9 基于身份的密码 | `gm-sm9-rs` crate（签名/加密，双后端） |

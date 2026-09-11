@@ -1,6 +1,6 @@
 # Getting Started
 
-> Last Updated: 2026-06-29
+> Last Updated: 2026-09-11
 
 **[中文版本](./getting-started.md)**
 
@@ -65,10 +65,10 @@ fn main() {
 }
 ```
 
-Run:
+Run (verify via the integration test — `gm-crypto/examples/` is currently empty):
 
 ```bash
-cargo run --example sm2_sign
+cargo test -p gm-crypto --test sm2 test_sm2_sign_verify
 ```
 
 ## Example 2: TLS 1.3 + SM Client (gm-tls)
@@ -242,4 +242,5 @@ For certificate generation, see [Certificate Operations Guide](./certificate-how
 | Need custom TLS behavior | [gm-tls Guide](./gm-tls.md) |
 | Want to deploy CA service | [gm-ca Deployment Guide](./gm-ca.md) |
 | Need HTTPS client | [gm-http-client Guide](./gm-http-client.md) |
+| TLCP double-cert handshake | [gm-tlcp Guide](./gm-tlcp.md) (GB/T 38636-2020) |
 | Need SM9 identity-based cryptography | `gm-sm9-rs` crate (Sign/encrypt, dual backend) |
