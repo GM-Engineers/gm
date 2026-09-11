@@ -4,6 +4,24 @@ All notable changes to the GM cryptographic library suite.
 
 ## [Unreleased]
 
+### Added
+
+#### `gm-ca` 0.2.0 release prep (Phase 10)
+
+- **`gm-ca` 0.2.0 release prep** — README + README.en.md updated to
+  describe the 0.2.0 features (`CertProfile`, `RsaCaSigner` behind
+  the `rsa` feature, `gm_ca::profiles::tlcp` behind the
+  `tlcp-profiles` feature, the two new TLCP loopback integration
+  test files). `Cargo.toml` `description` and `keywords` widened
+  to advertise RSA + TLCP coverage. gm-tls version requirement
+  relaxed from `"0.2.0"` to `"0.2"` (caret) for forward
+  compatibility with gm-tls patch releases. `cargo publish
+  --dry-run --registry crates-io -p gm-ca` packs 28 files
+  (311.7 KiB uncompressed, 81.1 KiB compressed) and compiles
+  cleanly in default mode with no warnings. CHANGELOG entries
+  for Phases 4 / 5 / 6a / 6b / 9 migrated out of `[Unreleased]`
+  into `[0.2.0] - 2026-09-11`.
+
 ### Changed
 
 - **Dependabot (`ci(dependabot): ignore major bumps`)** — added

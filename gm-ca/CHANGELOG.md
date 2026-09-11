@@ -9,98 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`tests/tlcp_loopback.rs` (Phase 6a / Phase 4g close-out)** —
-  5 in-process loopback tests that prove `RsaCaSigner`-issued
-  X.509 certs round-trip through gm-tlcp's 4 RSA cipher suites
-  ([GB/T 38636-2020] §6.4.5.2.1 表 2 — E019/E01C/E059/E05A) plus a
-  wire-format introspection test (rsaEncryption SPKI +
-  sha256WithRSAEncryption outer signature). Replaces the dummy
-  100-byte DER blob `gm-tlcp`'s own loopback tests use with a
-  real RSA cert signed via `RsaCaSigner::sign_csr_with_profile`
-  and `with_rsa_certs_single` (R-7 / GB/T §6.4.5.5 single-Cert
-  emission). File is gated behind `#[cfg(feature = "rsa")]` so
-  default builds stay SM2-only and slim; `cargo test
-  --features rsa` runs them (≈40s wall-clock, RSA-2048 keygen
-  dominates). Dev-dep `gm-tlcp = { version = "0.6",
-  default-features = false }` added under `[dev-dependencies]`.
+### Changed
 
-- **`tests/tlcp_loopback_sm2.rs` (Phase 6b close-out)** —
-  5 in-process loopback tests that prove `CaSigner` (SM2) +
-  the Phase 5 `tlcp_server_sign_ecc` / `tlcp_server_enc_ecc`
-  profile presets produce dual certs (sign + enc) wire-
-  compatible with gm-tlcp's 4 ECC TLCP cipher suites
-  ([GB/T 38636-2020] §6.4.5.2.1 表 2 — E051/E011/E053/E013)
-  plus a wire-format introspection test (SM2 SPKI OID +
-  sm3WithSM2 outer signature OID). Mirrors Phase 6a's RSA
-  loopback but replaces the GmSSL-CLI dependency of
-  `tests/gm_tlcp_loopback.rs::run_ecdhe_or_ecc_loopback`
-  with `CaSigner`-issued certs issued from the same root SM2
-  CA. Client cert chain `[client_sign, client_enc, root_ca]`
-  is also issued by `CaSigner` (server `CertificateRequest`
-  step is non-skippable for ECC suites per the `with_client_certs`
-  hard requirement). File is gated behind
-  `#[cfg(feature = "tlcp-profiles")]` so default builds stay
-  SM2-only; `cargo test --features tlcp-profiles` runs them
-  (≈0.3s wall-clock — SM2 ECDHE pairing is much cheaper than
-  the RSA-2048 keygen in the RSA loopback file).
-
-- **`tlcp-profiles` Cargo feature** (off by default) — enables the
-  new `gm_ca::profiles::tlcp` submodule exposing 5 TLCP end-entity
-  `CertProfile` preset constructors matching the KU/EKU layout that
-  [GB/T 38636-2020] §6.4.6 / GmSSL master / openHiTLS expect:
-
-  | Preset | KU bits | EKU | Algorithm |
-  |---|---|---|---|
-  | `tlcp_server_sign_ecc` | digitalSignature \| keyAgreement | serverAuth | SM2 |
-  | `tlcp_server_enc_ecc` | keyEncipherment \| keyAgreement \| dataEncipherment | (none — GmSSL convention) | SM2 |
-  | `tlcp_client_sign_ecc` | digitalSignature \| keyAgreement | clientAuth | SM2 |
-  | `tlcp_client_enc_ecc` (Phase 9) | keyEncipherment \| keyAgreement \| dataEncipherment | clientAuth | SM2 |
-  | `tlcp_server_rsa` (gated `rsa`) | digitalSignature \| keyEncipherment | serverAuth | RSA |
-  | `tlcp_client_rsa` (gated `rsa`) | digitalSignature \| keyEncipherment | clientAuth | RSA |
-
-  The enc cert preset deliberately has **no EKU** because GB/T 38636
-  §6.4.6.1.2 b) marks EKU as optional and GmSSL/openHiTLS both emit
-  none — matching that keeps TLCP enc certs GmSSL-chain-walkable.
-  Presets leave `sans` empty so callers push their own
-  `GeneralName::DnsName` / `IpAddress` entries before passing the
-  profile to `CaSigner`/`RsaCaSigner`.
-
-[GB/T 38636-2020]: https://openstd.samr.gov.cn/
-
-- **`RsaCaSigner` (feature `rsa`)** — X.509 CA signer backed by an
-  RSA private key, mirror of `CaSigner` for the SM2 path. Produces
-  certs with `rsaEncryption` (1.2.840.113549.1.1.1) SPKI and
-  `sha256WithRSAEncryption` (1.2.840.113549.1.1.11) signatures —
-  the surface expected by general-purpose X.509 verifiers
-  (GmSSL master, openHiTLS, OpenSSL) for the TLCP RSA suites
-  ([GB/T 38636-2020] §6.4.5.2.1 表 2 — E019/E01C/E059/E05A).
-  SKI/AKI key-ids use SHA-1 per RFC 7093 §2 Method 1 (interop
-  with global PKI; SM3 is reserved for SM2 certs). Methods:
-  `self_sign_ca`, `sign_csr_with_profile` (CSR must use
-  `rsaEncryption`; SM2-signed CSRs are rejected up front),
-  `renew_certificate_with_profile`, `from_pkcs8_pem`. RSA CSRs
-  are signature-verified with sha256WithRSAEncryption before
-  issuing.
-
-- **`rsa` Cargo feature** (off by default) — enables
-  `RsaCaSigner` and pulls `rsa = "0.9"` + `sha2 = "0.10"` +
-  `sha1 = "0.10"` (versions synced with gm-tlcp 0.6.x). Default
-  build stays strictly SM2 + 国密; the SM2 path is the canonical
-  CA signer.
-
-### Internal
-
-- **`cert::build_tbs_certificate`, `cert::build_certificate_der`,
-  `cert::build_extensions` refactored to be algorithm-agnostic.**
-  They now take pre-built `sig_alg_id`, `spki_alg_id`, and 20-byte
-  `subject_key_id` / `ca_key_id` values instead of SM2-specific
-  pubkey bytes. The SM2 `CaSigner` path uses thin SM2 wrappers
-  (`sm2_sig_alg_id`, `sm2_spki_alg_id`, `sm3_key_id`) and the
-  new `RsaCaSigner` path uses RSA wrappers (`rsa_sig_alg_id`,
-  `rsa_spki_alg_id`, `sha1_key_id`). No behavior change to
-  existing SM2 callers.
-
-[GB/T 38636-2020]: https://openstd.samr.gov.cn/
+### Fixed
 
 ## [0.2.0] - 2026-09-11
 
@@ -131,6 +42,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   §2 Method 1. Required by GmSSL master for TLCP chain walks.
 - **BasicConstraints emitted by default** — `CA:FALSE` for end-entity
   certs, `CA:TRUE` (with optional `pathLenConstraint`) for CA certs.
+- **`RsaCaSigner` (feature `rsa`, Phase 4)** — X.509 CA signer backed
+  by an RSA private key, mirror of `CaSigner` for the SM2 path.
+  Produces certs with `rsaEncryption` (1.2.840.113549.1.1.1) SPKI and
+  `sha256WithRSAEncryption` (1.2.840.113549.1.1.11) signatures — the
+  surface expected by general-purpose X.509 verifiers (GmSSL master,
+  openHiTLS, OpenSSL) for the TLCP RSA suites
+  ([GB/T 38636-2020] §6.4.5.2.1 表 2 — E019/E01C/E059/E05A). SKI/AKI
+  key-ids use SHA-1 per RFC 7093 §2 Method 1 (interop with global PKI;
+  SM3 is reserved for SM2 certs). Methods: `self_sign_ca`,
+  `sign_csr_with_profile` (CSR must use `rsaEncryption`; SM2-signed
+  CSRs are rejected up front), `renew_certificate_with_profile`,
+  `from_pkcs8_pem`. RSA CSRs are signature-verified with
+  sha256WithRSAEncryption before issuing.
+- **`rsa` Cargo feature** (off by default, Phase 4) — enables
+  `RsaCaSigner` and pulls `rsa = "0.9"` + `sha2 = "0.10"` +
+  `sha1 = "0.10"` (versions synced with gm-tlcp 0.6.x). Default build
+  stays strictly SM2 + 国密; the SM2 path is the canonical CA signer.
+- **`tlcp-profiles` Cargo feature** (off by default, Phase 5) —
+  enables the `gm_ca::profiles::tlcp` submodule exposing 6 TLCP
+  end-entity `CertProfile` preset constructors matching the KU/EKU
+  layout [GB/T 38636-2020] §6.4.6 / GmSSL master / openHiTLS expect:
+
+  | Preset | KU bits | EKU | Algorithm |
+  |---|---|---|---|
+  | `tlcp_server_sign_ecc` | digitalSignature \| keyAgreement | serverAuth | SM2 |
+  | `tlcp_server_enc_ecc` | keyEncipherment \| keyAgreement \| dataEncipherment | (none — GmSSL convention) | SM2 |
+  | `tlcp_client_sign_ecc` | digitalSignature \| keyAgreement | clientAuth | SM2 |
+  | `tlcp_client_enc_ecc` (Phase 9) | keyEncipherment \| keyAgreement \| dataEncipherment | clientAuth | SM2 |
+  | `tlcp_server_rsa` (gated `rsa`) | digitalSignature \| keyEncipherment | serverAuth | RSA |
+  | `tlcp_client_rsa` (gated `rsa`) | digitalSignature \| keyEncipherment | clientAuth | RSA |
+
+  The enc cert preset (`tlcp_server_enc_ecc`) deliberately has **no
+  EKU** because GB/T 38636 §6.4.6.1.2 b) marks EKU as optional and
+  GmSSL/openHiTLS both emit none — matching that keeps TLCP enc certs
+  GmSSL-chain-walkable. The client-side enc preset
+  (`tlcp_client_enc_ecc`, Phase 9) does carry `clientAuth` EKU because
+  §6.4.6.2.2 b) marks it as "应包括" (should include) for the client
+  side, contrasting with the server's "可包括" (may include). Presets
+  leave `sans` empty so callers push their own `GeneralName::DnsName` /
+  `IpAddress` entries before passing the profile to
+  `CaSigner`/`RsaCaSigner`.
+- **`tests/tlcp_loopback.rs` (Phase 6a / Phase 4g close-out)** —
+  5 in-process loopback tests proving `RsaCaSigner`-issued X.509
+  certs round-trip through gm-tlcp's 4 RSA cipher suites
+  ([GB/T 38636-2020] §6.4.5.2.1 表 2 — E019/E01C/E059/E05A) plus a
+  wire-format introspection test (rsaEncryption SPKI +
+  sha256WithRSAEncryption outer signature). Replaces the dummy 100-byte
+  DER blob `gm-tlcp`'s own loopback tests use with a real RSA cert
+  signed via `RsaCaSigner::sign_csr_with_profile` and
+  `with_rsa_certs_single` (R-7 / GB/T §6.4.5.5 single-Cert emission).
+  File is gated behind `#[cfg(feature = "rsa")]` so default builds
+  stay SM2-only and slim; `cargo test --features rsa` runs them
+  (≈40s wall-clock, RSA-2048 keygen dominates). Dev-dep
+  `gm-tlcp = { version = "0.6", default-features = false }` added
+  under `[dev-dependencies]`.
+- **`tests/tlcp_loopback_sm2.rs` (Phase 6b close-out)** — 5 in-process
+  loopback tests proving `CaSigner` (SM2) + the Phase 5
+  `tlcp_server_sign_ecc` / `tlcp_server_enc_ecc` profile presets
+  produce dual certs (sign + enc) wire-compatible with gm-tlcp's 4
+  ECC TLCP cipher suites ([GB/T 38636-2020] §6.4.5.2.1 表 2 —
+  E051/E011/E053/E013) plus a wire-format introspection test (SM2
+  SPKI OID + sm3WithSM2 outer signature OID). Mirrors Phase 6a's RSA
+  loopback but replaces the GmSSL-CLI dependency of
+  `tests/gm_tlcp_loopback.rs::run_ecdhe_or_ecc_loopback` with
+  `CaSigner`-issued certs issued from the same root SM2 CA. Client
+  cert chain `[client_sign, client_enc, root_ca]` is also issued by
+  `CaSigner` (server `CertificateRequest` step is non-skippable for
+  ECC suites per the `with_client_certs` hard requirement). File is
+  gated behind `#[cfg(feature = "tlcp-profiles")]`; `cargo test
+  --features tlcp-profiles` runs them (≈0.3s wall-clock).
+
+### Internal
+
+- **`cert::build_tbs_certificate`, `cert::build_certificate_der`,
+  `cert::build_extensions` refactored to be algorithm-agnostic**
+  (Phase 4). They now take pre-built `sig_alg_id`, `spki_alg_id`,
+  and 20-byte `subject_key_id` / `ca_key_id` values instead of
+  SM2-specific pubkey bytes. The SM2 `CaSigner` path uses thin SM2
+  wrappers (`sm2_sig_alg_id`, `sm2_spki_alg_id`, `sm3_key_id`) and
+  the new `RsaCaSigner` path uses RSA wrappers (`rsa_sig_alg_id`,
+  `rsa_spki_alg_id`, `sha1_key_id`). No behavior change to existing
+  SM2 callers.
 
 ### Changed
 

@@ -5,9 +5,9 @@ name = "gm-ca"
 version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-description = "GM/CA - Generic CA service for SM2 certificates"
+description = "GM/CA — gRPC-based CA service for SM2 + TLCP certificates (RsaCaSigner behind `rsa` feature, TLCP profile presets behind `tlcp-profiles` feature)"
 repository = "https://github.com/GM-Engineers/gm"
-keywords = ["ca", "certificate", "sm2", "pki", "gm"]
+keywords = ["ca", "certificate", "sm2", "rsa", "tlcp", "pki", "gm"]
 categories = ["cryptography"]
 readme = "README.md"
 
@@ -18,7 +18,7 @@ path = "src/main.rs"
 [dependencies]
 gm-der = { path = "../gm-der", version = "0.1.0" }
 gm-crypto = { path = "../gm-crypto", version = "0.3" }
-gm-tls = { path = "../gm-tls", features = ["grpc"], version = "0.2.0" }
+gm-tls = { path = "../gm-tls", features = ["grpc"], version = "0.2" }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 tonic = { version = "0.14" }
