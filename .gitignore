@@ -2,6 +2,12 @@
 /target/
 **/target/
 
+# Ad-hoc Rust experiment outputs (per repo convention)
+/rust_out
+/rust_test
+*_test_exe
+Cargo.toml.tmp
+
 # IDE
 .idea/
 .vscode/
@@ -67,3 +73,19 @@ Cargo.lock
 **/tongsuo-bin/
 **/Tongsuo-*.tar.gz
 **/interop/run/
+
+# ---------------------------------------------------------------------------
+# Internal process artifacts (workflow-internal scratch, not for publishing)
+# ---------------------------------------------------------------------------
+# Excludes per-cycle R-* plan / status / submission records / draft files.
+# Canonical reproducible artifacts (AUDIT-*.md, F4-DIAGNOSTIC-*.md,
+# R*-1-DIAGNOSTIC.sh) are NOT excluded — those are evidence files that
+# belong in the repo. Only workflow-internal scratch files are excluded.
+**/interop/R*-PLAN.md
+**/interop/R*-*-PLAN.md
+**/interop/R*-STATUS-RECORD.md
+**/interop/R*-SUBMISSION-RECORD.md
+**/interop/R*-ISSUE-DRAFT.md
+**/interop/*-VERIFY-*.md
+**/tongsuo/upstream/R*-VERIFY-*.md
+**/tongsuo/upstream/R*-*-VERIFY-*.md

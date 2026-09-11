@@ -15,8 +15,11 @@ run/openssl-client-v3.cnf
 run/server_sign_pub.txt
 run/server_sign_pub.pem
 run/server_sign_pub.hex
+run/bundled_sign_pub.hex
 run/certs/
 run/certs/
+run/client_certs/
+run/Dockerfile
 
 # Wire traces are kept under wire-traces/ (useful as evidence)
 !wire-traces/
