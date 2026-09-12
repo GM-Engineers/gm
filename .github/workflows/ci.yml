@@ -207,6 +207,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
+      - name: Install protobuf compiler
+        # Phase 12 (R-12): gm-tlcp now depends on gm-ca as a dev-dep
+        # (for the in-process cert helper). gm-ca's build.rs uses
+        # tonic-build / prost-build which require `protoc` on PATH.
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -234,7 +239,10 @@ jobs:
             cat sign.crt enc.crt > chain.crt && \
             ls -la"
       - name: Build gm-tlcp
-        run: cargo build -p gm-tlcp --tests
+        # Phase 12 (R-12): enable `tlcp-profiles` so the
+        # `tests/gm_tlcp_loopback.rs` test binary (gated on this
+        # feature) and its `gmca_cert_setup` helper compile.
+        run: cargo build -p gm-tlcp --tests --features tlcp-profiles
       - name: Install gmssl on host (so test runner finds it)
         #: The integration test uses `gmssl sm2keygen` / `gmssl certgen`
         #: from the host. After four different extraction strategies
@@ -270,7 +278,12 @@ jobs:
         continue-on-error: true
         run: |
           cd gm-tlcp
-          cargo test --test gmssl_interop -- --include-ignored --nocapture
+          # Phase 12 (R-12): --features tlcp-profiles enables
+          # `gm_tlcp_loopback` + `gmca_cert_setup`; the gmssl_interop
+          # tests themselves do NOT use the in-process helper but the
+          # `tlcp-profiles` feature is harmless for them (they only
+          # consume `gmssl_cert_setup`).
+          cargo test --features tlcp-profiles --test gmssl_interop -- --include-ignored --nocapture
         timeout-minutes: 5
       - name: GmSSL Docker logs (on failure)
         if: failure()

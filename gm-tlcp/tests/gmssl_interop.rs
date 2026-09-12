@@ -93,7 +93,7 @@ fn gmssl_cipher_suite_name(id: &[u8; 2]) -> Option<&'static str> {
 /// The optional `offer` restricts the offered cipher suites; if `None`,
 /// all four TLCP suites are offered (matching the connector default).
 fn build_gmssl_compatible_connector(
-    certs: &support::cert_setup::GmsslCerts,
+    certs: &support::gmssl_cert_setup::GmsslCerts,
     offer: Option<&[[u8; 2]]>,
 ) -> TlcpConnector {
     let client_sign_pem =
@@ -111,17 +111,17 @@ fn build_gmssl_compatible_connector(
         // can't read. Decrypt via the test-only helper in
         // `gmssl_key`, then re-serialize as SEC1 for `gm-crypto`'s
         // PKCS#8/SEC1 loader.
-        let enc_kp = support::gmssl_key::load_sm2_key_from_gmssl_pem(
+        let enc_kp = support::gmssl_pbes2_decoder::load_sm2_key_from_gmssl_pem(
             &certs.client_enc_key,
-            support::cert_setup::DEFAULT_PASSWORD,
+            support::gmssl_cert_setup::DEFAULT_PASSWORD,
         )
         .expect("decrypt client.enc.key");
         Some(enc_kp.private_key_pem().expect("client enc SEC1 PEM"))
     };
     let client_enc_cert_der =
-        support::cert_setup::read_pem_to_der(&certs.client_enc_crt, "CERTIFICATE")
+        support::pem_helpers::read_pem_to_der(&certs.client_enc_crt, "CERTIFICATE")
             .expect("decode client.enc.crt PEM");
-    let client_ca_cert_der = support::cert_setup::read_pem_to_der(&certs.ca_cert, "CERTIFICATE")
+    let client_ca_cert_der = support::pem_helpers::read_pem_to_der(&certs.ca_cert, "CERTIFICATE")
         .expect("decode ca.crt PEM");
 
     let mut connector = TlcpConnector::new();
@@ -135,7 +135,7 @@ fn build_gmssl_compatible_connector(
         ],
         client_sign_pem,
         client_enc_key_pem,
-        Some(support::cert_setup::DEFAULT_PASSWORD.to_string()),
+        Some(support::gmssl_cert_setup::DEFAULT_PASSWORD.to_string()),
     );
     if let Some(suites) = offer {
         connector = connector.with_cipher_suites(suites.to_vec());
@@ -161,7 +161,7 @@ fn build_gmssl_compatible_connector(
 /// debug string for the test report so a passing `-verbose` trace
 /// survives even when the test fails.
 async fn spawn_gmssl_tlcp_server(
-    certs: &support::cert_setup::GmsslCerts,
+    certs: &support::gmssl_cert_setup::GmsslCerts,
     port: u16,
     cipher_suites: &[[u8; 2]],
 ) -> Result<Child, String> {
@@ -177,7 +177,7 @@ async fn spawn_gmssl_tlcp_server(
         .arg("-key")
         .arg(&certs.combined_key)
         .arg("-pass")
-        .arg(support::cert_setup::DEFAULT_PASSWORD)
+        .arg(support::gmssl_cert_setup::DEFAULT_PASSWORD)
         .arg("-cacert")
         .arg(&certs.ca_cert)
         .arg("-verbose")
@@ -211,7 +211,7 @@ async fn spawn_gmssl_tlcp_server(
 /// sign cert as `-cacert` so GmSSL's optional cert chain verification
 /// succeeds against our self-signed certs.
 async fn spawn_gmssl_tlcp_client(
-    certs: &support::cert_setup::GmsslCerts,
+    certs: &support::gmssl_cert_setup::GmsslCerts,
     host: &str,
     port: u16,
 ) -> Result<Child, String> {
@@ -264,7 +264,7 @@ fn pick_free_port() -> u16 {
 #[tokio::test]
 #[ignore = "requires the `gmssl` binary on PATH; run with `-- --ignored`"]
 async fn gmssl_tlcp_handshake_and_app_data() {
-    if !support::cert_setup::gmssl_present() {
+    if !support::gmssl_cert_setup::gmssl_present() {
         eprintln!("gmssl not on PATH; skipping");
         return;
     }
@@ -272,7 +272,7 @@ async fn gmssl_tlcp_handshake_and_app_data() {
     // 1. Generate fresh test certs under a temp dir.
     let tmp = std::env::temp_dir().join(format!("gm-tlcp-interop-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
-    let certs = support::cert_setup::generate_test_certs(&tmp).expect("generate test certs");
+    let certs = support::gmssl_cert_setup::generate_test_certs(&tmp).expect("generate test certs");
     // Keep the temp dir around after the test for offline inspection.
     eprintln!("[gm-tlcp] cert dir: {}", tmp.display());
 
@@ -365,7 +365,7 @@ async fn gmssl_tlcp_handshake_and_app_data() {
 #[tokio::test]
 #[ignore = "requires the `gmssl` binary on PATH; run with `-- --ignored`"]
 async fn gmssl_tlcp_handshake_with_all_suites() {
-    if !support::cert_setup::gmssl_present() {
+    if !support::gmssl_cert_setup::gmssl_present() {
         eprintln!("gmssl not on PATH; skipping");
         return;
     }
@@ -381,7 +381,8 @@ async fn gmssl_tlcp_handshake_with_all_suites() {
             suite_id[1]
         ));
         let _ = std::fs::remove_dir_all(&tmp);
-        let certs = support::cert_setup::generate_test_certs(&tmp).expect("generate test certs");
+        let certs =
+            support::gmssl_cert_setup::generate_test_certs(&tmp).expect("generate test certs");
 
         let port = pick_free_port();
         let server = spawn_gmssl_tlcp_server(&certs, port, TLCP_CIPHER_SUITES)
@@ -461,7 +462,7 @@ async fn gmssl_tlcp_handshake_with_all_suites() {
 #[tokio::test]
 #[ignore = "requires the `gmssl` binary on PATH; run with `-- --ignored`"]
 async fn gmssl_tlcp_client_to_gm_tlcp_server() {
-    if !support::cert_setup::gmssl_present() {
+    if !support::gmssl_cert_setup::gmssl_present() {
         eprintln!("gmssl not on PATH; skipping");
         return;
     }
@@ -469,7 +470,7 @@ async fn gmssl_tlcp_client_to_gm_tlcp_server() {
     // Generate certs + keys
     let tmp = std::env::temp_dir().join(format!("gm-tlcp-reverse-{}-{}", std::process::id(), "A"));
     let _ = std::fs::remove_dir_all(&tmp);
-    let certs = support::cert_setup::generate_test_certs(&tmp).expect("generate test certs");
+    let certs = support::gmssl_cert_setup::generate_test_certs(&tmp).expect("generate test certs");
 
     // Load sign + enc keys from gmssl's SM3-PBKDF2-encrypted PKCS#8 PEM.
     // The standard `Sm2KeyPair::from_encrypted_pem` only handles
@@ -477,14 +478,14 @@ async fn gmssl_tlcp_client_to_gm_tlcp_server() {
     // crate, whose EncryptionScheme enum has no SM4 variant), so we
     // use the test-only helper in `support::gmssl_key` that
     // implements SM3-PBKDF2 + SM4-CBC decryption ourselves.
-    let sign_key = support::gmssl_key::load_sm2_key_from_gmssl_pem(
+    let sign_key = support::gmssl_pbes2_decoder::load_sm2_key_from_gmssl_pem(
         &certs.sign_key,
-        support::cert_setup::DEFAULT_PASSWORD,
+        support::gmssl_cert_setup::DEFAULT_PASSWORD,
     )
     .expect("decrypt sign.key");
-    let enc_key = support::gmssl_key::load_sm2_key_from_gmssl_pem(
+    let enc_key = support::gmssl_pbes2_decoder::load_sm2_key_from_gmssl_pem(
         &certs.enc_key,
-        support::cert_setup::DEFAULT_PASSWORD,
+        support::gmssl_cert_setup::DEFAULT_PASSWORD,
     )
     .expect("decrypt enc.key");
 
@@ -566,14 +567,14 @@ async fn gmssl_tlcp_client_to_gm_tlcp_server() {
 #[tokio::test]
 #[ignore = "requires the `gmssl` binary on PATH; run with `-- --ignored`"]
 async fn gmssl_tlcp_large_app_data() {
-    if !support::cert_setup::gmssl_present() {
+    if !support::gmssl_cert_setup::gmssl_present() {
         eprintln!("gmssl not on PATH; skipping");
         return;
     }
 
     let tmp = std::env::temp_dir().join(format!("gm-tlcp-large-{}-{}", std::process::id(), "B"));
     let _ = std::fs::remove_dir_all(&tmp);
-    let certs = support::cert_setup::generate_test_certs(&tmp).expect("generate test certs");
+    let certs = support::gmssl_cert_setup::generate_test_certs(&tmp).expect("generate test certs");
 
     let port = pick_free_port();
     let server = spawn_gmssl_tlcp_server(&certs, port, TLCP_CIPHER_SUITES)
@@ -630,14 +631,14 @@ async fn gmssl_tlcp_large_app_data() {
 #[tokio::test]
 #[ignore = "requires the `gmssl` binary on PATH; run with `-- --ignored`"]
 async fn gmssl_tlcp_no_common_cipher_suite() {
-    if !support::cert_setup::gmssl_present() {
+    if !support::gmssl_cert_setup::gmssl_present() {
         eprintln!("gmssl not on PATH; skipping");
         return;
     }
 
     let tmp = std::env::temp_dir().join(format!("gm-tlcp-nosuite-{}-{}", std::process::id(), "C"));
     let _ = std::fs::remove_dir_all(&tmp);
-    let certs = support::cert_setup::generate_test_certs(&tmp).expect("generate test certs");
+    let certs = support::gmssl_cert_setup::generate_test_certs(&tmp).expect("generate test certs");
 
     let port = pick_free_port();
     let server = spawn_gmssl_tlcp_server(&certs, port, TLCP_CIPHER_SUITES)
@@ -689,7 +690,7 @@ async fn gmssl_tlcp_no_common_cipher_suite() {
 #[tokio::test]
 #[ignore = "requires the `gmssl` binary on PATH; run with `-- --ignored`"]
 async fn gmssl_tlcp_cipher_suite_preference() {
-    if !support::cert_setup::gmssl_present() {
+    if !support::gmssl_cert_setup::gmssl_present() {
         eprintln!("gmssl not on PATH; skipping");
         return;
     }
@@ -721,7 +722,8 @@ async fn gmssl_tlcp_cipher_suite_preference() {
             case.offer[0][1]
         ));
         let _ = std::fs::remove_dir_all(&tmp);
-        let certs = support::cert_setup::generate_test_certs(&tmp).expect("generate test certs");
+        let certs =
+            support::gmssl_cert_setup::generate_test_certs(&tmp).expect("generate test certs");
 
         let port = pick_free_port();
         let server = spawn_gmssl_tlcp_server(&certs, port, &case.offer)
@@ -766,14 +768,14 @@ async fn gmssl_tlcp_cipher_suite_preference() {
 #[tokio::test]
 #[ignore = "requires the `gmssl` binary on PATH; run with `-- --ignored`"]
 async fn gmssl_tlcp_multiple_sequential_sessions() {
-    if !support::cert_setup::gmssl_present() {
+    if !support::gmssl_cert_setup::gmssl_present() {
         eprintln!("gmssl not on PATH; skipping");
         return;
     }
 
     let tmp = std::env::temp_dir().join(format!("gm-tlcp-multi-{}-{}", std::process::id(), "F"));
     let _ = std::fs::remove_dir_all(&tmp);
-    let certs = support::cert_setup::generate_test_certs(&tmp).expect("generate test certs");
+    let certs = support::gmssl_cert_setup::generate_test_certs(&tmp).expect("generate test certs");
 
     let port = pick_free_port();
     let server = spawn_gmssl_tlcp_server(&certs, port, TLCP_CIPHER_SUITES)

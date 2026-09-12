@@ -5,6 +5,118 @@ All notable changes to the `gm-tlcp` crate will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Documented — R-12 test infrastructure refactor (Phase 12)
+
+Phase 12 (R-12) restructures `tests/support/` so that the integration-test
+file naming matches the **binary each module depends on**. The pre-R-12
+state conflated pure-Rust helpers with `gmssl` CLI wrappers inside a
+single `cert_setup.rs`; the new layout separates them so a `grep gmssl_`
+in `tests/` immediately reveals every helper that needs the GmSSL binary.
+
+#### File layout changes
+
+| Pre-Phase-12 | Post-Phase-12 | Depends on |
+|---|---|---|
+| `cert_setup.rs` (mixed) | `gmssl_cert_setup.rs` | `gmssl` CLI (sm2keygen / certgen / reqgen / reqsign) |
+| `gmssl_key.rs` | `gmssl_pbes2_decoder.rs` | (none) — pure-Rust PBES2 envelope walker |
+| `cert_setup::read_pem_to_der` | `pem_helpers.rs` | (none) — pure-Rust PEM/DER byte manipulation |
+| `cert_setup::extract_uncompressed_pubkey_from_der` | **removed** | Replaced by `gm_crypto::x509::extract_sm2_pubkey_from_der` |
+| (did not exist) | `gmca_cert_setup.rs` | (none) — in-process cert gen via `gm-ca::CaSigner` |
+
+The module-level doc comment in `tests/support/mod.rs` now includes a
+naming-convention table listing each module's external-binary dependency
+and pure-Rust status, so future contributors can pick the right helper
+without reading the source.
+
+#### Functional change — in-process loopback no longer needs `gmssl` on PATH
+
+The `tests/gm_tlcp_loopback.rs` SM2 ECDHE/ECC + KAP roundtrip tests
+(no `#[ignore]`) now generate certs via `gmca_cert_setup::generate_gmca_test_certs`
+(uses `gm-ca::CaSigner` + `gm_crypto::x509::CsrBuilder` in-process) instead
+of spawning `gmssl sm2keygen`/`gmssl certgen`. Consequences:
+
+- The `if !gmssl_present() { skip; }` guard at the top of the affected
+  tests is removed; the tests now run unconditionally.
+- The `PASSWORD` constant and `load_sm2_key_from_gmssl_pem` SM3-PBKDF2
+  + SM4-CBC decryption are no longer needed for the loopback suite
+  (helper remains available for the GmSSL interop tests, which still
+  load GmSSL-generated PBES2 envelopes).
+- The new helper is gated on the `tlcp-profiles` gm-tlcp feature
+  (added in R-12) which enables `gm-ca` + the TLCP cert-profile
+  presets. Default build (no features) compiles a smaller test binary
+  because `gmca_cert_setup.rs` is `#[cfg]`-excluded.
+
+The RSA (4 suites × dual-cert + single-cert + SHA-256 variants) and
+SM9 IBC / IBSDH in-process tests **were already independent of the
+`gmssl` CLI** (they use `RsaKeyPair::generate(2048)` and
+`KgcMasterKey::generate()` respectively); Phase 12 formalizes that by
+moving the same in-process-only code style to the SM2 ECDHE/ECC suite.
+
+The `tests/gmssl_interop.rs` 6 wire-interop tests (all `#[ignore]`-d)
+are intentionally untouched at the source-code level: they still spawn
+real `gmssl tlcp_server` / `gmssl tlcp_client` processes for cross-
+implementation handshake verification. Only the helper module paths
+were renamed (`support::cert_setup::*` → `support::gmssl_cert_setup::*`,
+`support::gmssl_key::*` → `support::gmssl_pbes2_decoder::*`).
+
+#### Cargo.toml changes
+
+Added two `[dev-dependencies]` entries:
+
+- `gm-ca = { path = "../gm-ca", version = "0.2", default-features = false, features = ["tlcp-profiles"] }`
+  — enables `gm_ca::profiles::tlcp::*` cert-profile presets.
+- `pem = "3"` — `pem::parse` for extracting DER from PEM-encoded certs
+  returned by `gm_ca::CaSigner` (declared explicitly because Cargo does
+  not expose transitive deps to integration tests).
+
+Added one `[features]` entry:
+
+- `tlcp-profiles = ["gm-ca/tlcp-profiles"]` — gates the
+  `gmca_cert_setup` module + the SM2 ECDHE/ECC loopback tests.
+
+#### Verification
+
+All 7 verification gates preserved:
+
+- `cargo +stable fmt --check` clean
+- `cargo +stable clippy --lib --tests -- -D warnings` clean
+- `cargo +stable clippy --lib --tests --features tlcp-profiles -- -D warnings` clean
+- `cargo +stable test --lib` 125 passed
+- `cargo +stable test --test integration_tlcp` 32 passed
+- `cargo +stable test --features tlcp-profiles --test gm_tlcp_loopback` **21 passed** (was 13)
+  — the 5 Phase-12 Group-B tests (KAP unit + 4 ECDHE/ECC suites)
+  now run unconditionally, no `gmssl` binary required.
+- `cargo +stable test --features tlcp-profiles --test gmssl_interop` 4 passed + 7 ignored
+- `cargo +stable doc --no-deps` clean
+
+The 16 pre-existing `tlcp-profiles + tlcp-gmssl-compat` combination
+failures (handshake timeouts under the deprecated `tlcp-gmssl-compat`
+flag) are pre-R-12 behaviour (verified by stashing R-12 changes and
+re-running `fd68b3b`); not a regression from this commit.
+
+#### Decision rationale
+
+The `cert_setup` → `gmssl_cert_setup` rename was driven by user
+feedback during the Phase 12 plan review: file names should directly
+encode the binary the helper depends on. Side effects:
+
+- `grep -r gmssl_ gm-tlcp/tests/` immediately reveals every helper
+  that needs the GmSSL binary on PATH (currently only the 6
+  `gmssl_interop.rs` `#[ignore]` tests + the `extract_uncompressed_pubkey_works_on_gmssl_cert`
+  support-module test).
+- The `gmssl_pbes2_decoder.rs` rename removes a previous naming
+  ambiguity (the old `gmssl_key.rs` only decoded GmSSL's PBES2
+  envelope; it did not generate keys).
+- The new `gmca_cert_setup.rs` makes the in-process path the
+  **default** for new tests; the GmSSL interop helper is now the
+  explicit "I'm talking to a real GmSSL process" choice.
+
+**Audit tally post-R-12**: 7 Critical resolved, 0 Critical blocked,
+3 Major resolved, 0 Major blocked, 6 Minor resolved, 0 Minor blocked,
+2 Doc resolved, 0 Doc blocked, **1 External-Upstream-Blocker (F4)**.
+
 ## [0.6.4] - 2026-09-11
 
 ### Documented — F4 External-Upstream-Blocker reclassification (R-9)

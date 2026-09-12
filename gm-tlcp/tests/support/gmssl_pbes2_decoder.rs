@@ -1,4 +1,4 @@
-//! Decrypt GmSSL-generated SM2 private keys.
+//! Decrypt GmSSL-generated SM2 private keys (PBES2 envelope).
 //!
 //! GmSSL 3.x's `sm2keygen` produces `ENCRYPTED PRIVATE KEY` PEM files
 //! that use the GM-specific PBES2 profile:
@@ -25,6 +25,18 @@
 //! **This helper is test-only.** Production code should use
 //! `Sm2KeyPair::from_encrypted_pem` (which handles standard PBES2
 //! profiles from OpenSSL).
+//!
+//! **This helper does NOT require the `gmssl` binary** — it parses the
+//! PEM bytes and runs the PBES2 KDF in pure Rust. It only exists
+//! because GmSSL's custom envelope is incompatible with the standard
+//! Rust `pkcs8` crate.
+//!
+//! Companion modules:
+//!   - `gmssl_cert_setup` — spawns the `gmssl` CLI to *produce* such
+//!     encrypted PEMs (and a CA hierarchy).
+//!   - `pem_helpers`      — pure-Rust PEM/DER byte manipulation.
+//!   - `gmca_cert_setup`  — in-process cert generation via `gm-ca`
+//!     (does NOT touch PBES2 because it produces unencrypted SEC1 keys).
 
 use std::path::Path;
 

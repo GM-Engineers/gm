@@ -135,6 +135,14 @@ tlcp-gmssl-compat = []
 # grpc   = []   # tonic / gRPC over TLCP（待实现）
 # interop = []  # GmSSL 字节级对照向量（待实现）
 
+# Phase 12 (R-12 prep): enable the gm-ca-driven in-process cert
+# generation helper (`tests/support/gmca_cert_setup`). The helper is
+# gated on this feature because `gm_ca::profiles::tlcp::tlcp_server_sign_ecc`
+# and friends live behind the same feature flag in `gm-ca`. With this
+# feature enabled, the integration tests under `tests/` no longer
+# require the `gmssl` CLI on PATH for the in-process loopback suite.
+tlcp-profiles = ["gm-ca/tlcp-profiles"]
+
 [dev-dependencies]
 # 集成测试用
 tokio = { version = "1", features = ["full"] }
@@ -145,6 +153,20 @@ base64 = "0.22"
 
 # 调试代理 hex 输出
 hex = "0.4"
+
+# Phase 12: in-process cert generation for the SM2 ECDHE/ECC + KAP
+# loopback tests via `tests/support/gmca_cert_setup`. We opt into
+# `tlcp-profiles` so the helper has access to `gm_ca::profiles::tlcp::*`.
+# We do NOT enable the `rsa` feature here — the RSA in-process tests
+# use a dummy 100-byte cert blob and a locally-generated
+# `RsaKeyPair::generate(2048)` (no cert issuance needed).
+gm-ca = { path = "../gm-ca", version = "0.2", default-features = false, features = ["tlcp-profiles"] }
+
+# Phase 12: `pem::parse` is used by `gmca_cert_setup` to extract DER
+# from PEM-encoded certs returned by `gm_ca::CaSigner`. It's a
+# transitive dependency of `gm-ca` but we declare it explicitly here
+# because Cargo does not expose transitive deps to integration tests.
+pem = "3"
 
 # 注：以下依赖**不**进本 crate（避免污染 TLCP 边界 / 未直接使用）：
 #   - metrics/audit：emit 端直接用 tracing；落库/告警由应用层负责

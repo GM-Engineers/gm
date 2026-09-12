@@ -12,19 +12,19 @@
 //! machine has pre-existing wire-format bugs that are out of scope
 //! for PR-A (see `AUDIT-2026-09-06-v2.md` for the full audit).
 //!
-//! Requires the `gmssl` CLI on PATH so the `support::cert_setup`
-//! helper can generate a real CA hierarchy. Skips silently if
-//! `gmssl` is absent (same convention as `tests/gmssl_interop.rs`).
+//! Requires the `tlcp-profiles` feature so the
+//! `support::gmca_cert_setup` helper can sign the cert hierarchy with
+//! `gm-ca::CaSigner` in-process (no external `gmssl` binary needed).
+//! The pre-Phase-12 build relied on the `gmssl` CLI; that dependency
+//! was removed in Phase 12 / R-12.
 
 #![cfg(test)]
+#![cfg(feature = "tlcp-profiles")]
 
 mod support;
-use support::cert_setup::{generate_test_certs, gmssl_present};
-use support::gmssl_key::load_sm2_key_from_gmssl_pem;
+use support::gmca_cert_setup::{GmcaCerts, generate_gmca_test_certs};
 
-use base64::Engine as _;
-
-const PASSWORD: &str = "P@ssw0rd";
+use gm_crypto::sm2::Sm2KeyPair;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gm_tlcp_kap_pms_roundtrip_with_real_keys() {
@@ -33,41 +33,28 @@ async fn gm_tlcp_kap_pms_roundtrip_with_real_keys() {
     // are used as input. This exercises the server-side PMS code
     // path added by PR-A (audit C-3) without depending on the full
     // handshake state machine.
-    if !gmssl_present() {
-        eprintln!("skipping: gmssl not on PATH");
-        return;
-    }
+    //
+    // Phase 12 (R-12): cert generation moved from the `gmssl` CLI to
+    // the in-process `gmca_cert_setup` helper, so this test no longer
+    // gates on `gmssl_present()`.
 
     let tmp = std::env::temp_dir().join(format!("gm-tlcp-kap-test-{}", std::process::id()));
-    let certs = match generate_test_certs(&tmp) {
-        Ok(c) => c,
-        Err(e) => panic!("generate_test_certs failed: {}", e),
-    };
-    let server_enc_kp =
-        load_sm2_key_from_gmssl_pem(&certs.enc_key, PASSWORD).expect("server enc key");
-    let client_enc_kp =
-        load_sm2_key_from_gmssl_pem(&certs.client_enc_key, PASSWORD).expect("client enc key");
+    let certs: GmcaCerts = generate_gmca_test_certs(&tmp).expect("generate_gmca_test_certs");
 
-    // Re-read client.enc.crt PEM to get its DER bytes.
-    let client_enc_pem_text =
-        std::fs::read_to_string(&certs.client_enc_crt).expect("read client enc cert PEM");
-    let mut b64 = String::new();
-    for line in client_enc_pem_text.lines() {
-        if line.starts_with("-----") || line.trim().is_empty() {
-            continue;
-        }
-        b64.push_str(line);
-    }
-    let client_enc_cert_der = base64::engine::general_purpose::STANDARD
-        .decode(&b64)
-        .expect("decode client enc cert b64");
+    // SEC1 PEM keys come straight out of the helper — no PBES2
+    // decryption needed.
+    let server_enc_kp = Sm2KeyPair::from_private_key_pem(&certs.server_enc_key_pem)
+        .expect("server enc SEC1 PEM parse");
+    let client_enc_kp = Sm2KeyPair::from_private_key_pem(&certs.client_enc_key_pem)
+        .expect("client enc SEC1 PEM parse");
 
     // Extract the 64-byte x||y SM2 pubkey from each enc cert so we
     // can feed it to `compute_tlcp_ecdhe_pms`. We use the
     // `gm_crypto::x509::extract_sm2_pubkey_from_der` free function
     // directly because the gm-tlcp-internal re-export is private.
     let client_enc_pub_sec1 =
-        gm_crypto::x509::extract_sm2_pubkey_from_der(&client_enc_cert_der).expect("client enc pub");
+        gm_crypto::x509::extract_sm2_pubkey_from_der(&certs.client_enc_cert_der)
+            .expect("client enc pub");
     let mut client_enc_xy = [0u8; 64];
     client_enc_xy.copy_from_slice(&client_enc_pub_sec1[1..65]);
 
@@ -720,15 +707,10 @@ async fn run_ecdhe_or_ecc_loopback(suite: [u8; 2]) {
     // These tests need real X.509 certs to feed the DER cert slot of
     // `with_dual_certs` AND to feed `with_client_certs` on the connector
     // side (the connector replies to CertificateRequest with a client
-    // chain). The helper needs `gmssl` on PATH; mirror the skip semantics
-    // of `tests/gmssl_interop.rs`.
-    if !gmssl_present() {
-        eprintln!(
-            "skipping suite {:02X}{:02X} ECDHE/ECC loopback: gmssl not on PATH",
-            suite[0], suite[1]
-        );
-        return;
-    }
+    // chain). Phase 12 (R-12): cert generation moved from the `gmssl`
+    // CLI to the in-process `gmca_cert_setup` helper, so this test
+    // no longer gates on `gmssl_present()` and the keys come out as
+    // unencrypted SEC1 PEM (no PBES2 decryption needed).
 
     let tmp = std::env::temp_dir().join(format!(
         "gm-tlcp-ecdhe-ecc-{}-{:02x}{:02x}-{}",
@@ -742,20 +724,20 @@ async fn run_ecdhe_or_ecc_loopback(suite: [u8; 2]) {
         }
     ));
     let _ = std::fs::remove_dir_all(&tmp);
-    let certs = generate_test_certs(&tmp).expect("generate GmSSL cert hierarchy");
+    let certs: GmcaCerts = generate_gmca_test_certs(&tmp).expect("generate_gmca_test_certs");
 
     // ---- Server-side key material -----------------------------------------
     // `with_dual_certs` takes DER-encoded sign + enc certs plus the two
-    // SM2 private keys. Load the keys via the test-only SM3-PBKDF2 +
-    // SM4-CBC walker.
+    // SM2 private keys (as SEC1 PEM). All four are returned by
+    // `gmca_cert_setup::generate_gmca_test_certs` in memory.
     let server_sign_kp =
-        load_sm2_key_from_gmssl_pem(&certs.sign_key, PASSWORD).expect("decrypt server sign.key");
+        Sm2KeyPair::from_private_key_pem(&certs.server_sign_key_pem).expect("server sign SEC1 PEM");
     let server_enc_kp =
-        load_sm2_key_from_gmssl_pem(&certs.enc_key, PASSWORD).expect("decrypt server enc.key");
+        Sm2KeyPair::from_private_key_pem(&certs.server_enc_key_pem).expect("server enc SEC1 PEM");
 
     let acceptor = TlcpAcceptor::new().with_dual_certs(
-        certs.sign_cert_der.clone(),
-        certs.enc_cert_der.clone(),
+        certs.server_sign_cert_der.clone(),
+        certs.server_enc_cert_der.clone(),
         server_sign_kp,
         server_enc_kp,
     );
@@ -763,43 +745,32 @@ async fn run_ecdhe_or_ecc_loopback(suite: [u8; 2]) {
     // ---- Client-side key material -----------------------------------------
     // The connector must:
     //   1. Know the server's sign pubkey + distid for SKE verification
-    //      (`with_server_sign_key`). The 65-byte SEC1 pubkey is extracted
-    //      from the server's sign cert by `generate_test_certs` (already
-    //      DER-decoded into `certs.sign_pub_65`).
+    //      (`with_server_sign_key`). The 65-byte SEC1 pubkey is returned
+    //      directly by `generate_gmca_test_certs` in
+    //      `certs.server_sign_pub_65`.
     //   2. Reply to a server CertificateRequest with a client cert chain
-    //      `[client_sign, client_enc, ca]` (the CA must be in the chain
-    //      because GmSSL's AKI lacks directory_name — same constraint
-    //      `build_gmssl_compatible_connector` in `gmssl_interop.rs`
-    //      documents).
+    //      `[client_sign, client_enc, ca]`. We keep the same 3-element
+    //      chain shape the GmSSL wire-interop test uses (see
+    //      `build_gmssl_compatible_connector` in `gmssl_interop.rs`).
     //   3. Provide the client's signing key (for CertificateVerify) AND
     //      encryption key (for ECDHE Z_client / static-ECC client-side
-    //      PMS encrypt). Both come from the test-only unencrypted SEC1
-    //      PEMs produced by `generate_test_certs`.
-    let client_sign_pem =
-        std::fs::read_to_string(&certs.client_key_unenc).expect("read client.key.unenc.pem");
-    let client_enc_key_pem = {
-        let enc_kp = load_sm2_key_from_gmssl_pem(&certs.client_enc_key, PASSWORD)
-            .expect("decrypt client.enc.key");
-        enc_kp.private_key_pem().expect("client enc SEC1 PEM")
-    };
-    let client_enc_cert_der =
-        support::cert_setup::read_pem_to_der(&certs.client_enc_crt, "CERTIFICATE")
-            .expect("decode client.enc.crt PEM");
-    let ca_cert_der = support::cert_setup::read_pem_to_der(&certs.ca_cert, "CERTIFICATE")
-        .expect("decode ca.crt PEM");
-
+    //      PMS encrypt). Both come back as unencrypted SEC1 PEM from
+    //      `gmca_cert_setup`.
     let connector = TlcpConnector::new()
         .with_cipher_suites(vec![suite])
-        .with_server_sign_key(certs.sign_pub_65.clone(), "1234567812345678".to_string())
+        .with_server_sign_key(
+            certs.server_sign_pub_65.clone(),
+            support::gmca_cert_setup::DEFAULT_DISTID.to_string(),
+        )
         .with_client_certs(
             vec![
-                certs.client_cert_der.clone(),
-                client_enc_cert_der,
-                ca_cert_der,
+                certs.client_sign_cert_der.clone(),
+                certs.client_enc_cert_der.clone(),
+                certs.ca_cert_der.clone(),
             ],
-            client_sign_pem,
-            Some(client_enc_key_pem),
-            Some(PASSWORD.to_string()),
+            certs.client_sign_key_pem.clone(),
+            Some(certs.client_enc_key_pem.clone()),
+            None,
         );
 
     // ---- Wire up the duplex transport --------------------------------------

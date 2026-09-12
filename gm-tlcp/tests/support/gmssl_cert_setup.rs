@@ -41,9 +41,18 @@
 //! Any TLCP client that wishes to verify the server's SKE signature
 //! must use the same distid string.
 //!
-//! **This helper runs only when the `gmssl` binary is available on
-//! PATH.** In CI (Docker Linux) and in any environment without
-//! `gmssl` installed, it is skipped via `gmssl_present()`.
+//! **This helper requires the `gmssl` CLI on PATH.** It spawns the
+//! `gmssl` binary for every cert/key operation (sm2keygen / certgen /
+//! reqgen / reqsign). In CI (Docker Linux) and in any environment
+//! without `gmssl` installed, callers must gate usage via
+//! [`gmssl_present`]. Tests that ONLY need in-process cert generation
+//! should use `gmca_cert_setup` instead — that helper depends on
+//! `gm-ca` in-process and does not require `gmssl` on PATH.
+//!
+//! Pure-Rust PEM parsing helpers (no `gmssl` dependency) live in the
+//! sibling module `pem_helpers`. PBES2 envelope decoding for GmSSL's
+//! custom SM3-PBKDF2 + SM4-CBC private-key format lives in the sibling
+//! module `gmssl_pbes2_decoder`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -101,12 +110,13 @@ pub struct GmsslCerts {
     /// Client encryption-key PEM (SM3-PBKDF2 encrypted PKCS#8), used
     /// by the connector's `with_client_certs(.., Some(enc_key_pem), ..)`
     /// API for TLCP ECDHE suites. Decrypted on demand via the test-
-    /// only `support::gmssl_key` helper.
+    /// only `support::gmssl_pbes2_decoder` helper.
     pub client_enc_key: PathBuf,
     /// Client private key in UNENCRYPTED SEC1 PEM form (`BEGIN EC
     /// PRIVATE KEY`). Generated from `client.key` by decoding the
-    /// GmSSL PBES2 envelope via `gmssl_key::load_sm2_key_from_gmssl_pem`
-    /// and re-serializing. Compatible with `gm-crypto`'s
+    /// GmSSL PBES2 envelope via
+    /// `gmssl_pbes2_decoder::load_sm2_key_from_gmssl_pem` and
+    /// re-serializing. Compatible with `gm-crypto`'s
     /// `Sm2KeyPair::from_private_key_pem`.
     pub client_key_unenc: PathBuf,
     /// DER-encoded sign certificate (decoded from sign.crt PEM).
@@ -115,7 +125,8 @@ pub struct GmsslCerts {
     pub enc_cert_der: Vec<u8>,
     /// DER-encoded client certificate (decoded from client.crt PEM).
     pub client_cert_der: Vec<u8>,
-    /// 65-byte SEC1 uncompressed SM2 public key (extracted from sign.crt).
+    /// 65-byte SEC1 uncompressed SM2 public key (extracted from sign.crt
+    /// via [`gm_crypto::x509::extract_sm2_pubkey_from_der`]).
     pub sign_pub_65: Vec<u8>,
 }
 
@@ -413,9 +424,11 @@ pub fn generate_test_certs<P: AsRef<Path>>(out_dir: P) -> Result<GmsslCerts, Str
     // `BEGIN EC PRIVATE KEY` SEC1, which `gm-crypto` understands
     // through `Sm2KeyPair::from_private_key_pem`.
     let client_key_unenc = out_dir.join("client.key.unenc.pem");
-    let client_kp =
-        crate::support::gmssl_key::load_sm2_key_from_gmssl_pem(&client_key, DEFAULT_PASSWORD)
-            .map_err(|e| format!("decrypt client.key: {}", e))?;
+    let client_kp = crate::support::gmssl_pbes2_decoder::load_sm2_key_from_gmssl_pem(
+        &client_key,
+        DEFAULT_PASSWORD,
+    )
+    .map_err(|e| format!("decrypt client.key: {}", e))?;
     std::fs::write(
         &client_key_unenc,
         client_kp
@@ -425,15 +438,31 @@ pub fn generate_test_certs<P: AsRef<Path>>(out_dir: P) -> Result<GmsslCerts, Str
     .map_err(|e| format!("write client.key.unenc.pem: {}", e))?;
 
     // Pre-decode certs to DER for callers.
-    let sign_cert_der = read_pem_to_der(&sign_crt, "CERTIFICATE")
+    let sign_cert_der = crate::support::pem_helpers::read_pem_to_der(&sign_crt, "CERTIFICATE")
         .ok_or_else(|| "could not decode sign.crt PEM".to_string())?;
-    let enc_cert_der = read_pem_to_der(&enc_crt, "CERTIFICATE")
+    let enc_cert_der = crate::support::pem_helpers::read_pem_to_der(&enc_crt, "CERTIFICATE")
         .ok_or_else(|| "could not decode enc.crt PEM".to_string())?;
-    let client_cert_der = read_pem_to_der(&client_crt, "CERTIFICATE")
+    let client_cert_der = crate::support::pem_helpers::read_pem_to_der(&client_crt, "CERTIFICATE")
         .ok_or_else(|| "could not decode client.crt PEM".to_string())?;
 
-    let sign_pub_65 = extract_uncompressed_pubkey_from_der(&sign_cert_der)
-        .ok_or_else(|| "could not locate SubjectPublicKeyInfo BIT STRING".to_string())?;
+    // Pull the 65-byte SM2 pubkey out of the sign cert via the canonical
+    // gm-crypto helper (replaces the local extract_uncompressed_pubkey_from_der
+    // walker that lived in the pre-Phase-12 cert_setup module).
+    let sign_pub_65 =
+        gm_crypto::x509::extract_sm2_pubkey_from_der(&sign_cert_der).map_err(|e| {
+            format!(
+                "could not extract SM2 pubkey from sign.crt: {} (cert DER len = {})",
+                e,
+                sign_cert_der.len()
+            )
+        })?;
+    if sign_pub_65.len() != 65 || sign_pub_65[0] != 0x04 {
+        return Err(format!(
+            "extracted sign pubkey not 65-byte uncompressed point: len={}, prefix={:02x?}",
+            sign_pub_65.len(),
+            sign_pub_65.first().copied().unwrap_or(0)
+        ));
+    }
 
     Ok(GmsslCerts {
         chain_crt,
@@ -469,47 +498,6 @@ fn run_gmssl(args: &[&str]) -> Result<(), String> {
         ));
     }
     Ok(())
-}
-
-/// Decode the first PEM block with the given label from `path`,
-/// returning its base64-decoded DER bytes.
-pub fn read_pem_to_der(path: &Path, label: &str) -> Option<Vec<u8>> {
-    let pem = std::fs::read_to_string(path).ok()?;
-    let begin = format!("-----BEGIN {}-----", label);
-    let end = format!("-----END {}-----", label);
-    let start = pem.find(&begin)? + begin.len();
-    let stop = pem[start..].find(&end)? + start;
-    let b64: String = pem[start..stop]
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect();
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD.decode(b64).ok()
-}
-
-/// Pull the uncompressed SM2 public key (65 bytes: `04 || x || y`) out
-/// of an X.509 certificate's SubjectPublicKeyInfo BIT STRING.
-fn extract_uncompressed_pubkey_from_der(cert_der: &[u8]) -> Option<Vec<u8>> {
-    // The SubjectPublicKeyInfo BIT STRING starts with `03 <len> 00 <key-bytes>`.
-    // Search for the SM2 OID (1.2.840.10045.2.1) followed by SM2 curve OID
-    // (1.2.156.10197.1.301), then the BIT STRING wrapping the public key.
-    let sm2_oid_seq: &[u8] = &[
-        0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, // id-ecPublicKey
-        0x06, 0x08, 0x2a, 0x81, 0x1c, 0xcf, 0x55, 0x01, 0x82, 0x2d, // SM2 curve
-    ];
-    let pos = cert_der
-        .windows(sm2_oid_seq.len())
-        .position(|w| w == sm2_oid_seq)?;
-    // After the curve OID, BIT STRING starts with `03 <len> 00 04 <x> <y>` (65 bytes).
-    let after_oid = pos + sm2_oid_seq.len();
-    // Scan forward for the first `03 <len>` tag with a 65-byte payload.
-    for i in after_oid..cert_der.len().saturating_sub(2) {
-        if cert_der[i] == 0x03 && cert_der[i + 1] == 0x42 && cert_der[i + 2] == 0x00 {
-            return Some(cert_der[i + 3..i + 3 + 65].to_vec());
-        }
-    }
-    let _ = base64::engine::general_purpose::STANDARD; // keep import alive
-    None
 }
 
 #[cfg(test)]
