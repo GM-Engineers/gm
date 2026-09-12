@@ -3,17 +3,31 @@
 //! TLCP defines twelve cipher suites in GB/T 38636-2020 §6.4.5.2.1
 //! 表 2, spanning five `KeyExchangeAlgorithm` branches (§6.4.5.4):
 //!
-//! | id       | name                  | kex              | record cipher   |
-//! |----------|-----------------------|------------------|------------------|
-//! | `0xE051` | `ECDHE_SM4_GCM_SM3`   | ECDHE            | SM4-GCM-128      |
-//! | `0xE011` | `ECDHE_SM4_CBC_SM3`   | ECDHE            | SM4-CBC + HMAC   |
-//! | `0xE053` | `ECC_SM4_GCM_SM3`     | ECC (static)     | SM4-GCM-128      |
-//! | `0xE013` | `ECC_SM4_CBC_SM3`     | ECC (static)     | SM4-CBC + HMAC   |
-//! | `0xE057` | `IBC_SM4_GCM_SM3`     | IBC (static)     | SM4-GCM-128      |
-//! | `0xE017` | `IBC_SM4_CBC_SM3`     | IBC (static)     | SM4-CBC + HMAC   |
+//! | id       | name                  | kex              | record cipher   | implemented |
+//! |----------|-----------------------|------------------|------------------|-------------|
+//! | `0xE051` | `ECDHE_SM4_GCM_SM3`   | ECDHE            | SM4-GCM-128      | gm-tlcp 0.1.0 (R-1) |
+//! | `0xE011` | `ECDHE_SM4_CBC_SM3`   | ECDHE            | SM4-CBC + HMAC   | gm-tlcp 0.1.0 (R-1) |
+//! | `0xE053` | `ECC_SM4_GCM_SM3`     | ECC (static)     | SM4-GCM-128      | gm-tlcp 0.4.0 (R-3) |
+//! | `0xE013` | `ECC_SM4_CBC_SM3`     | ECC (static)     | SM4-CBC + HMAC   | gm-tlcp 0.4.0 (R-3) |
+//! | `0xE057` | `IBC_SM4_GCM_SM3`     | IBC (static)     | SM4-GCM-128      | gm-tlcp 0.5.0 (R-4) |
+//! | `0xE017` | `IBC_SM4_CBC_SM3`     | IBC (static)     | SM4-CBC + HMAC   | gm-tlcp 0.5.0 (R-4) |
+//! | `0xE055` | `IBSDH_SM4_GCM_SM3`   | IBSDH (dynamic)  | SM4-GCM-128      | gm-tlcp 0.5.3 (R-4.2) |
+//! | `0xE015` | `IBSDH_SM4_CBC_SM3`   | IBSDH (dynamic)  | SM4-CBC + HMAC   | gm-tlcp 0.5.3 (R-4.2) |
+//! | `0xE059` | `RSA_SM4_GCM_SM3`     | RSA              | SM4-GCM-128      | gm-tlcp 0.6.0 (R-5) |
+//! | `0xE05A` | `RSA_SM4_GCM_SHA256`  | RSA              | SM4-GCM-128      | gm-tlcp 0.6.0 (R-5) |
+//! | `0xE019` | `RSA_SM4_CBC_SM3`     | RSA              | SM4-CBC + HMAC   | gm-tlcp 0.6.0 (R-5) |
+//! | `0xE01C` | `RSA_SM4_CBC_SHA256`  | RSA              | SM4-CBC + HMAC   | gm-tlcp 0.6.0 (R-5) |
 //!
-//! SM9 IBSDH dynamic suites E055/E015 (added in gm-tlcp 0.5.3, R-4.2).
-//! RSA suites E019 / E01C / E059 / E05A pending R-5 / gm-tlcp 0.6.0.
+//! All 12 suites are now implemented end-to-end (handshake + record
+//! layer) and exercised by in-process loopback tests in
+//! `tests/gm_tlcp_loopback.rs`:
+//!
+//! - SM2 ECDHE/ECC (4 suites): real `CaSigner`-issued SM2 dual-cert
+//!   via `tests/support/gmca_cert_setup` (Phase 12 / R-12)
+//! - RSA (4 suites × dual-cert + single-cert + SM3-PRF + SHA256-PRF
+//!   variants = 8 tests): real `RsaCaSigner`-issued RSA cert via
+//!   `tests/support/rsa_cert_setup` (Phase 13 / R-13)
+//! - SM9 IBC + IBSDH (4 suites): pure-Rust SM9 KGC via `gm-sm9-rs`
 //!
 //! This module is data-only; the cipher-suite selection / negotiation
 //! lives in the handshake state machine.
@@ -52,12 +66,12 @@ pub enum KeyExchangeMode {
     /// server SM9-decrypts. (R-4 / gm-tlcp 0.5.0.)
     Ibc,
     /// SM9 IBSDH (dynamic): 2-round identity-based key exchange
-    /// per GM/T 0044-2016 §6.1. Not yet implemented; pending
-    /// R-4.1 / gm-tlcp 0.5.1.
+    /// per GM/T 0044-2016 §6.1. (Implemented in gm-tlcp 0.5.3 / R-4.2.)
     Ibsdh,
     /// RSA: server emits RSA-signed SKE; client RSAES-PKCS1-v1_5
     /// encrypts 48-byte PMS under server's RSA cert; server
-    /// RSA-decrypts. (Pending R-5 / gm-tlcp 0.6.0.)
+    /// RSA-decrypts. (Implemented in gm-tlcp 0.6.0 / R-5. R-7 in
+    /// 0.6.2 added the spec-mandated single-Certificate layout.)
     Rsa,
 }
 

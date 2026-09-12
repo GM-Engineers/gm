@@ -3168,10 +3168,11 @@ impl TlcpAcceptor {
         server_hs.transcript.extend_from_slice(&cert_msg);
         server_hs.set_server_certs(cert_pair);
         // Suite dispatch lives in step 5 (server SKE emit) below:
-        //   Ecdhe / Ecc → emit EC params / sig-only SKE
-        //   Ibc         → emit SM9 IBC SKE (R-4.1-hotfix)
-        //   Ibsdh / Rsa → still pending R-4.2 / R-5 — keep the existing
-        //                 error returns in step 5 / step 8 below.
+        //   Ecdhe → emit EC params + ephemeral pub + sig SKE (R-1)
+        //   Ecc   → emit sig-only SKE (R-3, gm-tlcp 0.4.0)
+        //   Ibc   → emit SM9 IBC SKE (R-4, gm-tlcp 0.5.0)
+        //   Ibsdh → emit SM9 IBSDH SKE (R-4.2, gm-tlcp 0.5.3)
+        //   Rsa   → emit RSA-signed SKE (R-5, gm-tlcp 0.6.0)
         // Step 5: ServerKeyExchange.        //
         // - ECDHE suites (E011/E051): emit `Ecdhe(Sm2EcdheParams)` body
         //   (full RFC 4492 ECParameters blob). Captures the ephemeral
@@ -3182,8 +3183,7 @@ impl TlcpAcceptor {
         //     `cr ∥ sr ∥ enc_cert_header ∥ enc_cert`). No ephemeral
         //     keypair needed; the PMS comes from server-side
         //     `ECCEncryptedPreMasterSecret` decryption in step 8
-        //     (audit C-4 / R-3, not yet implemented — see step 8 error
-        //     path).
+        //     (audit C-4 / R-3, implemented in gm-tlcp 0.4.0).
         //   - GmSSL-master shim (--features tlcp-gmssl-compat): emit
         //     ECDHE-style body (interpretation-C). Captures ephemeral
         //     keypair for raw 32-byte ECDH PMS derivation in step 8.
@@ -3259,7 +3259,7 @@ impl TlcpAcceptor {
                     // emit sig-only SKE over cr ∥ sr ∥ enc_cert_header ∥
                     // enc_cert. No ephemeral keypair; the server's PMS
                     // will come from ECCEncryptedPreMasterSecret decryption
-                    // (R-3, not yet implemented).
+                    // (R-3, implemented in gm-tlcp 0.4.0).
                     let sign_kp_ref = sign_kp.as_deref().ok_or_else(|| {
                         TlcpError::HandshakeFailed(
                             "SM2 sign key not configured (needed for static-ECC suites)"

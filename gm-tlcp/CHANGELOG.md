@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documented — R-14 stale-comment cleanup (Phase 14)
+
+Phase 14 (R-14) is a docs-only cleanup. The post-Phase-13 audit
+uncovered 4 stale "not yet implemented" / "pending R-X" comments in
+production source that contradicted the actual code (the
+functionality has been shipped since gm-tlcp 0.4.0 / 0.5.3 / 0.6.0
+and is covered by 16 in-process loopback tests + 125 unit tests).
+Leaving them in would mislead future contributors reading
+handshake-server.rs or cipher_suite.rs.
+
+#### Comment changes
+
+| File | Line | Was | Now |
+|---|---|---|---|
+| `cipher_suite.rs` | 15–16 | "SM9 IBSDH dynamic suites E055/E015 (added in gm-tlcp 0.5.3, R-4.2). RSA suites E019 / E01C / E059 / E05A pending R-5 / gm-tlcp 0.6.0." | Full 12-suite table with "implemented" column citing each suite's release version + R-X reference. |
+| `cipher_suite.rs` | 54–56 (Ibsdh) | "SM9 IBSDH ... Not yet implemented; pending R-4.1 / gm-tlcp 0.5.1." | "Implemented in gm-tlcp 0.5.3 / R-4.2." |
+| `cipher_suite.rs` | 58–61 (Rsa) | "RSA: ... (Pending R-5 / gm-tlcp 0.6.0.)" | "RSA: ... Implemented in gm-tlcp 0.6.0 / R-5. R-7 in 0.6.2 added the spec-mandated single-Certificate layout." |
+| `mod.rs` | 3170–3174 (suite dispatch) | "Ibsdh / Rsa → still pending R-4.2 / R-5 — keep the existing error returns in step 5 / step 8 below." | Per-suite list: ECDHE (R-1) / Ecc (R-3, 0.4.0) / Ibc (R-4, 0.5.0) / Ibsdh (R-4.2, 0.5.3) / Rsa (R-5, 0.6.0). |
+| `mod.rs` | 3185 (static-ECC spec-default) | "(audit C-4 / R-3, not yet implemented — see step 8 error path)." | "(audit C-4 / R-3, implemented in gm-tlcp 0.4.0)." |
+| `mod.rs` | 3262 (static-ECC R-3) | "(R-3, not yet implemented)." | "(R-3, implemented in gm-tlcp 0.4.0)." |
+
+#### What is NOT changed (deliberate)
+
+- Historical R-X references in *test names* (`rsaca_signer_e059_*`),
+  *CHANGELOG entries* (R-4.1-hotfix, R-4.2, R-5, R-7, R-9, R-10,
+  R-11, R-12, R-13), and *audit-trace comments* in `mod.rs`
+  (e.g. L3948 "Closes audit C-4 (gm-tlcp 0.4.0 / R-3)") are
+  preserved — they document the evolution of the codebase, not its
+  current state.
+
+- `mod.rs` L60–63 "Not implemented (out of scope for GB/T 38636-2020):
+  0-RTT / Early Data / PSK / PSK-DHE modes" is preserved — those
+  features genuinely are not in the standard.
+
+- `handshake/server.rs:372` "Returns None if the handshake is not
+  yet established" is English description of API semantics, not an
+  implementation claim. Preserved.
+
+#### Verification
+
+All 7 verification gates preserved:
+
+- `cargo +stable fmt --check` clean
+- `cargo +stable clippy --lib --tests -- -D warnings` clean (default)
+- `cargo +stable clippy --lib --tests --features tlcp-profiles -- -D warnings` clean
+- `cargo +stable clippy --lib --tests --features tlcp-profiles,rsa -- -D warnings` clean
+- `cargo +stable test --lib` 125 passed
+- `cargo +stable test --features tlcp-profiles --test gm_tlcp_loopback` 13 passed
+- `cargo +stable test --features tlcp-profiles,rsa --test gm_tlcp_loopback` 21 passed
+- `cargo +stable test --test integration_tlcp` 32 passed
+- `cargo +stable doc --no-deps` clean
+
+#### Decision rationale
+
+The stale comments survived three rounds of audit-driven fixes
+(R-3 / R-4.2 / R-5) because the *code* was fixed but the *comments*
+describing the future-tense work were never updated. Phase 14 closes
+this gap in a single doc-only commit. Future contributors reading
+the cipher-suite table or the SKE dispatch comment block now see
+the actual implementation status instead of out-of-date "pending"
+markers.
+
+**Audit tally post-R-14**: 7 Critical resolved, 0 Critical blocked,
+3 Major resolved, 0 Major blocked, 6 Minor resolved, 0 Minor blocked,
+2 Doc resolved, 0 Doc blocked, **1 External-Upstream-Blocker (F4)**.
+
+## [0.6.4] - 2026-09-11
+
 ### Documented — R-13 test-quality hardening (Phase 13)
 
 Phase 13 (R-13) closes the last 8-suite cert-quality gap surfaced by
