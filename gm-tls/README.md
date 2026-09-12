@@ -87,17 +87,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## API 稳定性
 
-本库遵循语义化版本控制，API 在主要版本间保持稳定。
+**重要**：本库版本 `< 1.0`，**不提供 SemVer 兼容性承诺**。`v0.x` 范围内的次版本号变更（minor bump）可能引入破坏性改动。请在 `Cargo.toml` 中用精确版本号锁定依赖（如 `gm-tls = "=0.2.1"`）。
 
-当前版本：v0.2.0
+`v0.x` 期间维护者会尽量保持下列 API 稳定，但保留在必要时调整参数或重命名的权利。
 
-### 稳定 API
+**当前版本**：v0.2.1
 
-以下 API 在 v0.x 范围内不会引入破坏性变更：
+### 准稳定 API（v0.x 尽量保持兼容）
+
+下列 API 在 v0.x 范围内尽量保持向后兼容。但因为 `<1.0` 无 SemVer 承诺，**实际仍可能在 minor bump 中调整**。
 
 **低层 API（gm 模块）：**
 - `gm_tls::gm::connect_gm_rust`
 - `gm_tls::gm::accept_gm_rust`
+- `gm_tls::gm::accept_gm_rust_with_client_cert`
 - `gm_tls::gm::GmTlsStream`
 - `gm_tls::gm::HandshakeOptions`
 - `gm_tls::gm::SessionKeys`
@@ -110,21 +113,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 实验性 API
 
-以下 API 标记为实验性，可能会变更：
+下列 API 标记为实验性，**随时可能变更**：
 
 - 内部握手状态机函数
 - 未公开的协议细节
 
 ## 性能特征
 
-| 操作 | 平均延迟 |
-|------|----------|
-| SM2 临时密钥生成 | ~95 µs |
-| SM2 签名 | ~100 µs |
-| SM2 验签 | ~80 µs |
-| SM4-GCM 加密/解密 | ~5 µs/KB |
-| ClientHello 构建 | ~94 µs |
-| ALPN 选择 | ~2.8 ns |
+性能数字与硬件、编译器、Rust 版本、`--release` 标志强相关，**README 不固化任何具体数字**。README 写死的 µs/ns 数无法复现，反而误导。
+
+如需实测本机性能：
+
+```bash
+cargo bench --bench crypto_bench
+```
+
+`benches/crypto_bench.rs` 覆盖 SM2 临时密钥生成、SM2 签名/验签、SM4-GCM 加解密、ClientHello/ServerHello 构建、ALPN 选择等关键操作。Criterion 输出会明确标注波动范围与硬件信息，可作为真实参考。
 
 ## 测试
 

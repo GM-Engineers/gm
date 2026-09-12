@@ -87,17 +87,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## API Stability
 
-This library follows semantic versioning, with API stability maintained between major versions.
+**Important**: This crate is at version `< 1.0` and **does not make SemVer compatibility promises**. Minor version bumps within the `v0.x` range may introduce breaking changes. Pin your dependency to an exact version in `Cargo.toml` (e.g., `gm-tls = "=0.2.1"`).
 
-Current version: v0.2.0
+During `v0.x`, maintainers will try to keep the following APIs stable, but reserve the right to adjust signatures or rename items when necessary.
 
-### Stable API
+**Current version**: v0.2.1
 
-The following API will not introduce breaking changes within the v0.x range:
+### Quasi-stable API (best-effort compatibility within v0.x)
+
+The following APIs are kept as stable as practical within the v0.x range. However, because `<1.0` carries no SemVer promise, **breaking changes are still possible in minor bumps**.
 
 **Low-level API (gm module):**
 - `gm_tls::gm::connect_gm_rust`
 - `gm_tls::gm::accept_gm_rust`
+- `gm_tls::gm::accept_gm_rust_with_client_cert`
 - `gm_tls::gm::GmTlsStream`
 - `gm_tls::gm::HandshakeOptions`
 - `gm_tls::gm::SessionKeys`
@@ -110,21 +113,22 @@ The following API will not introduce breaking changes within the v0.x range:
 
 ### Experimental API
 
-The following APIs are marked as experimental and may change:
+The following APIs are marked experimental and **may change at any time**:
 
 - Internal handshake state machine functions
 - Undocumented protocol details
 
 ## Performance Characteristics
 
-| Operation | Average Latency |
-|-----------|-----------------|
-| SM2 Ephemeral Key Generation | ~95 µs |
-| SM2 Signing | ~100 µs |
-| SM2 Verification | ~80 µs |
-| SM4-GCM Encrypt/Decrypt | ~5 µs/KB |
-| ClientHello Construction | ~94 µs |
-| ALPN Selection | ~2.8 ns |
+Performance numbers depend heavily on hardware, compiler, Rust version, and `--release` profile. **This README does not pin any specific numbers** — pinned µs/ns values cannot be reproduced and tend to mislead.
+
+To measure on your machine:
+
+```bash
+cargo bench --bench crypto_bench
+```
+
+`benches/crypto_bench.rs` covers SM2 ephemeral key generation, SM2 signing/verification, SM4-GCM encrypt/decrypt, ClientHello/ServerHello construction, ALPN selection, and other critical operations. Criterion output explicitly marks confidence intervals and host metadata, which is the honest reference.
 
 ## Testing
 

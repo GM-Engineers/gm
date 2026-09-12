@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- README / README.en.md: documentation accuracy pass.
+  - API Stability section now honestly states the crate is `< 1.0` and
+    carries **no SemVer compatibility promise**; replaces the prior
+    "will not introduce breaking changes within v0.x" claim that was
+    false under SemVer semantics.
+  - Performance Characteristics section removes the unreproducible
+    µs / ns latency table; readers are pointed at `cargo bench --bench
+    crypto_bench` instead, with the file's coverage area listed.
+  - Added `accept_gm_rust_with_client_cert` to the public API listing
+    (was missing from the README even though it shipped in 0.2.x).
+  - Version string synced to `v0.2.1` (Cargo.toml).
+
 ## [0.2.1] - 2026-09-07
 
 ### Changed
