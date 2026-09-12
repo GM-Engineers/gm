@@ -143,6 +143,21 @@ tlcp-gmssl-compat = []
 # require the `gmssl` CLI on PATH for the in-process loopback suite.
 tlcp-profiles = ["gm-ca/tlcp-profiles"]
 
+# Phase 13 (R-13): enable the RSA in-process cert helper
+# (`tests/support/rsa_cert_setup`). The helper needs
+# `gm_ca::rsa_signer::RsaCaSigner` and the `tlcp_server_rsa()` /
+# `tlcp_client_rsa()` TLCP profile presets, both of which live behind
+# the `rsa` feature flag in `gm-ca`. Combined with `tlcp-profiles`,
+# the RSA in-process loopback tests (E059/E019/E05A/E01C) run
+# without `gmssl` on PATH and use real `RsaCaSigner`-issued RSA certs
+# instead of the pre-R-13 dummy 100-byte DER blob.
+#
+# We don't list `dep:rsa` here because `rsa` is already a
+# non-optional dependency of gm-tlcp (for the production
+# `rsa_helpers::RsaKeyPair`); it's available to integration tests via
+# the regular dep tree.
+rsa = ["gm-ca/rsa"]
+
 [dev-dependencies]
 # 集成测试用
 tokio = { version = "1", features = ["full"] }
@@ -167,6 +182,12 @@ gm-ca = { path = "../gm-ca", version = "0.2", default-features = false, features
 # transitive dependency of `gm-ca` but we declare it explicitly here
 # because Cargo does not expose transitive deps to integration tests.
 pem = "3"
+
+# Phase 13 (R-13): `gm-der` is used by `rsa_cert_setup` to construct
+# a PKCS#10 CSR over the leaf RSA keypair (manual DER encoding —
+# `gm-crypto` has no `RsaCsrBuilder`). It's a transitive dependency
+# of `gm-ca` and `gm-crypto` but integration tests need it directly.
+gm-der = { path = "../gm-der", version = "0.1" }
 
 # 注：以下依赖**不**进本 crate（避免污染 TLCP 边界 / 未直接使用）：
 #   - metrics/audit：emit 端直接用 tracing；落库/告警由应用层负责

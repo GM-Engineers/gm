@@ -7,6 +7,119 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documented — R-13 test-quality hardening (Phase 13)
+
+Phase 13 (R-13) closes the last 8-suite cert-quality gap surfaced by
+the Phase 12 review: the 8 RSA in-process loopback tests were still
+using a dummy 100-byte DER blob as the "Certificate" payload because
+the connector step-5 SKE-verify path takes the cert bytes verbatim as
+part of the signature input and does NOT extract the RSA pubkey from
+the cert (the pubkey comes from `with_rsa_certs(server_rsa_pub)`
+directly). With Phase 13, the RSA tests now use **real
+`RsaCaSigner`-issued RSA certs** generated in-process — same
+gm-ca-driven pipeline as Phase 12's SM2 ECDHE/ECC suite, but for the
+RSA side.
+
+#### File layout changes
+
+| Pre-Phase-13 | Post-Phase-13 | Depends on |
+|---|---|---|
+| (did not exist) | `tests/support/rsa_cert_setup.rs` | (none) — in-process RSA cert gen via `gm-ca::RsaCaSigner` |
+
+The new helper is gated on `tlcp-profiles + rsa` because both
+`gm_ca::rsa_signer::RsaCaSigner` and
+`gm_ca::profiles::tlcp::tlcp_server_rsa` live behind the `rsa`
+feature flag in `gm-ca`. Phase 13 also adds a `rsa` feature on
+gm-tlcp itself (`tlcp-profiles = [...]`, `rsa = ["gm-ca/rsa"]`) and
+a `gm-der` dev-dependency for the manual PKCS#10 CSR construction.
+
+#### Functional change — RSA in-process loopback now uses real certs
+
+The 8 RSA in-process tests (R-5 dual-cert + R-7 single-cert ×
+SM3-PRF / SHA256-PRF × GCM / CBC) now generate their cert chain via
+`rsa_cert_setup::generate_rsa_test_certs`:
+
+1. 2048-bit RSA CA keypair, self-signed root cert via
+   `RsaCaSigner::self_sign_ca(3650, CertProfile::root_ca())`.
+2. 2048-bit RSA leaf keypair, manual PKCS#10 CSR with
+   `sha256WithRSAEncryption` signature (RFC 8017 §9.2), built via
+   `gm-der` primitives.
+3. `RsaCaSigner::sign_csr_with_profile(csr_pem, 365,
+   tlcp_server_rsa())` → real RSA leaf cert (KU: digitalSignature
+   + keyEncipherment, EKU: serverAuth).
+4. PKCS#8 PEM bridge to `gm_tlcp::rsa_helpers::RsaKeyPair`.
+
+The dummy 100-byte `(0..100u8).collect()` blob is removed from all 8
+tests.
+
+#### What is NOT changed (deliberate)
+
+- **SM9 IBC / IBSDH tests** still use the `vec![0x01; 100]` /
+  `vec![0x02; 100]` placeholder for the SM2 dual-cert slot on the
+  acceptor side. Per audit Bug 3 (R-4.1-hotfix), the SM9 wire path
+  does **NOT** consume the SM2 cert slot (no SM2 PKE / no SM2 sig);
+  `accept_with_certs` only requires the cert slot to be *configured*,
+  not *valid*. Filling it with a real gm-ca-issued SM2 cert would
+  add cost without adding any verification value. The SM9 wire path
+  itself is already verified end-to-end by the Phase 4 SM9 in-process
+  loopback tests in `gm-ca/tests/tlcp_loopback.rs`.
+
+- **KAP unit test** (`gm_tlcp_kap_pms_roundtrip_with_real_keys`)
+  already used real `RsaCaSigner`-equivalent certs (via
+  `gmca_cert_setup::generate_gmca_test_certs`) since Phase 12.
+
+#### Cargo.toml changes
+
+Added two `[dev-dependencies]` entries:
+
+- `gm-der = { path = "../gm-der", version = "0.1" }` — used by
+  `rsa_cert_setup` to construct the PKCS#10 CSR over the leaf RSA
+  keypair (manual DER encoding — `gm-crypto` has no `RsaCsrBuilder`).
+
+Added one `[features]` entry:
+
+- `rsa = ["gm-ca/rsa"]` — gates the `rsa_cert_setup` module + the 8
+  RSA in-process loopback tests.
+
+#### Verification
+
+All 7 verification gates preserved:
+
+- `cargo +stable fmt --check` clean
+- `cargo +stable clippy --lib --tests -- -D warnings` clean (default)
+- `cargo +stable clippy --lib --tests --features tlcp-profiles -- -D warnings` clean
+- `cargo +stable clippy --lib --tests --features tlcp-profiles,rsa -- -D warnings` clean
+- `cargo +stable test --lib` 125 passed
+- `cargo +stable test --features tlcp-profiles --test gm_tlcp_loopback` **13 passed** (KAP + 4 ECDHE/ECC + 4 SM9 + 0 RSA — RSA gated on `rsa` feature)
+- `cargo +stable test --features tlcp-profiles,rsa --test gm_tlcp_loopback` **21 passed** (+ 8 RSA with real `RsaCaSigner` certs)
+- `cargo +stable test --test integration_tlcp` 32 passed
+- `cargo +stable test --features tlcp-profiles --test gmssl_interop` 4 passed + 7 ignored
+- `cargo +stable doc --no-deps` clean
+
+Note: the RSA tests now take ~40s instead of ~20s because each of the
+8 tests issues a fresh 2048-bit RSA keypair twice (CA + leaf). On a
+single host the per-test cost is ~5s; in CI we run them in series
+under a 15-min job timeout, which is well within budget.
+
+The 16 pre-existing `tlcp-profiles + tlcp-gmssl-compat` combination
+failures are pre-Phase-12 behaviour (verified by stashing + re-running
+`fd68b3b`); not a regression from this commit.
+
+#### Decision rationale
+
+Phase 12 took the SM2 ECDHE/ECC + KAP loopback off the `gmssl` CLI;
+Phase 13 does the same for the RSA suites. The 4 SM9 suites are
+deliberately left on dummy placeholders (see "What is NOT changed"
+above) — strengthening those tests would add cost without changing
+the verification surface, since the SM9 wire path does not consume
+the SM2 cert slot.
+
+**Audit tally post-R-13**: 7 Critical resolved, 0 Critical blocked,
+3 Major resolved, 0 Major blocked, 6 Minor resolved, 0 Minor blocked,
+2 Doc resolved, 0 Doc blocked, **1 External-Upstream-Blocker (F4)**.
+
+## [0.6.4] - 2026-09-11
+
 ### Documented — R-12 test infrastructure refactor (Phase 12)
 
 Phase 12 (R-12) restructures `tests/support/` so that the integration-test

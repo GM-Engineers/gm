@@ -23,6 +23,8 @@
 
 mod support;
 use support::gmca_cert_setup::{GmcaCerts, generate_gmca_test_certs};
+#[cfg(all(feature = "tlcp-profiles", feature = "rsa"))]
+use support::rsa_cert_setup::{RsaCerts, generate_rsa_test_certs};
 
 use gm_crypto::sm2::Sm2KeyPair;
 
@@ -158,40 +160,47 @@ async fn gm_tlcp_kap_pms_roundtrip_with_real_keys() {
 //   - the RSAES-PKCS1-v1_5 envelope encrypt/decrypt (steps 7.5 / 8)
 //   - the master_secret derivation round-trip
 //
-// These tests do NOT require the `gmssl` CLI. The RSA keypair is
-// generated locally via `rsa_helpers::RsaKeyPair::generate(2048)`
-// (2048-bit modulus for speed; production should use 3072 or 4096).
-// The "RSA cert" sent in the Certificate message is a dummy 100-byte
-// DER blob: the connector step 5 SKE-verify path takes the cert bytes
-// verbatim as part of the signature input, but it does NOT extract
-// the RSA pubkey from the cert (the pubkey comes from
-// `with_rsa_certs(server_rsa_pub)`). So the cert just needs to match
-// the bytes the server signed over — which it does, by construction.
+// Phase 13 (R-13): the "RSA cert" sent in the Certificate message is
+// now a **real RSA leaf cert** signed by `gm_ca::rsa_signer::RsaCaSigner`
+// (in-process, no `gmssl` CLI required). Pre-R-13 used a dummy 100-byte
+// DER blob because the connector step 5 SKE-verify path did not extract
+// the RSA pubkey from the cert (it came from `with_rsa_certs(server_rsa_pub)`
+// directly); the real-cert path additionally verifies the wire-format
+// compatibility of gm-ca's `tlcp_server_rsa()` profile.
+//
+// Gated on `tlcp-profiles + rsa` because `gm_ca::rsa_signer::RsaCaSigner`
+// is itself gated behind the `rsa` feature in `gm-ca`.
 
+#[cfg(all(feature = "tlcp-profiles", feature = "rsa"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gm_tlcp_rsa_loopback_with_real_keys_gcm() {
     run_rsa_loopback([0xE0, 0x59]).await;
 }
 
+#[cfg(all(feature = "tlcp-profiles", feature = "rsa"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gm_tlcp_rsa_loopback_with_real_keys_cbc() {
     run_rsa_loopback([0xE0, 0x19]).await;
 }
 
+#[cfg(all(feature = "tlcp-profiles", feature = "rsa"))]
 async fn run_rsa_loopback(suite: [u8; 2]) {
     use gm_tlcp::tlcp::*;
 
-    // 1. RSA keypair for the server. 2048-bit modulus keeps the test
-    //    snappy (~1s for keygen + a few encrypt/decrypt/sign/verify).
-    let rsa_kp = gm_tlcp::tlcp::rsa_helpers::RsaKeyPair::generate(2048).expect("rsa keypair gen");
+    // 1. Issue a real RSA leaf cert via RsaCaSigner (Phase 13 / R-13).
+    //    `RsaKeyPair::generate(2048)` is now invoked internally by
+    //    `generate_rsa_test_certs`; we bridge the resulting rsa-crate
+    //    keypair to gm-tlcp's `RsaKeyPair` via PKCS#8 PEM.
+    let tmp = std::env::temp_dir().join(format!("gm-tlcp-rsa-{}", std::process::id()));
+    let rsa_certs: RsaCerts = generate_rsa_test_certs(&tmp).expect("generate_rsa_test_certs");
+    let rsa_kp =
+        gm_tlcp::tlcp::rsa_helpers::RsaKeyPair::from_pkcs8_pem(&rsa_certs.rsa_key_pkcs8_pem)
+            .expect("RsaKeyPair::from_pkcs8_pem");
     let rsa_pub = rsa_kp.to_public_key().expect("rsa public key");
 
-    // 2. Configure both sides. RSA suites need no SM2 dual-certs; the
-    //    connector only needs the RSA pubkey (for SKE verify + CKE
-    //    encrypt); the acceptor only needs the RSA keypair + a dummy
-    //    RSA cert blob.
-    let rsa_cert_der: Vec<u8> = (0..100u8).collect(); // dummy DER blob
-    let acceptor = TlcpAcceptor::new().with_rsa_certs(rsa_kp, rsa_cert_der);
+    // 2. Configure both sides with the **real** RSA cert DER (no more
+    //    dummy 100-byte blob).
+    let acceptor = TlcpAcceptor::new().with_rsa_certs(rsa_kp, rsa_certs.rsa_cert_der);
 
     let connector = TlcpConnector::new()
         .with_cipher_suites(vec![suite])
@@ -523,36 +532,42 @@ async fn run_sm9_ibsdh_loopback(suite: [u8; 2]) {
 // (gm-tlcp 0.6.0 / 0.6.1 used a dual-cert workaround for compatibility
 // with the existing serializer).
 //
-// These tests do NOT require the `gmssl` CLI. The RSA keypair is
-// generated locally via `rsa_helpers::RsaKeyPair::generate(2048)` and
-// the "RSA cert" sent in the Certificate message is a dummy 100-byte
-// DER blob (same convention as the R-5 dual-cert tests).
+// Phase 13 (R-13): same cert-gen pipeline as `run_rsa_loopback` (see
+// the R-5 section above for the full rationale). The single-Cert
+// variant exercises the `with_rsa_certs_single` wire-format path on
+// top of the same real RsaCaSigner-issued cert.
+//
+// Gated on `tlcp-profiles + rsa` for the same reason as R-5.
 
+#[cfg(all(feature = "tlcp-profiles", feature = "rsa"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gm_tlcp_rsa_single_cert_loopback_with_real_keys_gcm() {
     run_rsa_single_cert_loopback([0xE0, 0x59]).await;
 }
 
+#[cfg(all(feature = "tlcp-profiles", feature = "rsa"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gm_tlcp_rsa_single_cert_loopback_with_real_keys_cbc() {
     run_rsa_single_cert_loopback([0xE0, 0x19]).await;
 }
 
+#[cfg(all(feature = "tlcp-profiles", feature = "rsa"))]
 async fn run_rsa_single_cert_loopback(suite: [u8; 2]) {
     use gm_tlcp::tlcp::*;
 
-    // 1. RSA keypair for the server. 2048-bit modulus keeps the test
-    //    snappy (~1s for keygen + a few encrypt/decrypt/sign/verify).
-    let rsa_kp = gm_tlcp::tlcp::rsa_helpers::RsaKeyPair::generate(2048).expect("rsa keypair gen");
+    // 1. Same real-cert pipeline as `run_rsa_loopback`. We re-issue the
+    //    cert per test because the leaf keypair is regenerated each
+    //    time (cert binding — no shared key across tests).
+    let tmp = std::env::temp_dir().join(format!("gm-tlcp-rsa-single-{}", std::process::id()));
+    let rsa_certs: RsaCerts = generate_rsa_test_certs(&tmp).expect("generate_rsa_test_certs");
+    let rsa_kp =
+        gm_tlcp::tlcp::rsa_helpers::RsaKeyPair::from_pkcs8_pem(&rsa_certs.rsa_key_pkcs8_pem)
+            .expect("RsaKeyPair::from_pkcs8_pem");
     let rsa_pub = rsa_kp.to_public_key().expect("rsa public key");
 
-    // 2. Configure both sides. The key difference from the R-5 dual-cert
-    //    test: the server uses `with_rsa_certs_single` (R-7), which
-    //    enables single-Certificate emission per GB/T 38636-2020 §6.4.5.5.
-    //    The connector uses `with_rsa_certs_single` (synonym for
-    //    `with_rsa_certs` — see docs in src/tlcp/mod.rs) — layout-agnostic.
-    let rsa_cert_der: Vec<u8> = (0..100u8).collect(); // dummy DER blob
-    let acceptor = TlcpAcceptor::new().with_rsa_certs_single(rsa_kp, rsa_cert_der);
+    // 2. Configure both sides with the **real** RSA cert DER + R-7's
+    //    single-Cert acceptor path.
+    let acceptor = TlcpAcceptor::new().with_rsa_certs_single(rsa_kp, rsa_certs.rsa_cert_der);
 
     let connector = TlcpConnector::new()
         .with_cipher_suites(vec![suite])
@@ -635,22 +650,28 @@ async fn run_rsa_single_cert_loopback(suite: [u8; 2]) {
 // These tests mirror the structure of the R-5 / R-7 RSA-SM3-PRF loopback
 // tests above (`run_rsa_loopback` / `run_rsa_single_cert_loopback`); only
 // the suite ID changes.
+//
+// Gated on `tlcp-profiles + rsa` for the same reason as the helpers.
 
+#[cfg(all(feature = "tlcp-profiles", feature = "rsa"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gm_tlcp_rsa_loopback_with_real_keys_gcm_sha256() {
     run_rsa_loopback([0xE0, 0x5A]).await;
 }
 
+#[cfg(all(feature = "tlcp-profiles", feature = "rsa"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gm_tlcp_rsa_loopback_with_real_keys_cbc_sha256() {
     run_rsa_loopback([0xE0, 0x1C]).await;
 }
 
+#[cfg(all(feature = "tlcp-profiles", feature = "rsa"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gm_tlcp_rsa_single_cert_loopback_with_real_keys_gcm_sha256() {
     run_rsa_single_cert_loopback([0xE0, 0x5A]).await;
 }
 
+#[cfg(all(feature = "tlcp-profiles", feature = "rsa"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gm_tlcp_rsa_single_cert_loopback_with_real_keys_cbc_sha256() {
     run_rsa_single_cert_loopback([0xE0, 0x1C]).await;
