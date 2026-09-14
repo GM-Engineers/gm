@@ -44,7 +44,7 @@ zeroize = { version = "1", features = ["derive"] }
 # Gated behind the `rsa` feature flag so the default GM/CA build stays
 # strictly SM2 + 国密. Versions synced with gm-tlcp 0.6.x.
 rsa  = { version = "0.9", default-features = false, optional = true, features = ["std", "pem", "sha2"] }
-sha2 = { version = "0.10", optional = true }
+sha2 = { version = "0.11", optional = true }
 sha1 = { version = "0.10", optional = true }
 
 [features]

@@ -62,7 +62,7 @@ sm2 = { version = "0.13", features = ["arithmetic"] }
 # all 12 suites per R-5 §8, but the digest infrastructure is
 # already in place for a future SHA-256-PRF feature flag (R-5 §9.1).
 rsa = { version = "0.9", default-features = false, features = ["std", "pem"] }
-sha2 = "0.10"
+sha2 = "0.11"
 signature = "2"
 sm3 = "0.5"  # for digest::Digest trait impl on Sm3Digest (R-5 helper)
 digest = "0.10"  # matches sm3 0.5's transitive dep; used for Sm3Core block API
