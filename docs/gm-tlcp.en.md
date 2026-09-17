@@ -183,7 +183,14 @@ enforcement.
 ### Known limitations
 
 - **Hostname check applies to the sign certificate only**. Encryption certificates typically carry no hostname.
-- **Intermediate CA chains**: operators must include all intermediate CAs in `with_server_ca_chain()` for the leaf to chain correctly. `gm-tlcp` does not currently walk multi-cert chains RFC 5280 §6-style; it verifies the leaf against the anchor set directly. Full chain walking is planned for a future release.
+- **Chain validation** is per-link RFC 5280 §6-style: SM2 signature,
+  validity period, basicConstraints CA:TRUE for intermediate CAs,
+  pathLenConstraint (Phase H), and KeyUsage/ExtendedKeyUsage per
+  role (Phase H). The validator walks the leaf's chain linearly
+  (`leaf → intermediate_1 → … → root`) and tries the root against
+  each configured anchor. Peers MUST send their intermediate CAs;
+  we do not yet build candidate paths from a leaf without
+  intermediates.
 - **CRL checking is not yet implemented** — operators should rely on OCSP at a higher layer or use short-validity rotation.
 - **Empty client chain + configured anchor** → rejected on the server. However, the current `TlcpConnector::with_client_certs(vec![], ...)` does NOT emit an empty `Certificate` handshake message (RFC 5246 §7.4.6 requires one); this wire-format gap is a separate work item.
 

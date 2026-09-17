@@ -55,12 +55,15 @@ pub fn validate_cert_pem(
 /// Verify a full certificate chain against one or more trust anchors.
 ///
 /// Wrapper around [`gm_crypto::x509::verify::verify_cert_chain_sm2_chain`].
+/// `role` is forwarded through to the underlying chain validator
+/// (KU/EKU enforcement per role).
 pub fn verify_cert_chain_sm2_chain(
     leaf_chain: &[OwnedCert],
     trust_anchors: &[OwnedCert],
     now: OffsetDateTime,
     expected_domain: Option<&str>,
+    role: Option<gm_crypto::x509::verify::CertRole>,
 ) -> Result<(), TlsError> {
-    inner::verify_cert_chain_sm2_chain(leaf_chain, trust_anchors, now, expected_domain)?;
+    inner::verify_cert_chain_sm2_chain(leaf_chain, trust_anchors, now, expected_domain, role)?;
     Ok(())
 }

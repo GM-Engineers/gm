@@ -63,12 +63,18 @@ entry point is what `gm-tlcp` consumes.
 
 #### Known limitations (documented for users)
 
-- **Chain walking is shallow**: `verify_against_anchors` validates
-  each entry against the anchor set directly rather than walking
-  leaf → intermediate → ... → anchor RFC 5280 §6-style. Operators
-  must include all intermediate CAs in `with_server_ca_chain()`.
-  Full chain walking is planned for a future release.
-- **CRL checking is not yet implemented**.
+- **Chain walking is single-path, peer-supplied**: `verify_against_anchors`
+  walks `leaf → intermediate_1 → ... → root` linearly through the
+  peer's chain, and tries the root against each configured anchor.
+  Per-link validation includes SM2 signature, validity period,
+  basicConstraints CA:TRUE, **pathLenConstraint** (Phase H), and
+  **KeyUsage / ExtendedKeyUsage** enforcement per role (Phase H).
+  What is NOT yet supported: building candidate paths from a leaf
+  without intermediates (peers MUST send their intermediate CAs),
+  RFC 5280 §4.2.1.10 nameConstraints, RFC 5280 §5.4.2.1 policyConstraints.
+- **CRL checking is not yet implemented** — separate work item
+  (CRL fetching, caching, signature verification, nextUpdate
+  freshness).
 - The empty-`Certificate` wire-format gap (Phase F #7) is
   tracked as a separate work item.
 

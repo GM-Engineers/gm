@@ -181,7 +181,11 @@ enforcement.
 ### 已知限制
 
 - **主机名检查仅用于 sign 证书**。enc 证书通常不含主机名。
-- **中间证书链**依靠调用者在 `with_server_ca_chain()` 里同时提供所有中间 CA。`gm-tlcp` 不会做 RFC 5280 §6 完整的链式 walk；它仅验证 leaf 直接镇接到某个锺点。未来计划实现完整的 chain walking。
+- **证书链验证**按 RFC 5280 §6 风格逐条进行：SM2 签名、有效期、中间 CA 的
+  `basicConstraints CA:TRUE`、`pathLenConstraint`（Phase H）、按角色强制
+  的 KeyUsage/ExtendedKeyUsage（Phase H）。验证器按 `leaf → intermediate_1
+  → … → root` 线性遍历对端链，并把 root 与配置的每个信任锚逐一尝试。
+  对端**必须**发送中间 CA；我们暂不从无中间信息的 leaf 构建候选路径。
 - **CRL 检查**尚未实现，依靠上层的 OCSP 或短有效期轮换。
 - **空客户端证书链** + 已设锚时服务端拒绝。但当前 `TlcpConnector::with_client_certs(vec![], ...)` **不会**发送空 `Certificate` 握手消息（应该按 RFC 5246 §7.4.6 发送）。该 wire-format 缺陷是独立的后续项目。
 

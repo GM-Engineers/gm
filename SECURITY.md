@@ -144,12 +144,16 @@ deployments MUST call at least `with_server_ca_chain` (and
 **Known limitations** (the audit left three items open as
 future work):
 
-- **Chain walking is shallow**: each chain entry is validated
-  directly against the anchor set rather than walking leaf →
-  intermediate → … → anchor RFC 5280 §6-style. Operators
-  must include all intermediate CAs in `with_server_ca_chain()`
-  for the leaf to chain. Full chain walking is planned for
-  a future release.
+- **Chain walking is single-path, peer-supplied**: the validator
+  walks the leaf's chain linearly (`leaf → intermediate_1 → … →
+  root`) and tries the root against each configured anchor.
+  Per-link validation includes SM2 signature, validity period,
+  basicConstraints CA:TRUE, pathLenConstraint (RFC 5280
+  §4.2.1.9), and KeyUsage/ExtendedKeyUsage enforcement per role
+  (Phase H). What is NOT yet supported: building candidate
+  paths from a leaf without intermediates (peers MUST send
+  their intermediate CAs), RFC 5280 §4.2.1.10 nameConstraints,
+  RFC 5280 §5.4.2.1 policyConstraints.
 - **CRL checking is not yet implemented**. Operators should
   rely on OCSP at a higher layer or use short-validity
   rotation.

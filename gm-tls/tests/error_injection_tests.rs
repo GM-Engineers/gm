@@ -546,7 +546,8 @@ fn test_next_nonce_zero_seq() {
 
 #[test]
 fn test_verify_cert_chain_empty() {
-    let result = gm_tls::gm::verify_cert_chain_sm2_chain(&[], &[], OffsetDateTime::now_utc(), None);
+    let result =
+        gm_tls::gm::verify_cert_chain_sm2_chain(&[], &[], OffsetDateTime::now_utc(), None, None);
     assert!(result.is_err());
 }
 

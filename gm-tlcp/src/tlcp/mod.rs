@@ -2009,6 +2009,7 @@ impl TlcpConnector {
                 anchors,
                 now,
                 expected_domain,
+                Some(gm_crypto::x509::verify::CertRole::TlcServer),
             )
             .map_err(|e| {
                 TlcpError::HandshakeFailed(format!(
@@ -2018,10 +2019,19 @@ impl TlcpConnector {
             })?;
             // Enc leaf (only for dual-cert layouts; RSA suites leave
             // `enc_cert` empty per `TlcpCertPair::is_single_cert`).
+            // We pass role=None for the enc cert because the
+            // dedicated `CertRole::TlcServer` / `TlcClient` roles
+            // model the SIGN cert's KU/EKU requirements; the enc
+            // cert's KU/EKU is intentionally permissive per GB/T
+            // 38636-2020 §6.4.6.1.2 b) (EKU optional, KU only
+            // needs keyAgreement / keyEncipherment). Tighter enc
+            // cert KU/EKU enforcement is left for a future
+            // release once we see real-world operator feedback.
             if !cert_pair.enc_cert.is_empty() {
                 let enc_chain = vec![cert_pair.enc_cert.clone()];
                 gm_crypto::x509::verify::verify_against_anchors(
                     &enc_chain, anchors, now, None, // hostname check is sign-only
+                    None, // role=None: enc cert KU/EKU is permissive
                 )
                 .map_err(|e| {
                     TlcpError::HandshakeFailed(format!(
@@ -3934,9 +3944,22 @@ impl TlcpAcceptor {
                     // signature verify + within-validity. That
                     // matches the "leaf chains to one of the
                     // anchors" semantics we want for TLCP.
+                    //
+                    // For client-side sign-cert validation we pass
+                    // CertRole::TlcClient (EKU=clientAuth, KU=
+                    // digitalSignature required). The enc cert
+                    // gets role=None because TLCP's enc cert KU/EKU
+                    // is intentionally permissive per
+                    // GB/T 38636-2020 §6.4.6.1.2 b).
+                    let role = if idx == 0 {
+                        Some(gm_crypto::x509::verify::CertRole::TlcClient)
+                    } else {
+                        None
+                    };
                     gm_crypto::x509::verify::verify_against_anchors(
                         &chain, anchors, now,
                         None, // hostnames are a client-side concern (SNI/SAN)
+                        role,
                     )
                     .map_err(|e| {
                         TlcpError::HandshakeFailed(format!(

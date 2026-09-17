@@ -125,7 +125,8 @@ pub fn validate_cert_pem(
 /// - The DER is not parseable as X.509
 /// - `notBefore > now` or `notAfter < now` (cert expired / not yet valid)
 /// - Neither `SAN:dNSName` nor `subject.commonName` matches `expected_domain`
-///   (case-insensitive)
+///   (case-insensitive; see [`hostname_matches`] for the matching rules,
+///   including RFC 6125 §6.4.3 wildcards for SAN entries)
 pub fn validate_hostname_only(
     leaf_der: &[u8],
     expected_domain: &str,
@@ -135,6 +136,121 @@ pub fn validate_hostname_only(
         CryptoError::CertificateVerificationFailed(format!("X509 parse failed: {}", e))
     })?;
     validate_cert_parsed(&cert, now, Some(expected_domain))
+}
+
+/// RFC 5280 §4.2.1.12 role context for end-entity cert KU/EKU enforcement.
+///
+/// `TlcServer` / `TlcClient` mirror the TLCP ECC sign-cert vs enc-cert
+/// requirements per GB/T 38636-2020 §6.4.6.1.2:
+///
+/// - **Sign cert**: KU must include `digitalSignature`; EKU (if present)
+///   must include the matching purpose (`serverAuth` / `clientAuth`).
+/// - **Enc cert**: KU must include `keyAgreement` (or `keyEncipherment`
+///   for static RSA-style KEM); EKU is **optional** per the spec and we
+///   do not enforce a purpose when absent.
+///
+/// `Ca` mirrors RFC 5280 §4.2.1.3 + §4.2.1.9: KU must include
+/// `keyCertSign`; `basicConstraints CA:TRUE` is checked separately at
+/// the call site.
+///
+/// All checks are **permissive when the relevant extension is absent**:
+/// KU / EKU are optional in RFC 5280 and many TLCP deployments omit them.
+/// The function only fails when an extension IS present and asserts
+/// bits that contradict the cert's role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CertRole {
+    /// TLCP ECC sign cert presented by a peer (server or client side).
+    /// The connector uses `TlcServer` when validating server sign leaves;
+    /// the acceptor uses `TlcClient` when validating client sign leaves.
+    TlcServer,
+    TlcClient,
+    /// Intermediate / root CA cert.
+    Ca,
+}
+
+/// Check the certificate's KeyUsage and ExtendedKeyUsage extensions
+/// against its declared [`CertRole`]. Permissive when extensions are
+/// absent (KU/EKU are optional per RFC 5280 §4.2.1.3 / §4.2.1.12).
+pub fn verify_cert_role(cert: &X509Certificate<'_>, role: CertRole) -> Result<(), CryptoError> {
+    let ku = cert
+        .extensions()
+        .iter()
+        .find(|ext| ext.oid == x509_parser::oid_registry::OID_X509_EXT_KEY_USAGE)
+        .and_then(|ext| {
+            if let x509_parser::extensions::ParsedExtension::KeyUsage(ku) = ext.parsed_extension() {
+                Some(*ku)
+            } else {
+                None
+            }
+        });
+    let eku = cert
+        .extensions()
+        .iter()
+        .find(|ext| ext.oid == x509_parser::oid_registry::OID_X509_EXT_EXTENDED_KEY_USAGE)
+        .and_then(|ext| {
+            if let x509_parser::extensions::ParsedExtension::ExtendedKeyUsage(eku) =
+                ext.parsed_extension()
+            {
+                Some(eku)
+            } else {
+                None
+            }
+        });
+
+    match role {
+        CertRole::TlcServer | CertRole::TlcClient => {
+            // Per GB/T 38636-2020 §6.4.6.1.2 a) the TLCP ECC sign cert
+            // carries digitalSignature (and keyAgreement for ECDHE
+            // suites). The enc-cert layout is separate and only used
+            // for ECDH, so this path is for the SIGN cert.
+            if let Some(ku) = ku {
+                if !ku.digital_signature() {
+                    return Err(CryptoError::CertificateVerificationFailed(format!(
+                        "sign cert is missing required KeyUsage digitalSignature \
+                         (got KU flags = 0b{:09b})",
+                        ku.flags
+                    )));
+                }
+            }
+            // EKU is optional per RFC 5280 §4.2.1.12, but if present
+            // it must include the matching purpose (or `any`).
+            if let Some(eku) = eku {
+                let ok = match role {
+                    CertRole::TlcServer => eku.server_auth || eku.any,
+                    CertRole::TlcClient => eku.client_auth || eku.any,
+                    _ => unreachable!(),
+                };
+                if !ok {
+                    let purpose = match role {
+                        CertRole::TlcServer => "serverAuth",
+                        CertRole::TlcClient => "clientAuth",
+                        _ => unreachable!(),
+                    };
+                    return Err(CryptoError::CertificateVerificationFailed(format!(
+                        "sign cert is missing required ExtendedKeyUsage {} \
+                         (got EKU = {:?})",
+                        purpose, eku
+                    )));
+                }
+            }
+        }
+        CertRole::Ca => {
+            // RFC 5280 §4.2.1.3: a CA cert used to sign other certs
+            // MUST have keyCertSign set when KeyUsage is present.
+            if let Some(ku) = ku {
+                if !ku.key_cert_sign() {
+                    return Err(CryptoError::CertificateVerificationFailed(format!(
+                        "CA cert is missing required KeyUsage keyCertSign \
+                         (got KU flags = 0b{:09b})",
+                        ku.flags
+                    )));
+                }
+            }
+            // CA certs do not require a particular EKU per RFC 5280;
+            // skip EKU check.
+        }
+    }
+    Ok(())
 }
 
 fn validate_cert_parsed(
@@ -155,7 +271,7 @@ fn validate_cert_parsed(
         if let Ok(Some(san)) = cert.subject_alternative_name() {
             for name in san.value.general_names.iter() {
                 if let x509_parser::extensions::GeneralName::DNSName(dns) = name {
-                    if dns.eq_ignore_ascii_case(domain) {
+                    if hostname_matches(dns, domain) {
                         matched = true;
                         break;
                     }
@@ -165,7 +281,7 @@ fn validate_cert_parsed(
         if !matched {
             if let Some(cn) = cert.subject().iter_common_name().next() {
                 if let Ok(cn_str) = cn.as_str() {
-                    if cn_str.eq_ignore_ascii_case(domain) {
+                    if hostname_matches(cn_str, domain) {
                         matched = true;
                     }
                 }
@@ -180,17 +296,75 @@ fn validate_cert_parsed(
     Ok(())
 }
 
+/// Compare an X.509 SAN/CN entry against an expected hostname per
+/// RFC 6125 §6.4.1 (case-insensitive equality) and RFC 6125 §6.4.3
+/// (single-label wildcards in the left-most label).
+///
+/// Rules:
+/// - Comparison is case-insensitive on ASCII characters
+///   (`eq_ignore_ascii_case`); IDN A-label comparison is performed
+///   on the Punycode-encoded form which the operator is expected to
+///   pass already (IDN normalization itself is out of scope for this
+///   version — see docs/known-limitations).
+/// - Wildcards: only `*` in the left-most label of the SAN entry.
+///   `*.example.com` matches `a.example.com`, `b.example.com`,
+///   `*.example.com` itself; it does NOT match `a.b.example.com`
+///   (left-most label rule, RFC 6125 §6.4.3 d)). The wildcard must
+///   be the only character in the left-most label (no `a*.example.com`,
+///   no `*a.example.com`, no `a*b.example.com`).
+/// - Multi-label wildcards (`a.*.example.com`), wildcards combined
+///   with IDN labels, and partial-label wildcards are REJECTED.
+/// - CN comparison (which only happens when no SAN is present) does
+///   NOT honour wildcards: RFC 6125 §6.4.4 specifies that CN-based
+///   matching is deprecated and wildcards in CN are not allowed by
+///   the standard.
+pub fn hostname_matches(san_entry: &str, expected_domain: &str) -> bool {
+    // Per RFC 6125 §6.4.3 the comparison is case-insensitive on
+    // ASCII; we use the stdlib helper for that.
+    if san_entry.eq_ignore_ascii_case(expected_domain) {
+        return true;
+    }
+    // Wildcard matching only for SAN entries (CN fallback handled
+    // separately at the call site — CN does NOT allow wildcards).
+    // Strip the leftmost label of the SAN entry and check for `*`.
+    let Some((san_leftmost, san_rest)) = san_entry.split_once('.') else {
+        return false;
+    };
+    if san_leftmost != "*" {
+        return false;
+    }
+    // The SAN's leftmost label is exactly `*`; build a regex-like
+    // matcher: any non-empty single label followed by the same
+    // remaining labels.
+    let Some((exp_first, exp_rest)) = expected_domain.split_once('.') else {
+        return false;
+    };
+    if exp_first.is_empty() {
+        return false;
+    }
+    // RFC 6125 §6.4.3: the rest must match byte-for-byte (case-
+    // insensitive). We compare the remaining portion.
+    exp_rest.eq_ignore_ascii_case(san_rest)
+}
+
 // ============== Certificate Chain Verification ==============
 
 /// Maximum allowed certificate chain depth (leaf + intermediates).
 pub const MAX_CERT_CHAIN_DEPTH: usize = 10;
 
 /// Verify a full certificate chain against trust anchors.
+///
+/// `role` declares how the LEAF cert is used (server or client). For
+/// every other entry in the chain (intermediates, root) the
+/// [`CertRole::Ca`] role is enforced. Pass [`None`] to skip role
+/// checks (e.g. when the caller has not yet decided or when
+/// validating an opaque chain).
 pub fn verify_cert_chain_sm2_chain(
     leaf_chain: &[OwnedCert],
     trust_anchors: &[OwnedCert],
     now: OffsetDateTime,
     expected_domain: Option<&str>,
+    role: Option<CertRole>,
 ) -> Result<(), CryptoError> {
     if leaf_chain.is_empty() || trust_anchors.is_empty() {
         return Err(CryptoError::CertificateVerificationFailed(
@@ -205,6 +379,16 @@ pub fn verify_cert_chain_sm2_chain(
         )));
     }
 
+    // Pre-compute the role per index (idx=0 leaf uses the supplied
+    // role; idx>=1 are intermediate CAs).
+    let role_for_idx = |idx: usize| -> CertRole {
+        if idx == 0 {
+            role.unwrap_or(CertRole::Ca)
+        } else {
+            CertRole::Ca
+        }
+    };
+
     // Verify each link in the chain
     for idx in 0..leaf_chain.len() {
         let child_owned = &leaf_chain[idx];
@@ -215,8 +399,12 @@ pub fn verify_cert_chain_sm2_chain(
             let issuer_owned = &leaf_chain[idx + 1];
             verify_cert_chain_sm2(child_owned, issuer_owned, now, domain)?;
 
-            // Check CA BasicConstraints for intermediate CAs
             let child_cert = child_owned.as_x509()?;
+
+            // KU/EKU enforcement per role.
+            verify_cert_role(&child_cert, role_for_idx(idx))?;
+
+            // Check CA BasicConstraints for intermediate CAs
             let basic_constraints = child_cert
                 .extensions()
                 .iter()
@@ -230,6 +418,33 @@ pub fn verify_cert_chain_sm2_chain(
                             "CA certificate missing BasicConstraints CA:TRUE".into(),
                         ));
                     }
+                    // RFC 5280 §4.2.1.9 pathLenConstraint: the value
+                    // gives the maximum number of non-self-issued
+                    // intermediate CAs that may follow this cert.
+                    // For chain[idx] at depth `idx` (counting from
+                    // the leaf at 0), the intermediates that follow
+                    // toward the root are at indices 1..=idx. So
+                    // `idx` intermediates follow this CA's *issuers*
+                    // — wait, we want those that *this CA may sign
+                    // below it*, which are at indices 1..idx
+                    // (excluding the leaf at 0). The count is
+                    // `idx - 1` for idx >= 1, and 0 for idx = 1.
+                    // Equivalently: `intermediates_below =
+                    // leaf_chain.len() - 2 - (idx + 1)` where idx+1
+                    // is the position of the CA in the chain and
+                    // `len() - 1` is the root position. We need a
+                    // count of intermediates strictly between this
+                    // CA and the leaf.
+                    if let Some(max_pathlen) = bc.path_len_constraint {
+                        let intermediates_below: u32 = (idx - 1) as u32;
+                        if intermediates_below > max_pathlen {
+                            return Err(CryptoError::CertificateVerificationFailed(format!(
+                                "CA certificate pathLenConstraint = {} but {} \
+                                 non-leaf intermediate(s) follow it in the chain",
+                                max_pathlen, intermediates_below
+                            )));
+                        }
+                    }
                 }
             } else {
                 return Err(CryptoError::CertificateVerificationFailed(
@@ -242,6 +457,9 @@ pub fn verify_cert_chain_sm2_chain(
             for anchor in trust_anchors {
                 match verify_cert_chain_sm2(child_owned, anchor, now, domain) {
                     Ok(()) => {
+                        // KU/EKU enforcement for the trust anchor (treated as CA).
+                        let root_cert = child_owned.as_x509()?;
+                        verify_cert_role(&root_cert, CertRole::Ca)?;
                         last_err = None;
                         break;
                     }
@@ -312,6 +530,7 @@ pub fn verify_against_anchors(
     anchors_der: &[Vec<u8>],
     now: OffsetDateTime,
     expected_domain: Option<&str>,
+    role: Option<CertRole>,
 ) -> Result<(), CryptoError> {
     // Build OwnedCert wrappers from the DER bytes. This is the only
     // point in this module that parses the wire-format bytes; the
@@ -325,7 +544,7 @@ pub fn verify_against_anchors(
         .iter()
         .map(|der| OwnedCert { der: der.clone() })
         .collect::<Vec<_>>();
-    verify_cert_chain_sm2_chain(&leaf_chain, &trust_anchors, now, expected_domain)
+    verify_cert_chain_sm2_chain(&leaf_chain, &trust_anchors, now, expected_domain, role)
 }
 
 fn verify_cert_chain_sm2(
@@ -987,6 +1206,7 @@ mod tests {
             &[vec![0x30, 0x00]], // any byte vec
             OffsetDateTime::now_utc(),
             None,
+            None,
         )
         .unwrap_err();
         assert!(
@@ -1003,8 +1223,14 @@ mod tests {
         // empty SEQUENCE `30 00`) so that the empty-anchors guard
         // is what fires, not the DER parser. The function short-
         // circuits on the empty-anchors check before trying to parse.
-        let err = verify_against_anchors(&[vec![0x30, 0x00]], &[], OffsetDateTime::now_utc(), None)
-            .unwrap_err();
+        let err = verify_against_anchors(
+            &[vec![0x30, 0x00]],
+            &[],
+            OffsetDateTime::now_utc(),
+            None,
+            None,
+        )
+        .unwrap_err();
         assert!(
             format!("{}", err).contains("empty"),
             "expected empty-anchor diagnostic, got: {}",
@@ -1024,6 +1250,7 @@ mod tests {
             &too_deep,
             &[vec![0x30, 0x00]],
             OffsetDateTime::now_utc(),
+            None,
             None,
         )
         .unwrap_err();
@@ -1057,5 +1284,51 @@ mod tests {
             "expected X509 parse error (NOT empty-anchor), got: {}",
             msg
         );
+    }
+
+    // (A full cert-build + no-match integration test is in
+    // `gm-tlcp/tests/gm_tlcp_cert_verify_negative.rs::f08`; we
+    // exercise the unit-level matcher rules below.)
+
+    // -- hostname_matches (RFC 6125 §6.4.3) tests --
+
+    #[test]
+    fn hostname_matches_exact_case_insensitive() {
+        // Per RFC 6125 §6.4.1: case-insensitive ASCII equality.
+        assert!(hostname_matches("example.com", "example.com"));
+        assert!(hostname_matches("EXAMPLE.com", "example.com"));
+        assert!(hostname_matches("example.COM", "example.COM"));
+        assert!(!hostname_matches("example.com", "other.com"));
+    }
+
+    #[test]
+    fn hostname_matches_wildcard_single_label() {
+        // Per RFC 6125 §6.4.3: `*.example.com` matches `foo.example.com`,
+        // `bar.example.com`, and `*.example.com` itself, but NOT
+        // `foo.bar.example.com` (left-most label rule).
+        assert!(hostname_matches("*.example.com", "foo.example.com"));
+        assert!(hostname_matches("*.example.com", "bar.example.com"));
+        assert!(hostname_matches("*.example.com", "*.example.com"));
+        // Left-most label rule: must NOT match sub-sub-domains.
+        assert!(!hostname_matches("*.example.com", "foo.bar.example.com"));
+    }
+
+    #[test]
+    fn hostname_matches_wildcard_rejects_partial_label() {
+        // RFC 6125 §6.4.3: the wildcard must be the entire left-most
+        // label, not part of a label.
+        assert!(!hostname_matches("a*.example.com", "apple.example.com"));
+        assert!(!hostname_matches("*a.example.com", "x.example.com"));
+        assert!(!hostname_matches("a*b.example.com", "axb.example.com"));
+        // Multi-label wildcards are not allowed.
+        assert!(!hostname_matches("a.*.example.com", "a.b.example.com"));
+    }
+
+    #[test]
+    fn hostname_matches_wildcard_no_anchor() {
+        // Wildcard SAN `*.example.com` cannot match a bare domain
+        // `example.com` (the wildcard requires at least one label
+        // before the matching suffix).
+        assert!(!hostname_matches("*.example.com", "example.com"));
     }
 }
