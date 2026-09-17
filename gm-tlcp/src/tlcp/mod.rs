@@ -1938,8 +1938,8 @@ impl TlcpConnector {
         client_hs.process_server_certs(cert_pair.clone())?;
         client_hs.transcript.extend_from_slice(&cert_payload);
 
-        // Phase E: opt-in PKI validation. When the operator has
-        // configured trust anchors via `with_server_ca_chain`,
+        // Phase E: opt-in PKI + hostname validation. When the operator
+        // has configured trust anchors via `with_server_ca_chain`,
         // validate the just-received server certificate pair here
         // (before ECDHE / Finished so a bad cert doesn't waste key
         // material). The TLCP dual-cert model sends sign + enc as
@@ -1947,15 +1947,59 @@ impl TlcpConnector {
         // For RSA single-cert layouts (GB/T 38636-2020 §6.4.5.5),
         // `enc_cert` is empty and only the sign slot is validated.
         //
-        // The hostname (when `with_server_name` is configured) is
-        // applied only to the sign cert — encryption certs do not
-        // typically carry a hostname.
+        // The hostname check (when `with_server_name` is configured)
+        // is orthogonal to the trust-anchor check and runs
+        // regardless of whether anchors were configured — an
+        // operator who pins a hostname but no anchors should still
+        // get the SAN/CN match.
         //
-        // Empty-cert policy mirrors the server side: anchors
-        // configured + cert missing → REJECT (the operator asked
-        // for PKI enforcement); anchors NOT configured + cert
-        // missing → ACCEPT with a one-shot warning (legacy
-        // out-of-band `with_server_sign_key` SKE pin still applies).
+        // Empty-cert policy:
+        //   - sign cert missing → REJECT (we cannot SKE-pin or
+        //     hostname-check without it; the legacy SKE-only path
+        //     also fails closed under certless because there is no
+        //     key to pin).
+        //   - enc cert missing for SM2 suites is OK (single-Cert
+        //     RSA layout per §6.4.5.5); for SM2 dual-Cert we don't
+        //     validate it independently if anchors are not set.
+        let now = OffsetDateTime::now_utc();
+        if cert_pair.sign_cert.is_empty() {
+            return Err(TlcpError::HandshakeFailed(
+                "server sent no signing certificate; refusing handshake without a \
+                 sign leaf (hostname check + PKI validation + SKE pin all require it)."
+                    .to_string(),
+            ));
+        }
+
+        // --- Hostname check (runs unconditionally if with_server_name was called) ---
+        if let Some(expected_domain) = self.server_name.as_deref() {
+            // Sign leaf only — encryption certs do not typically
+            // carry a hostname.
+            let sign_chain = vec![cert_pair.sign_cert.clone()];
+            // We do NOT have anchors here, so re-implement the
+            // single-leaf hostname check inline. We use a dummy
+            // anchor (the cert itself) so the helper's chain
+            // walk lands on the leaf — but the leaf's own
+            // signature won't verify against itself, which would
+            // cause a confusing error. Instead, just call
+            // `validate_cert_parsed` directly via the chain
+            // helper's internal API.
+            //
+            // Easiest path: pass an empty anchor list and call the
+            // helper with `expected_domain`. The helper already
+            // accepts `Option<&str>`; with no anchors, only the
+            // hostname branch runs.
+            gm_crypto::x509::verify::verify_against_anchors(
+                &sign_chain,
+                &[], // empty anchors: skip signature/expiry checks; hostname still runs
+                now,
+                Some(expected_domain),
+            )
+            .map_err(|e| {
+                TlcpError::HandshakeFailed(format!("server hostname check failed: {}", e))
+            })?;
+        }
+
+        // --- Trust-anchor validation (opt-in) ---
         if let Some(anchors) = self.server_ca_anchors.as_deref() {
             if anchors.is_empty() {
                 return Err(TlcpError::HandshakeFailed(
@@ -1965,17 +2009,9 @@ impl TlcpConnector {
                         .to_string(),
                 ));
             }
-            if cert_pair.sign_cert.is_empty() {
-                return Err(TlcpError::HandshakeFailed(
-                    "trust anchors are configured (with_server_ca_chain) but the \
-                     server sent no signing certificate; refusing to validate a \
-                     missing certificate."
-                        .to_string(),
-                ));
-            }
-            let now = OffsetDateTime::now_utc();
-            let expected_domain = self.server_name.as_deref();
-            // Sign leaf: hostname check applied.
+            let expected_domain = self.server_name.as_deref(); // already checked above
+            // Sign leaf: hostname check applied (re-runs; the
+            // helper is idempotent and the check is cheap).
             let sign_chain = vec![cert_pair.sign_cert.clone()];
             gm_crypto::x509::verify::verify_against_anchors(
                 &sign_chain,
@@ -2004,10 +2040,10 @@ impl TlcpConnector {
                     ))
                 })?;
             }
-        } else if !cert_pair.sign_cert.is_empty() {
-            // Legacy path: cert not validated; out-of-band
-            // `with_server_sign_key` SKE pin is the only check.
-            // One-shot warning to surface the missing PKI policy.
+        } else {
+            // Legacy path: no anchors; hostname check (if any) was
+            // already done above. Out-of-band `with_server_sign_key`
+            // SKE pin is the only validation. One-shot warning.
             eprintln!(
                 "gm-tlcp WARNING: accepted server certificate without validation \
                  (no trust anchors configured). Call \
