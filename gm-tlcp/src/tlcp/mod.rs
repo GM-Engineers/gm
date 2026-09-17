@@ -596,6 +596,24 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
     pub fn server_certificates(&self) -> Option<&TlcpCertPair> {
         self.peer_server_certs_cache.as_ref()
     }
+
+    /// Crate-internal helper for `TlcpAcceptor::accept_with_certs`.
+    ///
+    /// `accept_with_certs` builds the stream via `TlcpStream::new`
+    /// (not `from_server_handshake_with_transport`) because it still
+    /// needs the `TlcpServerHandshake` after stream construction
+    /// to read the encrypted client `Finished` message, verify the
+    /// `verify_data`, compute the server `Finished`, and persist the
+    /// session. That ordering means the cache field cannot be
+    /// populated by `from_*_handshake_with_transport` in this path;
+    /// the acceptor copies the parsed client cert chain over via
+    /// this setter right after the stream is built.
+    ///
+    /// Not part of the public API: `pub(crate)` only. External code
+    /// reads the chain via [`Self::client_certificates`].
+    pub(crate) fn set_peer_client_certs_from_acceptor(&mut self, chain: Vec<Vec<u8>>) {
+        self.peer_client_certs_cache = chain;
+    }
     /// Deprecated. Historically toggled a non-standard CBC padding scheme
     /// (`N bytes of value N-1`) used to interop with pre-fix GmSSL. GmSSL
     /// since commit `57c9433` (2026-06-01) and `c12edeb` (2026-06-13)
@@ -4206,6 +4224,17 @@ impl TlcpAcceptor {
         )?;
         // Build the stream now — subsequent reads are encrypted
         let mut stream = TlcpStream::new(io, &key_material, suite, false, session_id)?;
+        // Bridge the gap between `TlcpServerHandshake::client_certs`
+        // (populated during step 7 of the handshake state machine,
+        // see `mod.rs:3607`) and the stream-owned cache that backs
+        // [`TlcpStream::client_certificates`]. `accept_with_certs`
+        // cannot use `from_server_handshake_with_transport` because
+        // it still needs `server_hs` to verify the client `Finished`
+        // and compute the server `Finished` after the stream is
+        // built; this setter is the documented workaround.
+        // `mem::take` avoids cloning the chain (which can be large
+        // for cross-implementation interop tests).
+        stream.set_peer_client_certs_from_acceptor(std::mem::take(&mut server_hs.client_certs));
         // Read client Finished
         //
         // The previous code read the decrypted bytes into a buffer
