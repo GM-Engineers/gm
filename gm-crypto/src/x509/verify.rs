@@ -267,11 +267,18 @@ fn validate_cert_parsed(
     }
 
     if let Some(domain) = expected_domain {
+        // Per RFC 6125 §6.4.4: normalize the expected domain to its
+        // Punycode/ASCII form before comparison. TLCP deployments in
+        // `.cn` / `.gov.cn` / `.中国` etc. rely on this — without
+        // it, an operator configuring `with_server_name("央行.gov.cn")`
+        // would silently fail to match a cert whose SAN is the
+        // Punycode form `xn--...gov.cn`.
+        let domain = normalize_domain(domain);
         let mut matched = false;
         if let Ok(Some(san)) = cert.subject_alternative_name() {
             for name in san.value.general_names.iter() {
                 if let x509_parser::extensions::GeneralName::DNSName(dns) = name {
-                    if hostname_matches(dns, domain) {
+                    if hostname_matches(dns, &domain) {
                         matched = true;
                         break;
                     }
@@ -281,7 +288,7 @@ fn validate_cert_parsed(
         if !matched {
             if let Some(cn) = cert.subject().iter_common_name().next() {
                 if let Ok(cn_str) = cn.as_str() {
-                    if hostname_matches(cn_str, domain) {
+                    if hostname_matches(cn_str, &domain) {
                         matched = true;
                     }
                 }
@@ -294,6 +301,35 @@ fn validate_cert_parsed(
         }
     }
     Ok(())
+}
+
+/// Normalize an input domain name to its ASCII/Punycode form per
+/// UTS #46 + RFC 6125 §6.4.4. Returns the canonical lowercase
+/// ASCII label (Punycode-prefixed for non-ASCII labels).
+///
+/// `expected_domain` is always operator-supplied text, so we run
+/// the normalization unconditionally. SAN/CN entries are always
+/// IA5String (ASCII-only) per RFC 5280 §4.2.1.6, so they don't
+/// need normalization on the compare side — the operator must
+/// present their cert with Punycode SAN entries per
+/// GB/T 3268.4 / RFC 3490.
+///
+/// Falls back to the raw input on error: a domain that the `idna`
+/// crate rejects (forbidden code points, label-length overflow,
+/// etc.) is reported to the caller as a hostname mismatch via the
+/// normal error path, not as a normalization failure. We want
+/// strict-fail behaviour: invalid IDN = no match = handshake rejected.
+pub fn normalize_domain(domain: &str) -> String {
+    // `domain_to_ascii` returns Err for forbidden code points or
+    // excessive label lengths; we treat those as "no match" by
+    // returning a sentinel that can never appear in a valid SAN.
+    // The sentinel contains an ASCII NUL byte, which RFC 5280
+    // §4.2.1.6 forbids in IA5String, so it cannot match any
+    // real SAN entry.
+    match idna::domain_to_ascii(domain) {
+        Ok(s) => s,
+        Err(_) => "\0idna-rejected".to_string(),
+    }
 }
 
 /// Compare an X.509 SAN/CN entry against an expected hostname per
@@ -1330,5 +1366,60 @@ mod tests {
         // `example.com` (the wildcard requires at least one label
         // before the matching suffix).
         assert!(!hostname_matches("*.example.com", "example.com"));
+    }
+
+    // -- normalize_domain (Phase I, RFC 6125 §6.4.4) tests --
+
+    #[test]
+    fn normalize_domain_ascii_unchanged() {
+        // Pure ASCII input must round-trip byte-for-byte (case
+        // is folded to lowercase per UTS #46).
+        assert_eq!(normalize_domain("example.com"), "example.com");
+        assert_eq!(normalize_domain("EXAMPLE.COM"), "example.com");
+        assert_eq!(normalize_domain("api.example.com"), "api.example.com");
+    }
+
+    #[test]
+    fn normalize_domain_unicode_to_punycode() {
+        // Per RFC 3492 + RFC 6125 §6.4.4, non-ASCII labels are
+        // encoded as Punycode with the `xn--` ACE prefix.
+        // We test a few well-known IDN labels; the exact Punycode
+        // form is determined by the `idna` crate (UTS #46 default
+        // mapping) and the values below match the outputs the
+        // crate produces as of `idna` v1.1.0.
+        assert_eq!(normalize_domain("中国"), "xn--fiqs8s");
+        // 央行.gov.cn — first label is Unicode, rest ASCII.
+        let n = normalize_domain("央行.gov.cn");
+        assert!(
+            n.starts_with("xn--"),
+            "expected Punycode prefix, got: {:?}",
+            n
+        );
+        assert!(
+            n.ends_with(".gov.cn"),
+            "expected .gov.cn tail, got: {:?}",
+            n
+        );
+        // Idempotency: re-normalize the Punycode form should be
+        // identical (UTS #46 is idempotent on already-ASCII input).
+        assert_eq!(normalize_domain(&n), n);
+    }
+
+    #[test]
+    fn normalize_domain_mixed_unicode_ascii() {
+        // Same case as `normalize_domain_unicode_to_punycode` but
+        // emphasising that the `.gov.cn` ASCII suffix is preserved
+        // verbatim while the leading label is Punycode-encoded.
+        let normalized = normalize_domain("央行.gov.cn");
+        assert!(normalized.ends_with(".gov.cn"));
+        assert!(normalized.starts_with("xn--"));
+    }
+
+    #[test]
+    fn normalize_domain_unconditionally_lowercases() {
+        // Per UTS #46 case-folding step: ASCII letters are folded
+        // to lowercase. This is independent of IDN encoding.
+        assert_eq!(normalize_domain("Example.COM"), "example.com");
+        assert_eq!(normalize_domain("API.example.COM"), "api.example.com");
     }
 }

@@ -186,6 +186,11 @@ enforcement.
   的 KeyUsage/ExtendedKeyUsage（Phase H）。验证器按 `leaf → intermediate_1
   → … → root` 线性遍历对端链，并把 root 与配置的每个信任锚逐一尝试。
   对端**必须**发送中间 CA；我们暂不从无中间信息的 leaf 构建候选路径。
+- **主机名检查**遵循 RFC 6125 §6.4.1（ASCII 大小写不敏感精确匹配）+ §6.4.3
+  （单标签通配符 `*.example.com`）+ §6.4.4（IDN/Punycode 规范化走 UTS #46）。
+  运维可直接传 `with_server_name("中国.gov.cn")`，会被自动规范化为
+  `xn--fiqs8s.gov.cn` 再与 SAN 比较。SAN/CN 条目始终是 IA5String
+  （RFC 5280 §4.2.1.6），无需额外处理。
 - **CRL 检查**尚未实现，依靠上层的 OCSP 或短有效期轮换。
 - **空客户端证书链** + 已设锚时服务端拒绝。但当前 `TlcpConnector::with_client_certs(vec![], ...)` **不会**发送空 `Certificate` 握手消息（应该按 RFC 5246 §7.4.6 发送）。该 wire-format 缺陷是独立的后续项目。
 

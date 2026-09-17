@@ -191,6 +191,13 @@ enforcement.
   each configured anchor. Peers MUST send their intermediate CAs;
   we do not yet build candidate paths from a leaf without
   intermediates.
+- **Hostname check** implements RFC 6125 §6.4.1 (case-insensitive
+  ASCII equality) + §6.4.3 (single-label wildcard `*.example.com`)
+  + §6.4.4 (IDN/Punycode normalization via UTS #46). Operators can
+  pass `with_server_name("中国.gov.cn")` directly; it is normalized
+  to `xn--fiqs8s.gov.cn` before SAN comparison. SAN/CN entries are
+  always IA5String per RFC 5280 §4.2.1.6 so they pass through
+  unchanged.
 - **CRL checking is not yet implemented** — operators should rely on OCSP at a higher layer or use short-validity rotation.
 - **Empty client chain + configured anchor** → rejected on the server. However, the current `TlcpConnector::with_client_certs(vec![], ...)` does NOT emit an empty `Certificate` handshake message (RFC 5246 §7.4.6 requires one); this wire-format gap is a separate work item.
 

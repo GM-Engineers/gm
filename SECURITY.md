@@ -157,6 +157,11 @@ future work):
 - **CRL checking is not yet implemented**. Operators should
   rely on OCSP at a higher layer or use short-validity
   rotation.
+- **IDN / Punycode normalization is supported** (Phase I):
+  operator-supplied hostnames are normalized to ASCII/Punycode
+  per UTS #46 + RFC 3492 before SAN/CN comparison. TLCP
+  deployments using `.cn` / `.gov.cn` / `.中国` etc. work
+  without requiring operators to pre-Punycode their input.
 - **Empty `Certificate` handshake message wire-format**:
   `TlcpConnector::with_client_certs(vec![], ...)` does not
   emit the empty `Certificate` message RFC 5246 §7.4.6

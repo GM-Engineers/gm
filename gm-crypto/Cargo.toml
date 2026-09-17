@@ -34,6 +34,12 @@ pem = "3.0"
 x509-parser = "0.16"
 signature = "2.2"
 pkcs8 = { version = "0.10", features = ["encryption", "pem"] }
+# IDN/Punycode normalization (Phase I): already in the workspace's
+# transitive dep graph (transitively via reqwest → url). Adding it
+# as a direct dependency costs zero new downloads but gives us
+# UTS#46-compliant IDNA processing for TLCP deployments using
+# Chinese IDN domains like `.cn` / `.中国` / `.政务`.
+idna = "1"
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full"] }

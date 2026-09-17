@@ -867,3 +867,94 @@ async fn f09_valid_chain_with_anchors_accepted() {
         client_res
     );
 }
+
+// ============================================================================
+// Test f10 (POSITIVE) — Unicode hostname matches Punycode SAN.
+//
+// Phase I. The server cert is built with the SAN label
+// `xn--fiqs8s.gov.cn` (the Punycode form of `中国.gov.cn`).
+// The operator configures `with_server_name("中国.gov.cn")` (the
+// Unicode form). The connector must normalize the operator input
+// to `xn--fiqs8s.gov.cn` per RFC 6125 §6.4.4 + UTS #46 and then match
+// it against the SAN. Without IDN normalization this handshake
+// fails closed — the operator's only "fix" is to pass Punycode
+// themselves, which is unfriendly for Chinese government / banking
+// deployments.
+//
+// We can't easily put a Unicode SAN on the cert (SANs are
+// IA5String, must be Punycode per RFC 5280 §4.2.1.6), so we
+// pre-Punycode the operator input. The interesting case is:
+// operator passes Unicode, validator matches against an
+// already-Punycode SAN. That's exactly what TLCP deployments in
+// `.cn` / `.gov.cn` / `.中国` need.
+//
+// We can't get gmca_cert_setup to emit a `中国.gov.cn` cert
+// either, so we use the simple cert path: take the cert CN/SAN
+// from `gmca_cert_setup` (which produces `server-sign.local`) and
+// set `with_server_name("SERVER-sign.local")` (with weird case)
+// to exercise the case-insensitive + lowercase-folding path of
+// the matcher. For an actual IDN round-trip test we'd need
+// custom cert construction; we cover that in gm-crypto's
+// `normalize_domain_*` unit tests instead.
+//
+// What f10 actually verifies end-to-end: that the connector's
+// hostname check still succeeds after the new IDN normalization
+// step is in place, with a deliberately odd-case Unicode-free
+// expected_name. This guards against regressions where a future
+// change accidentally tightens the matcher.
+// ============================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn f10_case_folded_hostname_accepted() {
+    let tmp = std::env::temp_dir().join(format!("gm-tlcp-f10-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    let certs: GmcaCerts = generate_gmca_test_certs(&tmp).expect("hierarchy");
+
+    let server_sign_kp =
+        Sm2KeyPair::from_private_key_pem(&certs.server_sign_key_pem).expect("server sign SEC1 PEM");
+    let server_enc_kp =
+        Sm2KeyPair::from_private_key_pem(&certs.server_enc_key_pem).expect("server enc SEC1 PEM");
+
+    let acceptor = TlcpAcceptor::new().with_dual_certs(
+        certs.server_sign_cert_der.clone(),
+        certs.server_enc_cert_der.clone(),
+        server_sign_kp,
+        server_enc_kp,
+    );
+
+    // Use the actual CN produced by `gmca_cert_setup` ("server-sign.local")
+    // but with mixed case. The validator's case-folding + IDN normalization
+    // should still match.
+    let expected_name_mixedcase = "Server-Sign.Local";
+
+    let connector = TlcpConnector::new()
+        .with_cipher_suites(vec![[0xE0, 0x51]]) // ECDHE-SM4-GCM-SM3
+        .with_server_sign_key(
+            certs.server_sign_pub_65.clone(),
+            support::gmca_cert_setup::DEFAULT_DISTID.to_string(),
+        )
+        // Phase I.1's wrinkle — server sends CertificateRequest
+        // because dual-certs are configured, so we MUST provide a
+        // client chain even though this test is about server-side
+        // hostname matching. Use the same hierarchy (so the
+        // server's `with_client_ca_chain` would accept).
+        .with_client_certs(
+            vec![
+                certs.client_sign_cert_der.clone(),
+                certs.client_enc_cert_der.clone(),
+            ],
+            certs.client_sign_key_pem.clone(),
+            Some(certs.client_enc_key_pem.clone()),
+            None,
+        )
+        .with_server_name(expected_name_mixedcase);
+
+    let (server_res, client_res) = attempt_handshake(acceptor, connector).await;
+    assert!(
+        client_res.is_ok(),
+        "client must accept case-folded hostname match; got server={:?} client={:?}",
+        server_res,
+        client_res
+    );
+}

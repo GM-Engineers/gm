@@ -77,6 +77,12 @@ entry point is what `gm-tlcp` consumes.
   freshness).
 - The empty-`Certificate` wire-format gap (Phase F #7) is
   tracked as a separate work item.
+- IDN/Punycode normalization: now supported (Phase I). Operator
+  input is normalized to ASCII/Punycode via UTS #46 + RFC 3492
+  (`idna` crate) before comparison; SAN/CN entries are already
+  IA5String per RFC 5280 §4.2.1.6 so they pass through unchanged.
+  `with_server_name("中国.gov.cn")` now matches a cert whose SAN
+  is `xn--fiqs8s.gov.cn`.
 
 #### Verification
 
