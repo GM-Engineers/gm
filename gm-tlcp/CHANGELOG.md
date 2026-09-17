@@ -7,6 +7,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — opt-in PKI / hostname validation (Phases B/C/D/E/F/G)
+
+Resolves the **8 cert-verification findings** (`T1–T8`) from the
+2026-09-17 review (`process/reviews/2026-09-17-gm-tlcp-cert-verification-findings.md`).
+Phase E was already shipped for the basic API; this release closes
+the loop with stricter policy, missing-API coverage, and tests.
+
+**Surface change** — three new opt-in builder methods:
+
+| Method | Phase | Effect |
+|--------|-------|--------|
+| `TlcpConnector::with_server_ca_chain(Vec<Vec<u8>>)` | E | Verify server sign + enc leaves chain to one of the configured anchors. |
+| `TlcpConnector::with_server_name(&str)` | E | Verify server sign leaf's SAN/CN matches (case-insensitive). **Runs independently of anchors.** |
+| `TlcpAcceptor::with_client_ca_chain(Vec<Vec<u8>>)` | E | Verify client leaves chain to one of the configured anchors. |
+
+Plus `TlcpStream::server_certificates()` /
+`TlcpStream::client_certificates()` getters for out-of-band PKI
+inspection (Phase B).
+
+**Policy**:
+
+- Default = silent accept + one-shot warning. Callers opt into
+  PKI enforcement explicitly.
+- Anchors configured + **empty** chain → REJECT (auth required
+  but not provided). Previously the legacy "anonymous peer"
+  RFC 5246 clause silently disabled validation; this is now
+  reserved for the no-anchor path.
+- Hostname check is independent of anchors — fixing an
+  audit-identified interaction bug.
+- Missing server signing cert → REJECT (we need it for SKE pin
+  + hostname + PKI; was a fail-open hole).
+
+**Cross-crate refactor** (Phases D-1 / D-2): the X.509 chain
+validation logic was lifted out of `gm-tls` into a new
+`gm_crypto::x509::verify` module. The behavior is unchanged for
+existing `gm-tls` users (`gm-tls/src/cert_verify.rs` is now a
+thin shim re-exporting from `gm-crypto`); the new
+`verify_against_anchors(leaf_chain, anchors, now, expected_domain)`
+entry point is what `gm-tlcp` consumes.
+
+**Tests** — new `tests/gm_tlcp_cert_verify_negative.rs` covering
+8 negative cases:
+
+1. Self-signed client cert + configured anchor
+2. Client cert from unrelated CA
+3. Expired client cert
+4. Not-yet-valid client cert
+5. Tampered signature byte
+6. Non-CA intermediate in 2-element chain
+7. *(#[ignore]'d)* Empty client chain + configured anchor (waiting
+   on a separate connector wire-format fix to emit empty
+   Certificate handshake messages)
+8. Server hostname mismatch
+
+#### Known limitations (documented for users)
+
+- **Chain walking is shallow**: `verify_against_anchors` validates
+  each entry against the anchor set directly rather than walking
+  leaf → intermediate → ... → anchor RFC 5280 §6-style. Operators
+  must include all intermediate CAs in `with_server_ca_chain()`.
+  Full chain walking is planned for a future release.
+- **CRL checking is not yet implemented**.
+- The empty-`Certificate` wire-format gap (Phase F #7) is
+  tracked as a separate work item.
+
+#### Verification
+
+- `cargo +stable fmt --check`: clean
+- `cargo +stable clippy --tests --features tlcp-profiles -- -D warnings`: clean
+- `cargo +stable test --features tlcp-profiles`:
+  - lib: 125 passed
+  - `gm_tlcp_cert_verify_negative`: 12 passed (8 negative + 4 support)
+  - `gm_tlcp_loopback`: 14 passed
+  - `integration_tlcp`: 32 passed (5 ignored)
+  - `gmssl_interop`: 4 passed (7 ignored, env-only)
+  - doctests: 10 passed (3 ignored)
+
 ### Documented — R-14 stale-comment cleanup (Phase 14)
 
 Phase 14 (R-14) is a docs-only cleanup. The post-Phase-13 audit

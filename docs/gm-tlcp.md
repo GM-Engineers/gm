@@ -126,6 +126,65 @@ TLCP SM2/SM9 套件要求每个对端拥有**两张独立的 SM2 证书**：
 
 使用 `gmssl sm2keygen` 和 `gmssl certgen` 生成测试 PKI 的步骤详见 [证书操作指南](./certificate-howto.md)。
 
+## 证书校验与 PKI 策略 (0.6.4+)
+
+从 `gm-tlcp 0.6.4` 起，证书链校验**默认为关闭**以保持与 0.6.x 兼容， 但提供两个**选择加入** (opt-in) 的构建器：
+
+| 方法 | 作用 |
+|------|------|
+| `TlcpConnector::with_server_ca_chain(Vec<Vec<u8>>)` | 配置服务端证书链**信任锚**。握手时验证服务端的 sign + enc 两张叶子证书都直接或间接锚定到其中一个。 |
+| `TlcpConnector::with_server_name(&str)` | 配置预期的服务端主机名。握手时验证服务端 sign 证书的 **SAN / CN** 与此字符串不区分大小写相等。 |
+| `TlcpAcceptor::with_client_ca_chain(Vec<Vec<u8>>)` | 配置客户端证书链**信任锚**。TLS 双向认证下要求客户端也提供可验证的叶子证书。 |
+
+这些设置**彼此独立**：仅配主机名导致上一份报告中的 T3 / T4 问题中的部分检查仍由证书本身的 `CertificateVerify` 负责。主机名检查可以**独立于 PKI 信任锚**运行。
+
+### 信任锚加载示例
+
+```rust
+// 从 CA PEM bundle 加载（pem crate 是 gm-tlcp 测试 dev-dep；
+// 生产代码需要在自己的 Cargo.toml 加 `pem = "3"`）
+use pem::Pem;
+
+let bundle = std::fs::read("ca-bundle.pem")?;
+let anchors: Vec<Vec<u8>> = Pem::iter_from_buffer(&bundle)
+    .map(|p| p.unwrap().into_contents())
+    .collect();
+
+let connector = TlcpConnector::new()
+    .with_server_sign_key(server_sign_pub_65, distid)
+    .with_server_ca_chain(anchors)
+    .with_server_name("api.example.com");
+```
+
+### 行为矩阵
+
+| 信任锚 | 主机名 | 证书链 | 主机名检查 | 证书链校验 | 总计 |
+|--------|--------|--------|------------|------------|------|
+| 未设 | 未设 | 任意 | 跳过 | 跳过 | **接受**（仅警告，不验证） |
+| 未设 | 已设 | 任意 | ✓ | — | 主机名不匹配→拒绝 |
+| 已设 | 未设 | 任意 | — | ✓ | 证书链不匹配→拒绝 |
+| 已设 | 已设 | 任意 | ✓ | ✓ | 任一不匹配→拒绝 |
+| 已设 | — | **空** | — | — | **拒绝**（要求提供证书） |
+| 已设 | — | 任意叶子 | — | ✓ | 叶子不在信任锚列表→拒绝 |
+
+### 默认警告
+
+如果调用了握手但未设置上述任何验证方法且对端发来了非空证书，库会输出**一次性** `eprintln!` 警告到 stderr：
+
+```
+gm-tlcp WARNING: accepted server certificate without validation
+(no trust anchors configured). Call
+TlcpConnector::with_server_ca_chain(anchors) to enable PKI
+enforcement.
+```
+
+### 已知限制
+
+- **主机名检查仅用于 sign 证书**。enc 证书通常不含主机名。
+- **中间证书链**依靠调用者在 `with_server_ca_chain()` 里同时提供所有中间 CA。`gm-tlcp` 不会做 RFC 5280 §6 完整的链式 walk；它仅验证 leaf 直接镇接到某个锺点。未来计划实现完整的 chain walking。
+- **CRL 检查**尚未实现，依靠上层的 OCSP 或短有效期轮换。
+- **空客户端证书链** + 已设锚时服务端拒绝。但当前 `TlcpConnector::with_client_certs(vec![], ...)` **不会**发送空 `Certificate` 握手消息（应该按 RFC 5246 §7.4.6 发送）。该 wire-format 缺陷是独立的后续项目。
+
 ## 特性开关 (Feature flags)
 
 | Feature | 状态 | 说明 |

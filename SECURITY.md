@@ -109,6 +109,55 @@ The default SM2 ID ("1234567812345678") is used for signing. For production, ens
 > security guidance, see the [`gm-tlcp` SECURITY guidance](../gm-tlcp/README.md)
 > and its own release notes.
 
+### TLCP Certificate Validation (gm-tlcp 0.6.4+)
+
+`gm-tlcp` historically performed **no certificate chain validation**
+beyond the out-of-band SKE public-key pin (`with_server_sign_key`).
+This was an audit-flagged gap (findings `T1–T8` from
+`process/reviews/2026-09-17-gm-tlcp-cert-verification-findings.md`).
+Starting with `gm-tlcp 0.6.4`, three opt-in builders provide PKI
+enforcement:
+
+| Builder | Effect |
+|---------|--------|
+| `TlcpConnector::with_server_ca_chain(Vec<Vec<u8>>)` | Validate server leaves chain to one of the configured anchors |
+| `TlcpConnector::with_server_name(&str)` | Validate server sign leaf SAN/CN matches |
+| `TlcpAcceptor::with_client_ca_chain(Vec<Vec<u8>>)` | Validate client leaves chain to one of the configured anchors |
+
+**Default policy = accept + warn**. Operators who do not call any of
+the above builders inherit the legacy "no PKI" behaviour from
+0.6.x, with a one-shot `eprintln!` warning per handshake. Production
+deployments MUST call at least `with_server_ca_chain` (and
+`with_server_name` if applicable) to close the gap.
+
+**Behavioural rules after the audit fixes**:
+
+- Anchors configured + **empty** chain → REJECT. The
+  "anonymous peer" clause from RFC 5246 §7.4.6 only applies
+  on the no-anchor path.
+- Hostname check is **independent of** anchor configuration;
+  pinning a hostname without anchors still gives you
+  SAN/CN validation.
+- Missing server signing certificate → REJECT (we need it
+  for SKE pin + hostname + PKI; was a fail-open hole).
+
+**Known limitations** (the audit left three items open as
+future work):
+
+- **Chain walking is shallow**: each chain entry is validated
+  directly against the anchor set rather than walking leaf →
+  intermediate → … → anchor RFC 5280 §6-style. Operators
+  must include all intermediate CAs in `with_server_ca_chain()`
+  for the leaf to chain. Full chain walking is planned for
+  a future release.
+- **CRL checking is not yet implemented**. Operators should
+  rely on OCSP at a higher layer or use short-validity
+  rotation.
+- **Empty `Certificate` handshake message wire-format**:
+  `TlcpConnector::with_client_certs(vec![], ...)` does not
+  emit the empty `Certificate` message RFC 5246 §7.4.6
+  requires; tracked as a separate work item.
+
 ### Dual-Certificate System
 
 TLCP (GB/T 38636-2020) uses a dual-certificate system:
