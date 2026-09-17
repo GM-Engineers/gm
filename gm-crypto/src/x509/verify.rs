@@ -109,6 +109,34 @@ pub fn validate_cert_pem(
     validate_cert_parsed(&cert, now, expected_domain)
 }
 
+/// Validate a single leaf certificate's hostname only — no trust-anchor
+/// path validation, no signature check, no chain walking.
+///
+/// This is the entry point for the "operator configured `with_server_name`
+/// but NOT `with_server_ca_chain`" path: hostname pinning alone, without
+/// PKI enforcement. It runs the same parse + expiry + SAN/CN match
+/// checks as `validate_cert_parsed`, but skips the chain/signature
+/// machinery so it can succeed for any well-formed cert whose hostname
+/// matches — the operator explicitly opted out of PKI by not calling
+/// `with_server_ca_chain`.
+///
+/// # Errors
+///
+/// - The DER is not parseable as X.509
+/// - `notBefore > now` or `notAfter < now` (cert expired / not yet valid)
+/// - Neither `SAN:dNSName` nor `subject.commonName` matches `expected_domain`
+///   (case-insensitive)
+pub fn validate_hostname_only(
+    leaf_der: &[u8],
+    expected_domain: &str,
+    now: OffsetDateTime,
+) -> Result<(), CryptoError> {
+    let (_, cert) = X509Certificate::from_der(leaf_der).map_err(|e| {
+        CryptoError::CertificateVerificationFailed(format!("X509 parse failed: {}", e))
+    })?;
+    validate_cert_parsed(&cert, now, Some(expected_domain))
+}
+
 fn validate_cert_parsed(
     cert: &X509Certificate<'_>,
     now: OffsetDateTime,
@@ -291,9 +319,7 @@ pub fn verify_against_anchors(
     // to keep a single validation implementation.
     let leaf_chain = leaf_chain_der
         .iter()
-        .map(|der| OwnedCert {
-            der: der.clone(),
-        })
+        .map(|der| OwnedCert { der: der.clone() })
         .collect::<Vec<_>>();
     let trust_anchors = anchors_der
         .iter()
@@ -944,7 +970,6 @@ fn extract_tbs_crl_bytes(der: &[u8]) -> Result<&[u8], CryptoError> {
     Ok(&der[tbs_start..tbs_end])
 }
 
-
 // ============== Tests ==============
 
 #[cfg(test)]
@@ -978,13 +1003,8 @@ mod tests {
         // empty SEQUENCE `30 00`) so that the empty-anchors guard
         // is what fires, not the DER parser. The function short-
         // circuits on the empty-anchors check before trying to parse.
-        let err = verify_against_anchors(
-            &[vec![0x30, 0x00]],
-            &[],
-            OffsetDateTime::now_utc(),
-            None,
-        )
-        .unwrap_err();
+        let err = verify_against_anchors(&[vec![0x30, 0x00]], &[], OffsetDateTime::now_utc(), None)
+            .unwrap_err();
         assert!(
             format!("{}", err).contains("empty"),
             "expected empty-anchor diagnostic, got: {}",
@@ -997,8 +1017,9 @@ mod tests {
         // Build a chain with MAX_CERT_CHAIN_DEPTH + 1 entries to
         // trip the depth guard. The DER bytes are bogus because the
         // depth check runs before parsing.
-        let too_deep: Vec<Vec<u8>> =
-            (0..MAX_CERT_CHAIN_DEPTH + 1).map(|_| vec![0x30, 0x00]).collect();
+        let too_deep: Vec<Vec<u8>> = (0..MAX_CERT_CHAIN_DEPTH + 1)
+            .map(|_| vec![0x30, 0x00])
+            .collect();
         let err = verify_against_anchors(
             &too_deep,
             &[vec![0x30, 0x00]],
@@ -1010,6 +1031,30 @@ mod tests {
         assert!(
             msg.contains("too deep"),
             "expected depth diagnostic, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn validate_hostname_only_runs_without_anchors() {
+        // Regression for the audit finding CRITICAL-1: a previous
+        // version of `connect_with_certs` routed the hostname-only
+        // path through `verify_against_anchors` with empty anchors,
+        // which short-circuited on the empty-anchor guard and never
+        // reached the hostname check. `validate_hostname_only` is
+        // the dedicated leaf-only helper that does not require any
+        // anchors.
+        //
+        // Use a minimal-but-parseable DER blob (empty SEQUENCE) —
+        // the parser will reject it, which is fine: we're verifying
+        // that the helper runs the parser instead of short-
+        // circuiting on a missing-anchor check.
+        let err = validate_hostname_only(&[0x30, 0x00], "example.com", OffsetDateTime::now_utc())
+            .unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("X509 parse failed") || msg.contains("parse"),
+            "expected X509 parse error (NOT empty-anchor), got: {}",
             msg
         );
     }

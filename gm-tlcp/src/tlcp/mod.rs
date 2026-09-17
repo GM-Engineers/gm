@@ -1973,26 +1973,17 @@ impl TlcpConnector {
         // --- Hostname check (runs unconditionally if with_server_name was called) ---
         if let Some(expected_domain) = self.server_name.as_deref() {
             // Sign leaf only — encryption certs do not typically
-            // carry a hostname.
-            let sign_chain = vec![cert_pair.sign_cert.clone()];
-            // We do NOT have anchors here, so re-implement the
-            // single-leaf hostname check inline. We use a dummy
-            // anchor (the cert itself) so the helper's chain
-            // walk lands on the leaf — but the leaf's own
-            // signature won't verify against itself, which would
-            // cause a confusing error. Instead, just call
-            // `validate_cert_parsed` directly via the chain
-            // helper's internal API.
-            //
-            // Easiest path: pass an empty anchor list and call the
-            // helper with `expected_domain`. The helper already
-            // accepts `Option<&str>`; with no anchors, only the
-            // hostname branch runs.
-            gm_crypto::x509::verify::verify_against_anchors(
-                &sign_chain,
-                &[], // empty anchors: skip signature/expiry checks; hostname still runs
+            // carry a hostname. We call `validate_hostname_only`
+            // (a leaf-only helper) rather than routing through
+            // `verify_against_anchors` with empty anchors: the
+            // latter short-circuits on empty anchors and would
+            // never reach the hostname check, contradicting the
+            // documented contract that hostname pinning works
+            // independently of PKI anchor configuration.
+            gm_crypto::x509::verify::validate_hostname_only(
+                &cert_pair.sign_cert,
+                expected_domain,
                 now,
-                Some(expected_domain),
             )
             .map_err(|e| {
                 TlcpError::HandshakeFailed(format!("server hostname check failed: {}", e))

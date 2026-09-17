@@ -7,16 +7,17 @@
 //! covers the **no-anchor** path. This file covers the **anchor-configured**
 //! path's negative matrix:
 //!
-//! | # | failure mode                                    | outcome |
-//! |---|--------------------------------------------------|---------|
-//! | 1 | self-signed client cert                          | reject  |
-//! | 2 | client cert from a non-anchor CA                  | reject  |
-//! | 3 | client cert already expired                       | reject  |
-//! | 4 | client cert not yet valid                          | reject  |
-//! | 5 | intermediate cert signature tampered               | reject  |
-//! | 6 | intermediate cert `basicConstraints CA = false`    | reject  |
-//! | 7 | empty client chain + configured anchor            | reject  |
-//! | 8 | server hostname mismatch (connector side)          | reject  |
+//! | # | failure mode                                    | outcome | actual code path exercised |
+//! |---|--------------------------------------------------|---------|---------------------------|
+//! | 1 | self-signed / unrelated-CA client cert            | reject  | leaf.issuer != any anchor.subject |
+//! | 2 | client cert from a non-anchor CA                  | reject  | leaf.issuer != any anchor.subject |
+//! | 3 | client cert already expired                       | reject  | notAfter < now (expiry)   |
+//! | 4 | client cert not yet valid                          | reject  | notBefore > now (validity) |
+//! | 5 | leaf cert signature byte tampered                 | reject  | leaf.issuer != any anchor.subject (signature byte flip is set up but not reached — the chain check fires first; see body) |
+//! | 6 | non-CA intermediate in 2-element chain            | reject  | intermediate.issuer != any anchor.subject |
+//! | 7 | empty client chain + configured anchor            | reject  | policy guard (validator path covered by separate `validate_hostname_only` unit test in `gm-crypto`) |
+//! | 8 | server hostname mismatch (connector side)          | reject  | `validate_hostname_only` SAN/CN match |
+//! | 9 | *(positive)* valid chain + matching anchor         | accept  | leaf.issuer == anchor.subject AND signature verifies AND expiry OK |
 //!
 //! All tests use in-process generated certs via
 //! `gmca_cert_setup::generate_gmca_test_certs` (the standard helper)
@@ -793,5 +794,76 @@ async fn f08_server_hostname_mismatch_rejected() {
             || msg.contains("with_server_name"),
         "expected hostname mismatch diagnostic, got: {}",
         msg
+    );
+}
+
+// ============================================================================
+// Test f09 (POSITIVE) — with-anchor path accepts a valid client chain.
+//
+// Regression net for the audit finding MAJOR-5: the existing 8
+// negative tests only prove the with-anchor path REJECTS bad chains.
+// A future regression that flipped the success-condition polarity
+// (e.g. inverting `if let Some(anchors)` to skip validation
+// entirely) would still pass all 8 negative tests while silently
+// breaking PKI enforcement. This test pairs a *valid* client
+// chain with the same anchor set used in the negative tests and
+// asserts that the handshake succeeds — locking in the
+// success-path contract.
+// ============================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn f09_valid_chain_with_anchors_accepted() {
+    // Single GmcaCerts hierarchy — server and client share the same CA.
+    // Server anchors = the CA. Client presents the standard leaf-only
+    // chain; the leaf was issued by the same CA, so it chains to
+    // the configured anchor.
+    let tmp = std::env::temp_dir().join(format!("gm-tlcp-f09-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    let certs: GmcaCerts = generate_gmca_test_certs(&tmp).expect("hierarchy");
+
+    let anchors = vec![certs.ca_cert_der.clone()];
+
+    let server_sign_kp =
+        Sm2KeyPair::from_private_key_pem(&certs.server_sign_key_pem).expect("server sign SEC1 PEM");
+    let server_enc_kp =
+        Sm2KeyPair::from_private_key_pem(&certs.server_enc_key_pem).expect("server enc SEC1 PEM");
+    let acceptor = TlcpAcceptor::new()
+        .with_dual_certs(
+            certs.server_sign_cert_der.clone(),
+            certs.server_enc_cert_der.clone(),
+            server_sign_kp,
+            server_enc_kp,
+        )
+        .with_client_ca_chain(anchors);
+
+    let connector = TlcpConnector::new()
+        .with_cipher_suites(vec![[0xE0, 0x51]]) // ECDHE-SM4-GCM-SM3
+        .with_server_sign_key(
+            certs.server_sign_pub_65.clone(),
+            support::gmca_cert_setup::DEFAULT_DISTID.to_string(),
+        )
+        .with_client_certs(
+            vec![
+                certs.client_sign_cert_der.clone(),
+                certs.client_enc_cert_der.clone(),
+            ],
+            certs.client_sign_key_pem.clone(),
+            Some(certs.client_enc_key_pem.clone()),
+            None,
+        );
+
+    let (server_res, client_res) = attempt_handshake(acceptor, connector).await;
+    assert!(
+        server_res.is_ok(),
+        "server must accept a valid chain anchored to configured CA; got server={:?} client={:?}",
+        server_res,
+        client_res
+    );
+    assert!(
+        client_res.is_ok(),
+        "client must accept a valid chain; got server={:?} client={:?}",
+        server_res,
+        client_res
     );
 }
