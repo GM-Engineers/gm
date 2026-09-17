@@ -187,6 +187,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use subtle::ConstantTimeEq;
+use time::OffsetDateTime;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use zeroize::Zeroizing;
 
@@ -1481,6 +1482,34 @@ pub struct TlcpConnector {
     /// PMS, and in step 5 to verify the server's signed SKE body.
     /// Set via [`TlcpConnector::with_rsa_certs`].
     rsa_server_pub: Option<crate::tlcp::rsa_helpers::RsaPubKey>,
+    /// Phase E: trust anchors for server-certificate chain validation.
+    /// Set via [`TlcpConnector::with_server_ca_chain`].
+    ///
+    /// `None` (the default) preserves the legacy "no PKI" behaviour:
+    /// the connector accepts whatever certificate the server
+    /// presents and pins the **server's signing public key** out-of-band
+    /// via `with_server_sign_key` for the SKE signature. The cert
+    /// itself (signing + encryption leaves) is not validated.
+    ///
+    /// `Some(anchors)` enables opt-in validation: both the sign and
+    /// enc leaves received in the server's `Certificate` message
+    /// must each chain to at least one anchor via
+    /// [`gm_crypto::x509::verify::verify_against_anchors`]. RSA
+    /// suites use a single cert (the signing slot only); the enc
+    /// leaf is empty in that case and is skipped.
+    server_ca_anchors: Option<Vec<Vec<u8>>>,
+    /// Phase E: expected server hostname for SAN/CN matching
+    /// (`Some("api.example.com")`). Set via
+    /// [`TlcpConnector::with_server_name`].
+    ///
+    /// `None` (the default) disables hostname validation. `Some(name)`
+    /// is applied as the `expected_domain` argument to
+    /// `verify_against_anchors` for the **sign leaf** (the sign cert
+    /// carries the server's identity in SAN/CN). The enc leaf is
+    /// validated against the same anchors but **without** the
+    /// hostname check — encryption certs do not typically carry a
+    /// hostname.
+    server_name: Option<String>,
 }
 impl Default for TlcpConnector {
     fn default() -> Self {
@@ -1521,6 +1550,8 @@ impl TlcpConnector {
             sm9_ibsdh_de_a: None,
             sm9_ibsdh_client_id: None,
             rsa_server_pub: None,
+            server_ca_anchors: None,
+            server_name: None,
         }
     }
     /// Create a connector with a shared session cache for resumption.
@@ -1793,6 +1824,71 @@ impl TlcpConnector {
         self.with_rsa_certs(server_rsa_pub)
     }
 
+    /// Configure trust anchors for opt-in server-certificate chain
+    /// validation (Phase E).
+    ///
+    /// When any anchor is configured, the connector validates the
+    /// server's `Certificate` handshake message during the
+    /// handshake (after `process_server_certs`): both the signing and
+    /// encryption leaves must each chain to at least one anchor.
+    /// For RSA single-cert layouts only the sign slot is checked.
+    /// Chains that fail validation cause the handshake to fail with
+    /// a `TlcpError::HandshakeFailed` wrapping the underlying
+    /// `CryptoError::CertificateVerificationFailed` diagnostic.
+    ///
+    /// Without this call, the connector preserves the legacy "no
+    /// PKI" behaviour from gm-tlcp 0.6.x: the cert itself is not
+    /// validated; only the out-of-band `with_server_sign_key` SKE
+    /// signature pin is enforced. The first time a server cert is
+    /// received **without** a configured anchor set, the connector
+    /// emits a one-shot `eprintln!` warning so operators notice the
+    /// missing PKI policy in logs.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use gm_tlcp::tlcp::*;
+    ///
+    /// # async fn run() -> Result<(), TlcpError> {
+    /// let anchors: Vec<Vec<u8>> = vec![]; // from CA PEM bundle
+    ///
+    /// let _connector = TlcpConnector::new()
+    ///     .with_server_sign_key(server_sign_pub, distid)
+    ///     .with_server_ca_chain(anchors)
+    ///     .with_server_name("api.example.com");
+    /// # Ok(()) }
+    /// ```
+    pub fn with_server_ca_chain(mut self, anchors: Vec<Vec<u8>>) -> Self {
+        self.server_ca_anchors = Some(anchors);
+        self
+    }
+
+    /// Configure the expected server hostname (SAN/CN match).
+    ///
+    /// Applies only when [`Self::with_server_ca_chain`] is also
+    /// configured (no hostname check runs against an unvalidated
+    /// cert). The hostname is matched against the sign cert's
+    /// SubjectAlternativeName extension first, falling back to
+    /// CommonName if no SAN is present (per gm-tls/gm-crypto's
+    /// existing `validate_cert_parsed` semantics).
+    ///
+    /// `None` (the default) disables hostname validation.
+    pub fn with_server_name(mut self, name: impl Into<String>) -> Self {
+        self.server_name = Some(name.into());
+        self
+    }
+
+    /// Read-only access to the configured server trust anchors.
+    /// Returns `None` when no anchor set is configured.
+    pub fn server_ca_anchors(&self) -> Option<&[Vec<u8>]> {
+        self.server_ca_anchors.as_deref()
+    }
+
+    /// Read-only access to the configured expected server hostname.
+    pub fn server_name(&self) -> Option<&str> {
+        self.server_name.as_deref()
+    }
+
     pub async fn connect_with_certs<S>(&self, transport: S) -> Result<TlcpStream<S>, TlcpError>
     where
         S: AsyncRead + AsyncWrite + Unpin,
@@ -1843,6 +1939,70 @@ impl TlcpConnector {
         let cert_pair = TlcpCertPair::from_certificate_message(&cert_body)?;
         client_hs.process_server_certs(cert_pair.clone())?;
         client_hs.transcript.extend_from_slice(&cert_payload);
+
+        // Phase E: opt-in PKI validation. When the operator has
+        // configured trust anchors via `with_server_ca_chain`,
+        // validate the just-received server certificate pair here
+        // (before ECDHE / Finished so a bad cert doesn't waste key
+        // material). The TLCP dual-cert model sends sign + enc as
+        // separate Certificate entries; both leaves must chain.
+        // For RSA single-cert layouts (GB/T 38636-2020 §6.4.5.5),
+        // `enc_cert` is empty and only the sign slot is validated.
+        //
+        // The hostname (when `with_server_name` is configured) is
+        // applied only to the sign cert — encryption certs do not
+        // typically carry a hostname.
+        if let Some(anchors) = self.server_ca_anchors.as_deref() {
+            if anchors.is_empty() {
+                return Err(TlcpError::HandshakeFailed(
+                    "with_server_ca_chain() was called with an empty anchor list; \
+                     refusing to silently disable validation. Pass at least one CA \
+                     or omit the call to use the legacy 'no PKI' path."
+                        .to_string(),
+                ));
+            }
+            let now = OffsetDateTime::now_utc();
+            let expected_domain = self.server_name.as_deref();
+            // Sign leaf: hostname check applied.
+            let sign_chain = vec![cert_pair.sign_cert.clone()];
+            gm_crypto::x509::verify::verify_against_anchors(
+                &sign_chain,
+                anchors,
+                now,
+                expected_domain,
+            )
+            .map_err(|e| {
+                TlcpError::HandshakeFailed(format!(
+                    "server signing certificate failed trust-anchor validation: {}",
+                    e
+                ))
+            })?;
+            // Enc leaf (only for dual-cert layouts; RSA suites leave
+            // `enc_cert` empty per `TlcpCertPair::is_single_cert`).
+            if !cert_pair.enc_cert.is_empty() {
+                let enc_chain = vec![cert_pair.enc_cert.clone()];
+                gm_crypto::x509::verify::verify_against_anchors(
+                    &enc_chain, anchors, now, None, // hostname check is sign-only
+                )
+                .map_err(|e| {
+                    TlcpError::HandshakeFailed(format!(
+                        "server encryption certificate failed trust-anchor \
+                         validation: {}",
+                        e
+                    ))
+                })?;
+            }
+        } else if !cert_pair.sign_cert.is_empty() {
+            // Legacy path: cert not validated; out-of-band
+            // `with_server_sign_key` SKE pin is the only check.
+            // One-shot warning to surface the missing PKI policy.
+            eprintln!(
+                "gm-tlcp WARNING: accepted server certificate without validation \
+                 (no trust anchors configured). Call \
+                 TlcpConnector::with_server_ca_chain(anchors) to enable PKI \
+                 enforcement."
+            );
+        }
         // Print cert bytes (using {:02x?} for first/last 32 bytes to keep output small)
         // Determine the negotiated suite *before* step 4 so we can decide whether
         // to read ServerKeyExchange (which is only emitted by standards-strict
@@ -2976,6 +3136,21 @@ pub struct TlcpAcceptor {
     /// gm-tlcp 0.6.0 / 0.6.1 dual-cert-emit behavior. Set via
     /// [`TlcpAcceptor::with_rsa_certs_single`].
     rsa_single_cert_mode: bool,
+    /// Phase E: trust anchors for client-certificate chain
+    /// validation. Set via [`TlcpAcceptor::with_client_ca_chain`].
+    ///
+    /// `None` (the default) preserves the legacy "no PKI" behaviour:
+    /// the acceptor accepts any non-empty client cert chain and
+    /// `CertificateVerify` is treated as proof-of-possession only
+    /// (see finding T3 of `process/reviews/2026-09-17-gm-tlcp-cert-verification-findings.md`).
+    ///
+    /// `Some(anchors)` enables opt-in validation: when the client
+    /// presents a non-empty cert chain, the sign + enc leaf certs
+    /// must each chain to at least one anchor via
+    /// [`gm_crypto::x509::verify::verify_against_anchors`].
+    /// Cert chains that fail validation cause the handshake to
+    /// fail with a clear `CertificateVerificationFailed` error.
+    client_ca_anchors: Option<Vec<Vec<u8>>>,
 }
 impl Default for TlcpAcceptor {
     fn default() -> Self {
@@ -3002,6 +3177,7 @@ impl TlcpAcceptor {
             rsa_signer: None,
             rsa_decryptor: None,
             rsa_single_cert_mode: false,
+            client_ca_anchors: None,
         }
     }
     /// Create an acceptor with a shared session cache for resumption.
@@ -3140,6 +3316,59 @@ impl TlcpAcceptor {
         self.rsa_single_cert_mode = true;
         self
     }
+
+    /// Configure trust anchors for opt-in client-certificate chain
+    /// validation (Phase E).
+    ///
+    /// Once any anchor is configured, the server validates every
+    /// client certificate chain presented during the handshake:
+    /// the chain (sign + enc leaves, plus any intermediates the client
+    /// sent) must chain to **at least one** of the supplied anchors.
+    /// Chains that fail validation cause the handshake to fail with
+    /// a `TlcpError::HandshakeFailed` wrapping the underlying
+    /// `CryptoError::CertificateVerificationFailed` diagnostic.
+    ///
+    /// Without this call, the acceptor preserves the legacy "no
+    /// PKI" behaviour from gm-tlcp 0.6.x: any non-empty client
+    /// chain is accepted and `CertificateVerify` is treated as
+    /// proof-of-possession only (audit finding T3). The first
+    /// time a non-empty client chain is received **without** a
+    /// configured anchor set, the acceptor emits a one-shot
+    /// `eprintln!` warning so operators notice the missing PKI
+    /// policy in logs without breaking production builds.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use gm_tlcp::tlcp::*;
+    ///
+    /// # async fn run() -> Result<(), TlcpError> {
+    /// // Production server: require clients to chain to a private CA.
+    /// // Each entry in `anchors` is the DER bytes of one trusted CA
+    /// // certificate. In practice these come from a PEM bundle that
+    /// // the operator ships with the server (the caller's choice how
+    /// // to load + parse the PEM — see `gm_crypto::x509::verify::OwnedCert::chain_from_pem_concat`).
+    /// let anchors: Vec<Vec<u8>> = vec![]; // populated from PEM bundle
+    ///
+    /// let _acceptor = TlcpAcceptor::new()
+    ///     .with_dual_certs(/* ... */)
+    ///     .with_client_ca_chain(anchors);
+    /// # Ok(()) }
+    /// ```
+    pub fn with_client_ca_chain(mut self, anchors: Vec<Vec<u8>>) -> Self {
+        self.client_ca_anchors = Some(anchors);
+        self
+    }
+
+    /// Read-only access to the configured trust anchors.
+    ///
+    /// Returns `None` when no anchor set is configured (the
+    /// legacy "no PKI" path). Mainly useful for diagnostics and
+    /// tests.
+    pub fn client_ca_anchors(&self) -> Option<&[Vec<u8>]> {
+        self.client_ca_anchors.as_deref()
+    }
+
     /// Accept a TLCP client connection over the given transport.
     ///
     /// Performs the full handshake and returns an encrypted `TlcpStream`.
@@ -3623,6 +3852,65 @@ impl TlcpAcceptor {
                 }
             }
             server_hs.set_client_certs(client_certs.clone());
+
+            // Phase E: opt-in PKI validation. When the operator has
+            // configured trust anchors via `with_client_ca_chain`,
+            // validate the just-received chain here (before the
+            // ECDHE PMS is derived, so a bad cert doesn't waste key
+            // material). For SM2 suites, both sign and enc leaves
+            // must chain; for RSA single-cert layouts, the single
+            // entry is validated as a leaf. The empty chain case is
+            // (per RFC 5246) explicitly allowed by the standard
+            // ("the client has no cert and chooses to stay
+            // anonymous") — we honour that here: empty chain skips
+            // the trust-anchor check.
+            if !client_certs.is_empty() {
+                if let Some(anchors) = self.client_ca_anchors.as_deref() {
+                    if anchors.is_empty() {
+                        return Err(TlcpError::HandshakeFailed(
+                            "with_client_ca_chain() was called with an empty anchor list; \
+                             refusing to silently disable validation. Pass at least one CA \
+                             or omit the call to use the legacy 'no PKI' path."
+                                .to_string(),
+                        ));
+                    }
+                    let now = OffsetDateTime::now_utc();
+                    for (idx, leaf_der) in client_certs.iter().enumerate() {
+                        let chain = vec![leaf_der.clone()];
+                        // `verify_against_anchors` on a one-element
+                        // chain walks the leaf against each anchor in
+                        // turn, requiring (issuer==subject) +
+                        // signature verify + within-validity. That
+                        // matches the "leaf chains to one of the
+                        // anchors" semantics we want for TLCP.
+                        gm_crypto::x509::verify::verify_against_anchors(
+                            &chain, anchors, now,
+                            None, // hostnames are a client-side concern (SNI/SAN)
+                        )
+                        .map_err(|e| {
+                            TlcpError::HandshakeFailed(format!(
+                                "client cert chain entry {} failed trust-anchor \
+                                 validation: {}",
+                                idx, e
+                            ))
+                        })?;
+                    }
+                } else {
+                    // Legacy path: any non-empty chain is accepted.
+                    // Emit a one-shot warning so operators notice
+                    // they have no PKI policy in production logs.
+                    // Throttling not needed — the warning is per
+                    // handshake, and the cost of printing once per
+                    // connection is acceptable.
+                    eprintln!(
+                        "gm-tlcp WARNING: accepted client certificate without \
+                         validation (no trust anchors configured). Call \
+                         TlcpAcceptor::with_client_ca_chain(anchors) to enable \
+                         PKI enforcement."
+                    );
+                }
+            }
+
             client_certs
         };
         #[cfg(feature = "tlcp-gmssl-compat")]

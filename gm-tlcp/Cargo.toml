@@ -48,6 +48,17 @@ exclude = [
 gm-crypto = { path = "../gm-crypto", version = "0.3" }
 gm-sm9-rs = { path = "../gm-sm9-rs", version = "0.1", default-features = false, features = ["pure-rust"] }
 
+# Phase E: `time` is required by `gm_crypto::x509::verify::verify_against_anchors`
+# (the optional `expected_domain` argument and the validity check on the leaf
+# cert both consume `OffsetDateTime`). gm-crypto re-exports the same type,
+# so we depend on the same minor version as gm-crypto to avoid two
+# `time` versions landing in the build graph. The pre-existing
+# `Cargo.toml:195` comment ("x509-parser/time: 仅 cert_verify 用,
+# 列入独立 cert-verify 子模块再决定") flagged this; the cert-verify
+# submodule is now gm-crypto's `x509/verify.rs` (Phase D-1) and the
+# dependency is justified.
+time = { version = "0.3", features = ["std", "parsing", "formatting", "macros"] }
+
 # Underlying EC primitive for the TLCP PMS KDF (x_hat transform,
 # ProjectivePoint arithmetic). We re-export gm-crypto's transitive
 # dep here to keep the pms module self-contained.
