@@ -379,6 +379,29 @@ pub struct TlcpStream<S> {
     )]
     #[allow(dead_code)]
     gmssl_padding_compat: bool,
+    /// Peer certificate cache populated by `from_*_handshake_with_transport`.
+    ///
+    /// On the **server** side: leaf-first chain of certificates the
+    /// client presented in response to the server's `CertificateRequest`.
+    /// Empty when the client did not present any certificate.
+    /// On the **client** side: empty (use [`Self::server_certificates`]
+    /// to access the server's dual certificate pair instead).
+    ///
+    /// **Important**: gm-tlcp does NOT verify these DER bytes. They
+    /// are provided so the caller can implement their own PKI policy.
+    peer_client_certs_cache: Vec<Vec<u8>>,
+    /// Peer certificate cache populated by `from_*_handshake_with_transport`.
+    ///
+    /// On the **client** side: the dual certificate pair (signing +
+    /// encryption, or single RSA) the server presented in its
+    /// `Certificate` handshake message. `None` if the server did not
+    /// present any certificate (e.g. handshake aborted early).
+    /// On the **server** side: `None` (use [`Self::client_certificates`]
+    /// to access the client's chain instead).
+    ///
+    /// **Important**: gm-tlcp does NOT verify these DER bytes. They
+    /// are provided so the caller can implement their own PKI policy.
+    peer_server_certs_cache: Option<TlcpCertPair>,
 }
 impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
     /// Create a new TLCP stream from key material and cipher suite.
@@ -444,13 +467,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
             cipher_suite,
             #[allow(deprecated)]
             gmssl_padding_compat: false,
+            peer_client_certs_cache: Vec::new(),
+            peer_server_certs_cache: None,
         })
     }
     /// Create a TLCP stream from a completed client handshake with a transport.
     ///
     /// The handshake must have been completed (master secret and key material derived).
     pub fn from_client_handshake_with_transport(
-        handshake: TlcpHandshake,
+        mut handshake: TlcpHandshake,
         transport: S,
     ) -> Result<Self, TlcpError> {
         let suite_id = handshake
@@ -474,6 +499,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
         let resumed = handshake.to_resumed_session();
         let mut stream = Self::new(transport, &key_material, suite, true, session_id)?;
         stream.cached_resumed_session = resumed;
+        // Cache the server's dual certificate pair so the caller can
+        // implement PKI policy via [`Self::server_certificates`].
+        // Without this copy the handshake state is dropped and the
+        // certificates become inaccessible from the stream.
+        // `take()` is required because `TlcpHandshake` implements
+        // `Drop` (to zeroize the master secret / random fields),
+        // so the field cannot be moved out by value.
+        stream.peer_server_certs_cache = handshake.server_certs.take();
         Ok(stream)
     }
     /// Create a TLCP stream from a completed server handshake with a transport.
@@ -499,6 +532,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
         let resumed = handshake.to_resumed_session();
         let mut stream = Self::new(transport, &key_material, suite, false, session_id)?;
         stream.cached_resumed_session = resumed;
+        // Cache the client certificate chain so the caller can
+        // implement PKI policy via [`Self::client_certificates`].
+        // Without this copy the handshake state is dropped and the
+        // certificates become inaccessible from the stream.
+        stream.peer_client_certs_cache = handshake.client_certs;
         Ok(stream)
     }
     /// Get a mutable reference to the inner transport.
@@ -506,6 +544,57 @@ impl<S: AsyncRead + AsyncWrite + Unpin> TlcpStream<S> {
     /// This is used during handshake to send raw records before encryption starts.
     pub fn get_mut(&mut self) -> &mut S {
         &mut self.inner
+    }
+
+    /// Client certificate chain received during the handshake.
+    ///
+    /// **Server-side stream only**: returns the leaf-first chain of
+    /// DER-encoded X.509 certificates the client presented in response
+    /// to the server's `CertificateRequest`. Empty if the client did
+    /// not present any certificate.
+    ///
+    /// On a **client-side stream** this always returns an empty slice;
+    /// use [`Self::server_certificates`] for the server's dual cert pair.
+    ///
+    /// **Important**: gm-tlcp does NOT verify the contents of this
+    /// chain. By default (without
+    /// `TlcpAcceptor::with_client_ca_chain`)
+    /// the server accepts any non-empty chain. The returned DER bytes
+    /// are provided so the caller can implement their own PKI policy
+    /// (chain building, expiration, hostname, CRL, …) outside the
+    /// library.
+    pub fn client_certificates(&self) -> &[Vec<u8>] {
+        &self.peer_client_certs_cache
+    }
+
+    /// Server dual certificate pair received during the handshake.
+    ///
+    /// **Client-side stream only**: returns the dual (signing +
+    /// encryption, or single RSA) certificate pair the server
+    /// presented in its `Certificate` handshake message. `None` if
+    /// the server did not present any certificate (e.g. handshake
+    /// aborted before that step).
+    ///
+    /// On a **server-side stream** this always returns `None`;
+    /// use [`Self::client_certificates`] for the client's chain.
+    ///
+    /// **Important**: gm-tlcp does NOT verify the contents of this
+    /// pair. By default (without
+    /// `TlcpConnector::with_server_ca_chain` /
+    /// `TlcpConnector::with_server_name`)
+    /// the client accepts any server certificate. The returned DER bytes are
+    /// provided so the caller can implement their own PKI policy
+    /// (chain building, expiration, hostname, CRL, …) outside the
+    /// library.
+    ///
+    /// Note: TLCP requires both a **signing** and an **encryption**
+    /// certificate for SM2 / SM9 suites per GB/T 38636-2020 §6.4.5.5;
+    /// for the 4 RSA suites only the signing slot is populated
+    /// ([`TlcpCertPair::is_single_cert`]). Inspect the layout via
+    /// [`TlcpCertPair::is_single_cert`] before consuming the
+    /// encryption certificate.
+    pub fn server_certificates(&self) -> Option<&TlcpCertPair> {
+        self.peer_server_certs_cache.as_ref()
     }
     /// Deprecated. Historically toggled a non-standard CBC padding scheme
     /// (`N bytes of value N-1`) used to interop with pre-fix GmSSL. GmSSL

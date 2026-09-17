@@ -203,6 +203,29 @@ impl TlcpHandshake {
         Ok(())
     }
 
+    /// Read-only access to the server's dual certificate pair received
+    /// during the handshake.
+    ///
+    /// **Important**: gm-tlcp does NOT verify the contents of this pair.
+    /// By default (without
+    /// `TlcpConnector::with_server_ca_chain` /
+    /// `TlcpConnector::with_server_name`)
+    /// the client accepts any server certificate. The returned DER bytes are
+    /// provided so the caller can implement their own PKI policy
+    /// (chain building, expiration, hostname, CRL, …) outside the
+    /// library. `None` if the server did not present a Certificate
+    /// message (e.g. aborted handshake before that step).
+    ///
+    /// Note: TLCP requires both a **signing** and an **encryption**
+    /// certificate for SM2 / SM9 suites per GB/T 38636-2020 §6.4.5.5;
+    /// for the 4 RSA suites only the signing slot is populated
+    /// ([`TlcpCertPair::is_single_cert`]). Inspect the layout via
+    /// [`TlcpCertPair::is_single_cert`] before consuming the
+    /// encryption certificate.
+    pub fn server_certs(&self) -> Option<&TlcpCertPair> {
+        self.server_certs.as_ref()
+    }
+
     /// Derive master secret from pre-master secret
     ///
     /// Derive master_secret from pre-master secret using SM3-based PRF.
