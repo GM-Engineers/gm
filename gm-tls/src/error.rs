@@ -162,6 +162,19 @@ impl From<std::io::Error> for TlsError {
 
 impl From<gm_crypto::CryptoError> for TlsError {
     fn from(e: gm_crypto::CryptoError) -> Self {
-        TlsError::HandshakeFailed(e.to_string())
+        // Phase D-1: preserve the specific cert/CRL variants so
+        // callers can still pattern-match on `TlsError::CertificateVerificationFailed`
+        // and `TlsError::CrlVerificationFailed`. Other CryptoError
+        // variants fall back to `HandshakeFailed` to preserve the
+        // pre-D-1 behaviour.
+        match e {
+            gm_crypto::CryptoError::CertificateVerificationFailed(msg) => {
+                TlsError::CertificateVerificationFailed(msg)
+            }
+            gm_crypto::CryptoError::CrlVerificationFailed(msg) => {
+                TlsError::CrlVerificationFailed(msg)
+            }
+            other => TlsError::HandshakeFailed(other.to_string()),
+        }
     }
 }

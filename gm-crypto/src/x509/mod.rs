@@ -1,5 +1,7 @@
 //! X.509 Certificate parsing utilities + PKCS#10 CSR generation.
 
+pub mod verify;
+
 use crate::error::CryptoError;
 use crate::sm2::{GM_TLS_DEFAULT_ID, Sm2KeyPair, Sm2Signer};
 use gm_der::{der_bit_string, der_len, der_sequence, der_set, der_utf8_string, encode_oid};
