@@ -230,6 +230,78 @@ pub fn verify_cert_chain_sm2_chain(
     Ok(())
 }
 
+// ============== DER-byte entry point (gm-tlcp Phase E) ==============
+
+/// Verify a peer-asserted certificate chain against trust anchors,
+/// taking the byte representation each TLS-style protocol surfaces
+/// over the wire — no PEM wrapper, no `OwnedCert` parsing.
+///
+/// This is the entry point `gm-tlcp` (Phase E) calls with the
+/// raw bytes returned by `TlcpStream::client_certificates` /
+/// `TlcpStream::server_certificates` (Phase B). It is also the
+/// path future protocols (TLS 1.3 + SM via gm-tls) should prefer
+/// over the PEM-flavored [`verify_cert_chain_sm2_chain`].
+///
+/// # Chain layout
+///
+/// `leaf_chain_der` is **leaf-first**: `[leaf, intermediate_1, ...,
+/// intermediate_n, root]`. The chain depth (including the root) is
+/// bounded by [`MAX_CERT_CHAIN_DEPTH`].
+///
+/// # Anchor matching
+///
+/// The root entry of `leaf_chain_der` must chain (subject DN match +
+/// signature) to **one of** `anchors_der` for the chain to validate.
+/// This matches the X.509 trust-store model: a CA is trusted
+/// implicitly, so the chain usually ends at the CA cert itself
+/// rather than a separately-named anchor.
+///
+/// # TLCP usage
+///
+/// TLCP dual-cert model sends sign + enc as separate Certificate
+/// entries that share a common CA. Callers should pass the
+/// sign-leaf chain (e.g. `[sign_cert, ca_cert]`) and the enc-leaf
+/// chain (e.g. `[enc_cert, ca_cert]`) separately, both anchored
+/// against the same `anchors_der`. The same anchors being valid for
+/// both is the "sign + enc share one chain" invariant from the
+/// Phase D design decision.
+///
+/// # Errors
+///
+/// Returns [`CryptoError::CertificateVerificationFailed`] with one
+/// of these reasons (mirrors the wrapped function's diagnostics):
+///
+///   * `"certificate chain or trust anchor is empty"`
+///   * `"certificate chain too deep: N (max 10)"`
+///   * `"CA certificate missing BasicConstraints CA:TRUE"` /
+///     `"CA certificate missing BasicConstraints extension"`
+///   * `"certificate issuer does not match CA"`
+///   * `"certificate has expired or is not yet valid"`
+///   * `"domain name mismatch"`
+///   * SM2 signature verification failures (delegated)
+pub fn verify_against_anchors(
+    leaf_chain_der: &[Vec<u8>],
+    anchors_der: &[Vec<u8>],
+    now: OffsetDateTime,
+    expected_domain: Option<&str>,
+) -> Result<(), CryptoError> {
+    // Build OwnedCert wrappers from the DER bytes. This is the only
+    // point in this module that parses the wire-format bytes; the
+    // rest of the chain-validation code path operates on OwnedCert
+    // to keep a single validation implementation.
+    let leaf_chain = leaf_chain_der
+        .iter()
+        .map(|der| OwnedCert {
+            der: der.clone(),
+        })
+        .collect::<Vec<_>>();
+    let trust_anchors = anchors_der
+        .iter()
+        .map(|der| OwnedCert { der: der.clone() })
+        .collect::<Vec<_>>();
+    verify_cert_chain_sm2_chain(&leaf_chain, &trust_anchors, now, expected_domain)
+}
+
 fn verify_cert_chain_sm2(
     leaf: &OwnedCert,
     ca: &OwnedCert,
@@ -870,4 +942,75 @@ fn extract_tbs_crl_bytes(der: &[u8]) -> Result<&[u8], CryptoError> {
     }
 
     Ok(&der[tbs_start..tbs_end])
+}
+
+
+// ============== Tests ==============
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_against_anchors_rejects_empty_chain() {
+        // Empty chain with non-empty anchors -> must fail with the
+        // "chain or anchor is empty" diagnostic. We do not need real
+        // cert bytes here because the empty-chain guard fires before
+        // any parsing.
+        let err = verify_against_anchors(
+            &[],
+            &[vec![0x30, 0x00]], // any byte vec
+            OffsetDateTime::now_utc(),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{}", err).contains("empty"),
+            "expected empty-chain diagnostic, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn verify_against_anchors_rejects_empty_anchors() {
+        // Non-empty chain with empty anchors -> must fail with the
+        // same diagnostic. We use a parseable DER byte (a minimal
+        // empty SEQUENCE `30 00`) so that the empty-anchors guard
+        // is what fires, not the DER parser. The function short-
+        // circuits on the empty-anchors check before trying to parse.
+        let err = verify_against_anchors(
+            &[vec![0x30, 0x00]],
+            &[],
+            OffsetDateTime::now_utc(),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{}", err).contains("empty"),
+            "expected empty-anchor diagnostic, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn verify_against_anchors_rejects_chain_too_deep() {
+        // Build a chain with MAX_CERT_CHAIN_DEPTH + 1 entries to
+        // trip the depth guard. The DER bytes are bogus because the
+        // depth check runs before parsing.
+        let too_deep: Vec<Vec<u8>> =
+            (0..MAX_CERT_CHAIN_DEPTH + 1).map(|_| vec![0x30, 0x00]).collect();
+        let err = verify_against_anchors(
+            &too_deep,
+            &[vec![0x30, 0x00]],
+            OffsetDateTime::now_utc(),
+            None,
+        )
+        .unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("too deep"),
+            "expected depth diagnostic, got: {}",
+            msg
+        );
+    }
 }
