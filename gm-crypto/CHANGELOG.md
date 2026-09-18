@@ -52,6 +52,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+### Changed
+
+### Fixed
+
+
+## [0.3.2] - 2026-09-18
+
+### Added
+
 - **`x509::verify::check_revocations`** — RFC 5280 §5 CRL revocation
   check helper for `verify_against_anchors`. Walks the validated
   chain (leaf + intermediates + root) and, for each cert whose
@@ -80,7 +89,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   call that borrows the BIT STRING's raw slice from the parsed
   `CertificateRevocationList`, so the signature range is always
   correct regardless of the outer length encoding.
-
 
 ## [0.3.0] - 2026-09-07
 
@@ -153,6 +161,7 @@ removed. The crate's public surface is fully backwards-compatible with
 the 0.1.x series.
 
 [Unreleased]: https://github.com/GM-Engineers/gm/compare/main...HEAD
+[0.3.2]: https://github.com/GM-Engineers/gm/compare/gm-crypto-v0.3.1...gm-crypto-v0.3.2
 [0.3.1]: https://github.com/GM-Engineers/gm/compare/gm-crypto-v0.3.0...gm-crypto-v0.3.1
 [0.3.0]: https://github.com/GM-Engineers/gm/compare/gm-crypto-v0.2.0...gm-crypto-v0.3.0
 [0.2.0]: https://github.com/GM-Engineers/gm/releases/tag/gm-crypto-v0.2.0

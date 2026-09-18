@@ -6,6 +6,91 @@ All notable changes to the GM cryptographic library suite.
 
 ### Added
 
+## [0.6.5 / 0.3.2 / 0.2.1] - 2026-09-18 (Phase J — RFC 5280 §5 CRL revocation)
+
+3-crate coordinated release closing the 2026-09-17 cert-verification
+plan (Phases B/C/D/D-2/E/F/G/H/I/J). gm-tlcp PR #29 merged after
+9/9 GitHub Actions checks green (Rustfmt / Clippy / Doc Check /
+Build Fuzz Targets / Test Suite / GmSSL Interop / Security Audit /
+Generate SBOM / publish-guard / gm-tlcp × GmSSL TLCP Interop).
+All three crates pushed to GitHub / Gitee / GitCode and published
+to crates.io in the canonical dependency order:
+
+  1. gm-crypto 0.3.2 (440.8 KiB / 109.0 KiB compressed)
+  2. gm-ca     0.2.1 (337.3 KiB /  87.4 KiB compressed)
+  3. gm-tlcp   0.6.5 (837.7 KiB / 215.7 KiB compressed)
+
+Annotated tags `gm-crypto-v0.3.2` / `gm-ca-v0.2.1` / `gm-tlcp-v0.6.5`
+created on local main, force-pushed to all three remotes so they
+point to the latest commit (`77abe92`) which includes the
+post-publish dependency relaxation follow-up commit.
+
+### gm-tlcp surface change (Phase J)
+
+- `TlcpConnector::with_server_crls(Vec<Vec<u8>>)` / `server_crls()`
+- `TlcpAcceptor::with_client_crls(Vec<Vec<u8>>)` / `client_crls()`
+- New tests `j01–j05` in `tests/gm_tlcp_cert_verify_negative.rs`
+  covering all five branches of the opt-in revocation policy
+  (revoked/rejects, not-revoked/accepts, no-CRL/accepts,
+  mismatched-issuer/silent-skip, client-side-mirror).
+
+### gm-crypto surface change
+
+- `x509::verify::check_revocations(chain, crls, now) -> Result<(), CryptoError>`
+- `OwnedCert::from_der(der)` / `OwnedCert::from_pem_or_der(bytes)`
+- Private bugfix: `x509::verify::extract_crl_signature` (now
+  borrows the BIT STRING from the parsed `CertificateRevocationList`
+  instead of hand-rolling a DER walker that miscomputed "end of TBS"
+  for CRLs with the long-form outer length `30 81 c9`).
+
+### gm-ca audit fixes (caught while wiring Phase J tests)
+
+`CaSigner::generate_crl` previously produced CRLs that x509-parser
+0.16 (and any RFC-strict reader) rejected with `Eof`. Two RFC 5280
+§5.1 / §5.2.3 encoding bugs:
+
+1. `tbs_version` was doubly-wrapped (`a0 05 02 03 02 01 01`); the
+   correct encoding per §5.1 is plain INTEGER (`02 01 01` for v2).
+2. CRL Number extension was missing the OCTET STRING wrapper
+   around its INTEGER value; replaced with `build_extension()`
+   which correctly emits the wrapper per §5.2.3.
+
+Both fixes are byte-level correctness improvements, not behavior
+changes — anyone depending on the previous output was depending on
+broken RFC 5280 §5 encoding.
+
+### Surprises caught during CI
+
+Phase H commit `ac7c93b` extended `verify_cert_chain_sm2_chain`
+with the new `role: Option<CertRole>` parameter but did not update
+`fuzz_targets/cert_parse.rs`, causing the `Build Fuzz Targets` job
+to fail with E0061 ever since Phase H shipped (Sep 12). Fixed in
+a separate commit `20c1cd2` (`fix(gm-tls/fuzz): pass CertRole to
+verify_cert_chain_sm2_chain`) before the Phase J merge.
+
+### crates.io publish dependency cycle
+
+gm-crypto 0.3.2's dev-dep on gm-ca `^0.2.1` and gm-ca 0.2.1's
+runtime dep on gm-crypto `^0.3.2` form a chicken-and-egg cycle.
+Resolution: temporarily relax gm-crypto's dev-dep on gm-ca to
+`^0.2` (matches existing gm-ca 0.2.0 on crates.io). This lets
+gm-crypto 0.3.2 publish first; gm-ca 0.2.1 follows; gm-tlcp 0.6.5
+follows last (deps on both). The relaxation is committed as a
+follow-up on main and will be tightened back to `^0.2.1` in the
+next release cycle, now that 0.2.1 is on the index.
+
+### Verification
+
+- `cargo build --workspace --tests`: ✅
+- `cargo test --workspace --features tlcp-profiles`: ✅ 204 passed
+- `cargo test -p gm-crypto`: ✅ 181 passed (no regressions)
+- `cargo test -p gm-ca`: ✅ 34 passed (no regressions)
+- `cargo fmt --check`: ✅ clean
+- `cargo clippy --workspace --all-features -- -D warnings`: ✅ clean
+- GitHub Actions CI on PR #29: ✅ 9/9 checks pass
+- `cargo deny check licenses`: ✅ (advisory-db fetch failed due
+  to sandbox network restriction; unrelated to this release)
+
 #### `gm-crypto` 0.3.1 (Phase 3 / post-release)
 
 - **`gm-crypto` 0.3.1 published** — `cargo publish --registry crates-io

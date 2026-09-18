@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+### Changed
+
+### Fixed
+
+## [0.2.1] - 2026-09-18
+
+### Added
+
 - **`CaSigner::key_pair()`** — read-only getter for the CA's
   underlying `Sm2KeyPair`. Provided as a convenience for test
   fixtures that need to sign custom-encoded artifacts (e.g. CRLs
@@ -173,6 +181,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Generic CA service for SM2 certificate management.
 
 [Unreleased]: https://github.com/GM-Engineers/gm/compare/main...HEAD
+[0.2.1]: https://github.com/GM-Engineers/gm/compare/gm-ca-v0.2.0...gm-ca-v0.2.1
 [0.2.0]: https://github.com/GM-Engineers/gm/compare/gm-ca-v0.1.2...gm-ca-v0.2.0
 [0.1.2]: https://github.com/GM-Engineers/gm/compare/gm-ca-v0.1.1...gm-ca-v0.1.2
 [0.1.1]: https://github.com/GM-Engineers/gm/releases/tag/gm-ca-v0.1.1

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+### Changed
+
+### Fixed
+
+### Documented
+
+### Security
+
+## [0.6.5] - 2026-09-18
+
 ### Added — opt-in PKI / hostname validation (Phases B/C/D/E/F/G)
 
 Resolves the **8 cert-verification findings** (`T1–T8`) from the
@@ -1587,6 +1599,12 @@ server-side PMS decryption** (R-5 / 0.6.0) and **SM9 suites** (R-4
   accidentally pushed to a public mirror.
 
 [Unreleased]: https://github.com/GM-Engineers/gm/compare/main...HEAD
+[0.6.5]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.6.4...gm-tlcp-v0.6.5
+[0.6.4]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.6.3...gm-tlcp-v0.6.4
+[0.6.3]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.6.2...gm-tlcp-v0.6.3
+[0.6.2]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.6.1...gm-tlcp-v0.6.2
+[0.6.1]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.6.0...gm-tlcp-v0.6.1
+[0.6.0]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.5.3...gm-tlcp-v0.6.0
 [0.5.3]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.5.2...gm-tlcp-v0.5.3
 [0.5.2]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.5.1...gm-tlcp-v0.5.2
 [0.5.1]: https://github.com/GM-Engineers/gm/compare/gm-tlcp-v0.5.0...gm-tlcp-v0.5.1
