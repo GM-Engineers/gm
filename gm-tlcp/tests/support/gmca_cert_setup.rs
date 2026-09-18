@@ -46,9 +46,9 @@ pub struct GmcaCerts {
     /// DER-encoded root CA cert (for chain walk in
     /// `with_client_certs` and for ad-hoc introspection).
     pub ca_cert_der: Vec<u8>,
-    /// Server signing cert subject CN (Phase J of these test
-    /// helpers). Needed for CRL issuer DN matching in negative
-    /// tests — the CRL issuer must equal the CA subject.
+    /// Server signing cert subject CN (used by CRL-issuer DN matching
+    /// in revocation negative tests — the CRL issuer must equal
+    /// the CA subject).
     pub ca_subject_cn: String,
     /// Server signing cert (consumed by `TlcpAcceptor::with_dual_certs`).
     pub server_sign_cert_der: Vec<u8>,
@@ -90,12 +90,12 @@ pub fn generate_gmca_test_certs(out_dir: &std::path::Path) -> Result<GmcaCerts, 
     Ok(certs)
 }
 
-/// Phase J: same as [`generate_gmca_test_certs`] but also returns
-/// the [`CaSigner`] so callers can sign CRLs. Existing call sites
-/// keep using the no-signer form (the signer is dropped). The
-/// signer is held by the returned `CaSigner` value, not by the
-/// `GmcaCerts` struct (this avoids any chance of the private key
-/// being inadvertently cloned into library code).
+/// Same as [`generate_gmca_test_certs`] but also returns the
+/// [`CaSigner`] so callers can sign CRLs. Existing call sites keep
+/// using the no-signer form (the signer is dropped). The signer is
+/// held by the returned `CaSigner` value, not by the `GmcaCerts`
+/// struct (this avoids any chance of the private key being
+/// inadvertently cloned into library code).
 #[allow(dead_code)]
 pub fn generate_gmca_with_signer(
     _out_dir: &std::path::Path,
@@ -236,13 +236,11 @@ pub fn generate_gmca_with_signer(
     ))
 }
 
-/// Phase J: sign a CRL with the test CA. Wraps
-/// [`CaSigner::generate_crl`] which after the Phase J audit-fix to
-/// the `tbs_version` encoding (RFC 5280 §5.1 requires plain INTEGER,
-/// not CONTEXT-tagged) produces an x509-parser-parseable CRL. The
-/// `crl_num_ext` now also uses [`build_extension`] so the OCTET STRING
-/// wrapper around the INTEGER is present (x509-parser 0.16 requires
-/// this for the Extension struct).
+/// Sign a CRL with the test CA. Wraps [`CaSigner::generate_crl`]
+/// which produces CRLs conforming to RFC 5280 §5.1 (plain INTEGER
+/// version, not CONTEXT-tagged) and §5.2.3 (CRL Number extension
+/// with the OCTET STRING wrapper around its INTEGER value, as
+/// required by x509-parser 0.16's Extension parser).
 ///
 /// `revoked_serials_hex` is a list of cert serial numbers as
 /// **uppercase hex strings** (the format `gm_ca::cert::CrlEntry::serial_number`
@@ -274,12 +272,13 @@ pub fn generate_test_crl(
         .map_err(|e| format!("CaSigner::generate_crl: {}", e))
 }
 
-/// Phase J (j04 fixture): same as [`generate_gmca_with_signer`] but
-/// with a custom CA subject CN. Required by j04, which configures an
-/// "unrelated" CRL whose issuer DN must NOT byte-match the server
-/// hierarchy's CA subject (otherwise `check_revocations` would
-/// mistakenly pair the CRL's issuer with the chain's CA cert and
-/// attempt — and fail — a signature verification).
+/// Same as [`generate_gmca_with_signer`] but with a custom CA
+/// subject CN. Required by the `j04` revocation-mismatch test,
+/// which configures an "unrelated" CRL whose issuer DN must NOT
+/// byte-match the server hierarchy's CA subject (otherwise
+/// `check_revocations` would mistakenly pair the CRL's issuer
+/// with the chain's CA cert and attempt — and fail — a signature
+/// verification).
 #[allow(dead_code)]
 pub fn generate_gmca_with_signer_and_cn(
     _out_dir: &std::path::Path,

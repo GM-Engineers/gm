@@ -115,7 +115,7 @@ pub fn extract_sm2_pubkey_from_der(cert_der: &[u8]) -> Result<Vec<u8>, CryptoErr
 //   - openHiTLS / Tongsuo TLCP / TLS 1.3 + SM cert chain tooling.
 //
 // We do NOT support RSA CSR signing here. RSA cert issuance lives in
-// gm-ca's `rsa` feature flag (Phase 4+).
+// gm-ca's `rsa` feature flag.
 // =============================================================================
 
 // SM2 signature OID: 1.2.156.10197.1.501 = 2A 8C D8 E3 65 6A 02 01 F5

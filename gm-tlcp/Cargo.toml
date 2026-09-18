@@ -200,9 +200,9 @@ pem = "3"
 # of `gm-ca` and `gm-crypto` but integration tests need it directly.
 gm-der = { path = "../gm-der", version = "0.1" }
 
-# Phase J: CRL test fixtures. `gm-ca`'s `CaSigner::generate_crl`
-# takes `chrono::DateTime<Utc>` (gm-ca is an open-source external
-# dep so we pin the version gm-ca uses).
+# CRL test fixtures. `gm-ca`'s `CaSigner::generate_crl` takes
+# `chrono::DateTime<Utc>` (gm-ca is an open-source external dep so
+# we pin the version gm-ca uses).
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # `gm-crypto` exposes x509-parser 0.16 transitively but we need it
 # directly in `gmca_cert_setup` to extract the cert serial number

@@ -155,15 +155,13 @@ impl CaSigner {
         &self.ca_pub_65
     }
 
-    /// Phase J (gm-tlcp CRL test fixtures): borrow the CA's SM2
-    /// private key. Test fixtures need this to sign custom-encoded
-    /// CRLs that bypass the buggy `generate_crl` path (which x509-parser
-    /// 0.16 rejects). Production code should NOT use this — use
-    /// `sign_csr_with_profile` or `generate_crl` instead. This getter
-    /// exists purely because the CA's signer has zero round-trips
-    /// to its private key beyond `sign()`-style methods, and
-    /// constructing a fresh `Sm2Signer` from the same key requires
-    /// the key bytes.
+    /// Borrow the CA's SM2 private key. Convenience for test
+    /// fixtures that need to sign custom-encoded artifacts (e.g. CRLs).
+    /// Production code should NOT use this — use `sign_csr_with_profile`
+    /// or `generate_crl` instead. The getter exists purely because
+    /// the CA's signer has zero round-trips to its private key beyond
+    /// `sign()`-style methods, and constructing a fresh `Sm2Signer`
+    /// from the same key requires the key bytes.
     pub fn key_pair(&self) -> &Sm2KeyPair {
         &self.key_pair
     }
@@ -466,27 +464,23 @@ impl CaSigner {
         // CRL Number extension per RFC 5280 §5.2.3:
         //   Extension ::= SEQUENCE { extnID OID, critical BOOLEAN DEFAULT FALSE,
         //                            extnValue OCTET STRING }
-        // The extnValue OCTET STRING must wrap the INTEGER (i.e. the
-        // inner DER encoding of the CRL number). gm-ca previously
-        // emitted `OID || INTEGER` directly (without the OCTET STRING
-        // wrapper), which x509-parser 0.16 rejects with Eof because
-        // its Extension parser requires the extnValue tag to be 0x04.
+        // The extnValue OCTET STRING must wrap the inner DER encoding
+        // of the CRL number. Replaced the previous direct OID||INTEGER
+        // emission (which x509-parser 0.16 rejects with Eof because its
+        // Extension parser requires the extnValue tag to be 0x04) with
+        // `build_extension`, which correctly emits the wrapper.
         let crl_num_bytes = crl_number.to_be_bytes();
         let crl_num_ext =
             build_extension(CRL_NUM_OID, false, &der_integer_positive(&crl_num_bytes));
         let extensions_der = der_explicit_context(0, &der_sequence(&[crl_num_ext].concat()));
 
-        // TBSCertList: version, signature, issuer, thisUpdate, nextUpdate, revokedCerts, extensions
-        //
-        // Audit fix (Phase J of gm-tlcp cert-verification plan, 2026-09-17):
-        // the version field in TBSCertList per RFC 5280 §5.1 is a PLAIN
-        // INTEGER (not CONTEXT-tagged). The previous code wrapped it
-        // twice (`der_explicit_context(0, &der_integer_positive(b"\x02\x01\x01"))`)
-        // which produces `a0 05 02 03 02 01 01` — rejected by
-        // x509-parser 0.16's CRL parser with Eof.
-        // The correct encoding is just the INTEGER bytes for v2(1):
-        // `02 01 01`.
-        let tbs_version = der_integer_positive(&[1]); // v2 = INTEGER 1
+        // TBSCertList: version, signature, issuer, thisUpdate, nextUpdate, revokedCerts, extensions.
+        // The version field per RFC 5280 §5.1 is a PLAIN INTEGER (v2 = 0x01),
+        // NOT CONTEXT-tagged. Previous code wrapped it twice
+        // (`der_explicit_context(0, &der_integer_positive(b"\x02\x01\x01"))`)
+        // producing `a0 05 02 03 02 01 01`, which x509-parser 0.16
+        // rejects with Eof.
+        let tbs_version = der_integer_positive(&[1]);
         let tbs_sig_alg = sm2_sig_alg_id();
         let tbs_issuer = der_name(self.ca_subject_cn.as_bytes());
         let tbs_this_update = utctime(now);

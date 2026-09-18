@@ -1511,9 +1511,9 @@ pub struct TlcpConnector {
     /// hostname check — encryption certs do not typically carry a
     /// hostname.
     server_name: Option<String>,
-    /// Phase J: optional CRLs (raw DER bytes) for revocation checks.
-    /// Each entry is one CRL. The validator matches each cert in
-    /// the chain against the CRL whose issuer DN equals the cert's
+    /// Optional CRLs (raw DER bytes) for revocation checks. Each
+    /// entry is one CRL. The validator matches each cert in the
+    /// chain against the CRL whose issuer DN equals the cert's
     /// issuer. CRL signature verification uses the matching issuer
     /// cert from the chain (the cert whose subject equals the CRL's
     /// issuer). Operators are responsible for fetching CRLs
@@ -1900,14 +1900,14 @@ impl TlcpConnector {
     }
 
     /// Configure CRLs (raw DER bytes) for revocation checks against
-    /// the server's certificate chain (Phase J).
+    /// the server's certificate chain.
     ///
     /// Each entry in `crls` is one CRL. The validator matches each
     /// cert in the chain against the CRL whose issuer DN equals the
     /// cert's issuer; the CRL's signature is verified against the
     /// matching issuer cert from the chain. CAs in the chain that
     /// have no corresponding CRL are NOT checked (silent skip —
-    /// consistent with the opt-in nature of all Phase E/J policy:
+    /// consistent with the opt-in nature of all revocation policy:
     /// absence = no enforcement).
     ///
     /// Operators are responsible for fetching CRLs out-of-band
@@ -2062,11 +2062,11 @@ impl TlcpConnector {
                     e
                 ))
             })?;
-            // Phase J: revocation check against the configured CRLs.
-            // Only runs when CRLs are configured (server_crls non-empty).
-            // The sign cert + its chain are checked; the enc cert chain
-            // is checked separately below. CRL signatures verify against
-            // the matching issuer cert in the chain.
+            // Revocation check against the configured CRLs. Only
+            // runs when CRLs are configured (server_crls non-empty).
+            // The sign cert + its chain are checked; the enc cert
+            // chain is checked separately below. CRL signatures
+            // verify against the matching issuer cert in the chain.
             if !self.server_crls.is_empty() {
                 // The CRL signature must verify against the CA
                 // cert (the cert whose subject equals the CRL's
@@ -2113,7 +2113,7 @@ impl TlcpConnector {
                         e
                     ))
                 })?;
-                // Phase J: revocation check for the enc cert (if CRLs configured).
+                // Revocation check for the enc cert (if CRLs configured).
                 if !self.server_crls.is_empty() {
                     // Build [enc_leaf, ...anchors] so the CRL can
                     // find its issuer cert in the chain. (Same
@@ -3285,8 +3285,7 @@ pub struct TlcpAcceptor {
     ///
     /// `None` (the default) preserves the legacy "no PKI" behaviour:
     /// the acceptor accepts any non-empty client cert chain and
-    /// `CertificateVerify` is treated as proof-of-possession only
-    /// (see finding T3 of `process/reviews/2026-09-17-gm-tlcp-cert-verification-findings.md`).
+    /// `CertificateVerify` is treated as proof-of-possession only.
     ///
     /// `Some(anchors)` enables opt-in validation: when the client
     /// presents a non-empty cert chain, the sign + enc leaf certs
@@ -3295,7 +3294,7 @@ pub struct TlcpAcceptor {
     /// Cert chains that fail validation cause the handshake to
     /// fail with a clear `CertificateVerificationFailed` error.
     client_ca_anchors: Option<Vec<Vec<u8>>>,
-    /// Phase J: optional CRLs (raw DER bytes) for revocation checks
+    /// Optional CRLs (raw DER bytes) for revocation checks
     /// against the client's certificate chain. Each entry is one CRL.
     /// Matched against certs in the chain by issuer DN; CRL signature
     /// verified against the matching issuer cert in the chain.
@@ -3519,7 +3518,7 @@ impl TlcpAcceptor {
     }
 
     /// Configure CRLs (raw DER bytes) for revocation checks against
-    /// the client's certificate chain (Phase J).
+    /// the client's certificate chain.
     ///
     /// Same semantics as [`TlcpConnector::with_server_crls`]: each
     /// entry is one CRL; matched by issuer DN; signature verified
@@ -4087,8 +4086,8 @@ impl TlcpAcceptor {
                             idx, e
                         ))
                     })?;
-                    // Phase J: revocation check against the configured
-                    // CRLs (only runs when client_crls is non-empty).
+                    // Revocation check against the configured CRLs
+                    // (only runs when client_crls is non-empty).
                     if !self.client_crls.is_empty() {
                         // Build [leaf, ...anchors] so the CRL can
                         // find its issuer cert in the chain (same

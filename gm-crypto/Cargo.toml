@@ -34,7 +34,7 @@ pem = "3.0"
 x509-parser = "0.16"
 signature = "2.2"
 pkcs8 = { version = "0.10", features = ["encryption", "pem"] }
-# IDN/Punycode normalization (Phase I): already in the workspace's
+# IDN/Punycode normalization: already in the workspace's
 # transitive dep graph (transitively via reqwest → url). Adding it
 # as a direct dependency costs zero new downloads but gives us
 # UTS#46-compliant IDNA processing for TLCP deployments using
@@ -51,12 +51,13 @@ harness = false
 
 [dev-dependencies.gm-ca]
 path = "../gm-ca"
-# Phase J publish-time relaxation: gm-crypto 0.3.2 needs gm-ca
-# 0.2.x on crates.io to resolve, but gm-ca 0.2.1 is published AFTER
-# gm-crypto (since gm-ca 0.2.1's runtime dep on gm-crypto ^0.3.2
-# requires 0.3.2 to exist). Relaxing to ^0.2 lets us publish against
-# the existing gm-ca 0.2.0; the constraint is tightened back to
-# ^0.2.1 in the next release cycle once 0.2.1 is on crates.io.
+# Publish-time dep relaxation: gm-crypto 0.3.2's dev-dep on
+# `^0.2.1` and gm-ca 0.2.1's runtime dep on gm-crypto `^0.3.2`
+# form a chicken-and-egg cycle. Relaxing to `^0.2` lets
+# gm-crypto 0.3.2 publish first (against the existing gm-ca
+# 0.2.0); gm-ca 0.2.1 follows; gm-tlcp 0.6.5 follows last.
+# Tighten back to `^0.2.1` in the next release cycle, once
+# 0.2.1 is on crates.io.
 version = "0.2"
 default-features = false
 features = ["tlcp-profiles"]

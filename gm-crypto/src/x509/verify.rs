@@ -63,7 +63,7 @@ impl OwnedCert {
     /// Accept a single DER certificate (raw bytes that are NOT a PEM
     /// envelope). Used by callers like gm-tlcp that receive certs
     /// from the TLCP wire-format (which is DER) and need to feed them
-    /// into the verifier. Phase J helper.
+    /// into the verifier.
     pub fn from_der(der: &[u8]) -> Result<Self, CryptoError> {
         // Sanity check: must parse as an X.509 cert. We do a
         // throwaway parse here to surface malformed DER early,
@@ -834,15 +834,12 @@ pub fn verify_cert_crl(
     verify_crl(&cert_serial, cert_issuer, ca_cert, &crl, now)
 }
 
-/// Phase J.1: revocation check helper for `verify_against_anchors`.
-///
-/// `chain` is the validated certificate set (leaf + intermediates +
-/// root — anything that has been validated). `crls` is a list of
-/// CRL DER blobs; each is matched against the cert in `chain` whose
-/// issuer DN equals the CRL's issuer DN.
-///
-/// The CRL's signature is verified against the cert in `chain`
-/// whose subject equals the CRL's issuer DN (the CA that issued the
+/// Revocation check helper for `verify_against_anchors`. Walks the
+/// validated chain (leaf + intermediates + root) and, for each cert
+/// whose issuer DN matches a CRL's issuer DN, checks whether the cert's
+/// serial appears in that CRL's `revokedCertificates` list. The CRL's
+/// signature is verified against the chain cert whose subject equals
+/// the CRL's issuer DN (the CA that issued the
 /// CRL). Revocation check then proceeds for each cert in `chain`
 /// whose issuer matches the CRL's issuer.
 ///
@@ -1072,24 +1069,21 @@ fn verify_crl_signature(crl: &CrlInfo, ca_cert: &X509Certificate<'_>) -> Result<
 fn extract_crl_signature(der: &[u8]) -> Result<&[u8], CryptoError> {
     // CRL structure: SEQUENCE { tbsCertList, signatureAlgorithm, signatureValue }.
     //
-    // Phase J fix: previous hand-rolled walker stopped at the end of the
-    // OUTER CRL content (i.e. past signatureAlgorithm + signatureValue),
-    // not at the end of the TBS — so it reported "CRL signature algorithm
-    // SEQUENCE not found" for CRLs whose outer length used the long form
-    // (e.g. `30 81 c9 ...`). The signature BIT STRING now lives at the
-    // end of the buffer, so the walker would index out of bounds.
+    // A previous hand-rolled walker stopped at the end of the OUTER CRL
+    // content (i.e. past signatureAlgorithm + signatureValue), not at
+    // the end of the TBS — so it reported "CRL signature algorithm
+    // SEQUENCE not found" for CRLs whose outer length used the long
+    // form (e.g. `30 81 c9 ...`). The signature BIT STRING lives at
+    // the end of the buffer, so the walker would index out of bounds.
     //
-    // The robust fix is to reuse the parser's view of the CRL: we already
-    // parsed it (CrlInfo::from_der succeeded), so just borrow
-    // signature_value from the parsed object. We can't return
-    // `crl.signature_value.as_ref()` directly because the returned slice
-    // is tied to the parser's local, not to the caller's `der`; so we
-    // compute the BIT STRING's byte range from the raw DER.
+    // We now reuse the parser's view: parse the CRL via
+    // `CertificateRevocationList::from_der`, borrow its
+    // `signature_value`, then re-locate the BIT STRING's data inside
+    // the original `der` buffer so the returned slice carries the
+    // caller's lifetime.
     let (_, crl) = CertificateRevocationList::from_der(der)
         .map_err(|e| CryptoError::CrlVerificationFailed(format!("CRL parse failed: {:?}", e)))?;
     let sig_value: &[u8] = crl.signature_value.as_ref();
-    // Re-locate the BIT STRING's data in the original `der` buffer so
-    // the returned slice has the caller's lifetime.
     find_bitstring_in_outer(der, sig_value).ok_or_else(|| {
         CryptoError::CrlVerificationFailed(
             "CRL signature BIT STRING data not found in outer DER".into(),
@@ -1452,7 +1446,7 @@ mod tests {
         assert!(!hostname_matches("*.example.com", "example.com"));
     }
 
-    // -- normalize_domain (Phase I, RFC 6125 §6.4.4) tests --
+    // -- normalize_domain (RFC 6125 §6.4.4) tests --
 
     #[test]
     fn normalize_domain_ascii_unchanged() {

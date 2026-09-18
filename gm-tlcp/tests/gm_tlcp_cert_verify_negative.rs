@@ -963,7 +963,7 @@ async fn f10_case_folded_hostname_accepted() {
 }
 
 // ============================================================================
-// Phase J tests — CRL revocation
+// CRL revocation tests (j01–j05)
 // ============================================================================
 
 /// Build a CRL that revokes the server sign cert (and only that),
