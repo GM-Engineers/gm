@@ -51,7 +51,13 @@ harness = false
 
 [dev-dependencies.gm-ca]
 path = "../gm-ca"
-version = "0.2.1"
+# Phase J publish-time relaxation: gm-crypto 0.3.2 needs gm-ca
+# 0.2.x on crates.io to resolve, but gm-ca 0.2.1 is published AFTER
+# gm-crypto (since gm-ca 0.2.1's runtime dep on gm-crypto ^0.3.2
+# requires 0.3.2 to exist). Relaxing to ^0.2 lets us publish against
+# the existing gm-ca 0.2.0; the constraint is tightened back to
+# ^0.2.1 in the next release cycle once 0.2.1 is on crates.io.
+version = "0.2"
 default-features = false
 features = ["tlcp-profiles"]
 
