@@ -461,13 +461,8 @@ pub fn verify_cert_chain_sm2_chain(
     //   - `idx > 0` is either an intermediate or the root cert;
     //     intermediates are by definition CA certs and the root
     //     matches a trust anchor, so always enforce `Ca`.
-    let role_for_idx = |idx: usize| -> Option<CertRole> {
-        if idx == 0 {
-            role
-        } else {
-            Some(CertRole::Ca)
-        }
-    };
+    let role_for_idx =
+        |idx: usize| -> Option<CertRole> { if idx == 0 { role } else { Some(CertRole::Ca) } };
 
     // Verify each link in the chain
     for idx in 0..leaf_chain.len() {
