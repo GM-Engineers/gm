@@ -42,4 +42,16 @@ pub enum CryptoError {
 
     #[error("invalid PKCS#7 padding: expected {expected} padding bytes")]
     InvalidPadding { expected: usize },
+
+    /// X.509 certificate chain validation failed (path building,
+    /// signature verification, expiration, `basicConstraints`, hostname,
+    /// or PEM/DER parse). Phase D-1 of the cert-verification plan
+    /// moves this surface from `gm-tls` so both `gm-tls` and `gm-tlcp`
+    /// can share the same chain-validation implementation.
+    #[error("certificate verification failed: {0}")]
+    CertificateVerificationFailed(String),
+
+    /// CRL signature, issuer, or freshness check failed.
+    #[error("CRL verification failed: {0}")]
+    CrlVerificationFailed(String),
 }

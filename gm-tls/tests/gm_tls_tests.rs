@@ -727,7 +727,8 @@ use time::OffsetDateTime;
 /// Test that verify_cert_chain_sm2_chain rejects empty chain
 #[test]
 fn test_cert_chain_empty_rejection() {
-    let result = gm_tls::gm::verify_cert_chain_sm2_chain(&[], &[], OffsetDateTime::now_utc(), None);
+    let result =
+        gm_tls::gm::verify_cert_chain_sm2_chain(&[], &[], OffsetDateTime::now_utc(), None, None);
     assert!(result.is_err());
 }
 

@@ -9,9 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`CaSigner::key_pair()`** — read-only getter for the CA's
+  underlying `Sm2KeyPair`. Provided as a convenience for test
+  fixtures that need to sign custom-encoded artifacts (e.g. CRLs
+  that bypass the built-in `generate_crl` path). Production code
+  should NOT depend on this getter — use `sign_csr_with_profile`
+  or `generate_crl` instead.
+
 ### Changed
 
+- **`CaSigner::generate_crl`** now produces CRLs that conform to
+  RFC 5280 §5.1 / §5.2.3 (see "Fixed" below). The encoded bytes
+  change; dependents producing invalid CRLs would benefit, while
+  anyone hardcoding the prior (broken) bytes would break.
+
 ### Fixed
+
+- **`CaSigner::generate_crl`: `tbs_version` was doubly-wrapped**
+  (was `a0 05 02 03 02 01 01`). Per RFC 5280 §5.1 the version
+  field in TBSCertList is a PLAIN INTEGER — `02 01 01` for v2.
+- **`CaSigner::generate_crl`: CRL Number extension missing OCTET
+  STRING wrapper.** The extension value is now emitted via
+  `build_extension(CRL_NUM_OID, false, &integer)`, which wraps
+  the INTEGER in the OCTET STRING `extnValue` required by RFC
+  5280 §5.2.3. Both bugs caused the produced CRL to be rejected
+  by `x509-parser` 0.16 with `Eof`, and would have been rejected
+  by any RFC-strict CRL reader.
 
 ## [0.2.0] - 2026-09-11
 

@@ -46,8 +46,11 @@ pub struct GmcaCerts {
     /// DER-encoded root CA cert (for chain walk in
     /// `with_client_certs` and for ad-hoc introspection).
     pub ca_cert_der: Vec<u8>,
-    /// DER-encoded server signing cert (consumed by
-    /// `TlcpAcceptor::with_dual_certs`).
+    /// Server signing cert subject CN (Phase J of these test
+    /// helpers). Needed for CRL issuer DN matching in negative
+    /// tests — the CRL issuer must equal the CA subject.
+    pub ca_subject_cn: String,
+    /// Server signing cert (consumed by `TlcpAcceptor::with_dual_certs`).
     pub server_sign_cert_der: Vec<u8>,
     /// DER-encoded server encryption cert (consumed by
     /// `TlcpAcceptor::with_dual_certs`).
@@ -82,7 +85,21 @@ pub struct GmcaCerts {
 /// so call sites can be swapped in the future without changing their
 /// argument list.
 #[allow(dead_code)] // not used by gmssl_interop target (which uses GmsslCerts instead)
-pub fn generate_gmca_test_certs(_out_dir: &std::path::Path) -> Result<GmcaCerts, String> {
+pub fn generate_gmca_test_certs(out_dir: &std::path::Path) -> Result<GmcaCerts, String> {
+    let (certs, _signer) = generate_gmca_with_signer(out_dir)?;
+    Ok(certs)
+}
+
+/// Phase J: same as [`generate_gmca_test_certs`] but also returns
+/// the [`CaSigner`] so callers can sign CRLs. Existing call sites
+/// keep using the no-signer form (the signer is dropped). The
+/// signer is held by the returned `CaSigner` value, not by the
+/// `GmcaCerts` struct (this avoids any chance of the private key
+/// being inadvertently cloned into library code).
+#[allow(dead_code)]
+pub fn generate_gmca_with_signer(
+    _out_dir: &std::path::Path,
+) -> Result<(GmcaCerts, CaSigner), String> {
     // ---- Root CA (self-signed SM2) ----
     let ca_key = Sm2KeyPair::generate().map_err(|e| format!("CA keygen: {}", e))?;
     let ca_signer = CaSigner::new(ca_key, "gm-tlcp test CA (gmca)");
@@ -92,6 +109,7 @@ pub fn generate_gmca_test_certs(_out_dir: &std::path::Path) -> Result<GmcaCerts,
     let ca_cert_der = pem::parse(ca_pem.as_bytes())
         .map_err(|e| format!("CA PEM parse: {}", e))?
         .into_contents();
+    let ca_subject_cn = "gm-tlcp test CA (gmca)".to_string();
 
     // ---- Server signing key + CSR + cert ----
     let server_sign_key =
@@ -200,18 +218,193 @@ pub fn generate_gmca_test_certs(_out_dir: &std::path::Path) -> Result<GmcaCerts,
         ));
     }
 
-    Ok(GmcaCerts {
-        ca_cert_der,
-        server_sign_cert_der,
-        server_enc_cert_der,
-        server_sign_key_pem,
-        server_enc_key_pem,
-        server_sign_pub_65,
-        client_sign_cert_der,
-        client_enc_cert_der,
-        client_sign_key_pem,
-        client_enc_key_pem,
-    })
+    Ok((
+        GmcaCerts {
+            ca_cert_der,
+            ca_subject_cn,
+            server_sign_cert_der,
+            server_enc_cert_der,
+            server_sign_key_pem,
+            server_enc_key_pem,
+            server_sign_pub_65,
+            client_sign_cert_der,
+            client_enc_cert_der,
+            client_sign_key_pem,
+            client_enc_key_pem,
+        },
+        ca_signer,
+    ))
+}
+
+/// Phase J: sign a CRL with the test CA. Wraps
+/// [`CaSigner::generate_crl`] which after the Phase J audit-fix to
+/// the `tbs_version` encoding (RFC 5280 §5.1 requires plain INTEGER,
+/// not CONTEXT-tagged) produces an x509-parser-parseable CRL. The
+/// `crl_num_ext` now also uses [`build_extension`] so the OCTET STRING
+/// wrapper around the INTEGER is present (x509-parser 0.16 requires
+/// this for the Extension struct).
+///
+/// `revoked_serials_hex` is a list of cert serial numbers as
+/// **uppercase hex strings** (the format `gm_ca::cert::CrlEntry::serial_number`
+/// expects). The CRL's issuer DN is the CA subject CN that
+/// `generate_gmca_test_certs` returned.
+///
+/// The returned CRL has:
+///   - `thisUpdate` = now (UTCTime)
+///   - `nextUpdate` = now + 7 days (UTCTime)
+///   - SM2 signature with GM/T default distid
+///   - CRL Number extension = 1
+#[allow(dead_code)] // only referenced by `gm_tlcp_cert_verify_negative`; lint fires in other test targets
+pub fn generate_test_crl(
+    ca_signer: &CaSigner,
+    revoked_serials_hex: &[String],
+) -> Result<Vec<u8>, String> {
+    use chrono::Utc;
+    use gm_ca::cert::CrlEntry;
+    let entries: Vec<CrlEntry> = revoked_serials_hex
+        .iter()
+        .map(|hex| CrlEntry {
+            serial_number: hex.clone(),
+            revoked_at: Utc::now(),
+            reason: 0, // unspecified
+        })
+        .collect();
+    ca_signer
+        .generate_crl(&entries, 1)
+        .map_err(|e| format!("CaSigner::generate_crl: {}", e))
+}
+
+/// Phase J (j04 fixture): same as [`generate_gmca_with_signer`] but
+/// with a custom CA subject CN. Required by j04, which configures an
+/// "unrelated" CRL whose issuer DN must NOT byte-match the server
+/// hierarchy's CA subject (otherwise `check_revocations` would
+/// mistakenly pair the CRL's issuer with the chain's CA cert and
+/// attempt — and fail — a signature verification).
+#[allow(dead_code)]
+pub fn generate_gmca_with_signer_and_cn(
+    _out_dir: &std::path::Path,
+    ca_cn: &str,
+) -> Result<(GmcaCerts, CaSigner), String> {
+    let ca_key = Sm2KeyPair::generate().map_err(|e| format!("CA keygen: {}", e))?;
+    let ca_signer = CaSigner::new(ca_key, ca_cn);
+    let ca_pem = ca_signer
+        .self_sign_ca(3650, &gm_ca::cert_profile::CertProfile::root_ca())
+        .map_err(|e| format!("CA self_sign_ca: {}", e))?;
+    let ca_cert_der = pem::parse(ca_pem.as_bytes())
+        .map_err(|e| format!("CA PEM parse: {}", e))?
+        .into_contents();
+    let ca_subject_cn = ca_cn.to_string();
+
+    let server_sign_key =
+        Sm2KeyPair::generate().map_err(|e| format!("server sign keygen: {}", e))?;
+    let server_sign_pub_65 = server_sign_key.public_key_bytes_uncompressed();
+    let server_sign_csr_pem = CsrBuilder::new_sm2("server-sign.local", &server_sign_pub_65)
+        .map_err(|e| format!("CsrBuilder server_sign: {}", e))?
+        .build_pem(&server_sign_key)
+        .map_err(|e| format!("server_sign CSR build_pem: {}", e))?;
+    let (_, server_sign_cert_pem) = ca_signer
+        .sign_csr_with_profile(
+            server_sign_csr_pem.as_bytes(),
+            365,
+            &gm_ca::profiles::tlcp::tlcp_server_sign_ecc(),
+        )
+        .map_err(|e| format!("sign server_sign CSR: {}", e))?;
+    let server_sign_cert_der = pem::parse(server_sign_cert_pem.as_bytes())
+        .map_err(|e| format!("server_sign PEM parse: {}", e))?
+        .into_contents();
+    let server_sign_key_pem = server_sign_key
+        .private_key_pem()
+        .map_err(|e| format!("server_sign SEC1 PEM: {}", e))?;
+
+    let server_enc_key = Sm2KeyPair::generate().map_err(|e| format!("server enc keygen: {}", e))?;
+    let server_enc_pub_65 = server_enc_key.public_key_bytes_uncompressed();
+    let server_enc_csr_pem = CsrBuilder::new_sm2("server-enc.local", &server_enc_pub_65)
+        .map_err(|e| format!("CsrBuilder server_enc: {}", e))?
+        .build_pem(&server_enc_key)
+        .map_err(|e| format!("server_enc CSR build_pem: {}", e))?;
+    let (_, server_enc_cert_pem) = ca_signer
+        .sign_csr_with_profile(
+            server_enc_csr_pem.as_bytes(),
+            365,
+            &gm_ca::profiles::tlcp::tlcp_server_enc_ecc(),
+        )
+        .map_err(|e| format!("sign server_enc CSR: {}", e))?;
+    let server_enc_cert_der = pem::parse(server_enc_cert_pem.as_bytes())
+        .map_err(|e| format!("server_enc PEM parse: {}", e))?
+        .into_contents();
+    let server_enc_key_pem = server_enc_key
+        .private_key_pem()
+        .map_err(|e| format!("server_enc SEC1 PEM: {}", e))?;
+
+    let client_sign_key =
+        Sm2KeyPair::generate().map_err(|e| format!("client sign keygen: {}", e))?;
+    let client_sign_pub_65 = client_sign_key.public_key_bytes_uncompressed();
+    let client_sign_csr_pem = CsrBuilder::new_sm2("client-sign.local", &client_sign_pub_65)
+        .map_err(|e| format!("CsrBuilder client_sign: {}", e))?
+        .build_pem(&client_sign_key)
+        .map_err(|e| format!("client_sign CSR build_pem: {}", e))?;
+    let (_, client_sign_cert_pem) = ca_signer
+        .sign_csr_with_profile(
+            client_sign_csr_pem.as_bytes(),
+            365,
+            &gm_ca::profiles::tlcp::tlcp_client_sign_ecc(),
+        )
+        .map_err(|e| format!("sign client_sign CSR: {}", e))?;
+    let client_sign_cert_der = pem::parse(client_sign_cert_pem.as_bytes())
+        .map_err(|e| format!("client_sign PEM parse: {}", e))?
+        .into_contents();
+    let client_sign_key_pem = client_sign_key
+        .private_key_pem()
+        .map_err(|e| format!("client_sign SEC1 PEM: {}", e))?;
+
+    let client_enc_key = Sm2KeyPair::generate().map_err(|e| format!("client enc keygen: {}", e))?;
+    let client_enc_pub_65 = client_enc_key.public_key_bytes_uncompressed();
+    let client_enc_csr_pem = CsrBuilder::new_sm2("client-enc.local", &client_enc_pub_65)
+        .map_err(|e| format!("CsrBuilder client_enc: {}", e))?
+        .build_pem(&client_enc_key)
+        .map_err(|e| format!("client_enc CSR build_pem: {}", e))?;
+    let (_, client_enc_cert_pem) = ca_signer
+        .sign_csr_with_profile(
+            client_enc_csr_pem.as_bytes(),
+            365,
+            &gm_ca::profiles::tlcp::tlcp_client_enc_ecc(),
+        )
+        .map_err(|e| format!("sign client_enc CSR: {}", e))?;
+    let client_enc_cert_der = pem::parse(client_enc_cert_pem.as_bytes())
+        .map_err(|e| format!("client_enc PEM parse: {}", e))?
+        .into_contents();
+    let client_enc_key_pem = client_enc_key
+        .private_key_pem()
+        .map_err(|e| format!("client_enc SEC1 PEM: {}", e))?;
+
+    Ok((
+        GmcaCerts {
+            ca_cert_der,
+            ca_subject_cn,
+            server_sign_cert_der,
+            server_sign_key_pem,
+            server_sign_pub_65,
+            server_enc_cert_der,
+            server_enc_key_pem,
+            client_sign_cert_der,
+            client_sign_key_pem,
+            client_enc_cert_der,
+            client_enc_key_pem,
+        },
+        ca_signer,
+    ))
+}
+
+/// Extract a cert's serial number (uppercase hex) from its DER
+/// encoding. Used by the CRL tests to look up the leaf cert's
+/// serial in the CRL.
+#[allow(dead_code)] // only referenced by `gm_tlcp_cert_verify_negative`; lint fires in other test targets
+pub fn cert_serial_hex(der: &[u8]) -> Result<String, String> {
+    use x509_parser::prelude::FromDer;
+    let (_, cert) = x509_parser::certificate::X509Certificate::from_der(der)
+        .map_err(|e| format!("X509 parse: {:?}", e))?;
+    let bytes = cert.serial.to_bytes_be();
+    Ok(hex::encode_upper(bytes))
 }
 
 /// Default TLCP distid (must match what gm-ca-emitted certs use when

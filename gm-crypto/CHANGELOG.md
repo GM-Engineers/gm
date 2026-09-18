@@ -52,9 +52,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-### Changed
+- **`x509::verify::check_revocations`** — RFC 5280 §5 CRL revocation
+  check helper for `verify_against_anchors`. Walks the validated
+  chain (leaf + intermediates + root) and, for each cert whose
+  issuer matches a CRL's issuer, checks whether the cert's serial
+  appears in that CRL's `revokedCertificates` list. The CRL's
+  signature is verified against the chain cert whose subject equals
+  the CRL's issuer. CRLs with no matching issuer in the chain are
+  silently skipped (operators are expected to provide CRLs that
+  match their configured anchors). Malformed CRLs are also silently
+  skipped (one bad CRL does not invalidate the whole handshake).
+- **`OwnedCert::from_der`** — accept a single DER certificate
+  (raw bytes that are NOT a PEM envelope). Used by callers like
+  `gm-tlcp` that receive certs from the TLCP wire-format (DER).
+- **`OwnedCert::from_pem_or_der`** — convenience that detects
+  PEM-vs-DER by header bytes and dispatches to the matching
+  parser. Useful for unit-test fixtures that sometimes ship as
+  one form, sometimes the other.
 
 ### Fixed
+
+- **`x509::verify::extract_crl_signature`** (private helper used by
+  `verify_crl_signature`) — the hand-rolled DER walker was computing
+  "end of outer CRL content" rather than "end of TBSCertList",
+  which produced the wrong offset whenever the outer CRL SEQUENCE
+  used the long-form length (e.g. `30 81 c9`). Replaced with a
+  call that borrows the BIT STRING's raw slice from the parsed
+  `CertificateRevocationList`, so the signature range is always
+  correct regardless of the outer length encoding.
 
 
 ## [0.3.0] - 2026-09-07

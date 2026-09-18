@@ -1,7 +1,7 @@
 [package]
 rust-version = "1.85"
 name = "gm-crypto"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 authors = ["Eric Zhang"]
 license = "MIT OR Apache-2.0"
@@ -34,6 +34,12 @@ pem = "3.0"
 x509-parser = "0.16"
 signature = "2.2"
 pkcs8 = { version = "0.10", features = ["encryption", "pem"] }
+# IDN/Punycode normalization (Phase I): already in the workspace's
+# transitive dep graph (transitively via reqwest → url). Adding it
+# as a direct dependency costs zero new downloads but gives us
+# UTS#46-compliant IDNA processing for TLCP deployments using
+# Chinese IDN domains like `.cn` / `.中国` / `.政务`.
+idna = "1"
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full"] }
@@ -42,3 +48,14 @@ criterion = { version = "0.5", features = ["html_reports"] }
 [[bench]]
 name = "sm_benchmarks"
 harness = false
+
+[dev-dependencies.gm-ca]
+path = "../gm-ca"
+version = "0.2.1"
+default-features = false
+features = ["tlcp-profiles"]
+
+[dev-dependencies.chrono]
+version = "0.4"
+default-features = false
+features = ["clock"]

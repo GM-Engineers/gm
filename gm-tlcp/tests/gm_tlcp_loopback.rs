@@ -872,3 +872,144 @@ async fn gm_tlcp_ecc_loopback_with_real_keys_gcm() {
 async fn gm_tlcp_ecc_loopback_with_real_keys_cbc() {
     run_ecdhe_or_ecc_loopback([0xE0, 0x13]).await;
 }
+
+// =============================================================================
+// Baseline contract: server accepts ANY client certificate chain when
+// the operator has NOT configured a trust anchor.
+//
+// Phase C of the cert-verification plan freezes the CURRENT behavior
+// (`mod.rs:3495-3519`: "We accept any non-empty chain") into an
+// explicit assertion. This way, when Phase E introduces opt-in
+// `with_client_ca_chain` validation, this test is the canary that
+// tells us we have NOT silently broken the legacy "no PKI" path.
+//
+// The test deliberately uses TWO independent GmcaCerts hierarchies
+// (one for server, one for client) so the two sides have unrelated
+// CA roots. The server must still complete the handshake because
+// `TlcpAcceptor::with_client_ca_chain` does not exist yet (Phase E)
+// and `CertificateVerify` is self-referential (finding T3).
+//
+// Once Phase E adds `with_client_ca_chain`, a SECOND test (Phase F#7)
+// will assert the inverted contract: configured trust anchor +
+// unrelated client cert → handshake FAILS. That pair of tests guards
+// against silent regression in either direction.
+// =============================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gm_tlcp_acceptor_accepts_unrelated_client_cert_without_trust_anchor() {
+    use gm_tlcp::tlcp::*;
+
+    let server_tmp =
+        std::env::temp_dir().join(format!("gm-tlcp-phase-c-server-{}", std::process::id()));
+    let client_tmp =
+        std::env::temp_dir().join(format!("gm-tlcp-phase-c-client-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&server_tmp);
+    let _ = std::fs::remove_dir_all(&client_tmp);
+
+    // Two independent hierarchies → unrelated CA roots. We don't mix
+    // the certs; the client only knows the server's pubkey (pinned
+    // out-of-band via `with_server_sign_key`), not its CA.
+    let server_certs: GmcaCerts =
+        generate_gmca_test_certs(&server_tmp).expect("generate server GmcaCerts");
+    let client_certs: GmcaCerts =
+        generate_gmca_test_certs(&client_tmp).expect("generate client GmcaCerts");
+
+    let suite = [0xE0, 0x51]; // TLS_ECDHE_SM4_GCM_SM3
+
+    // ---- Server side ------------------------------------------------------
+    // Note: NO `with_client_ca_chain` is configured — this is the
+    // legacy path we are freezing as the current behavior contract.
+    let server_sign_kp = Sm2KeyPair::from_private_key_pem(&server_certs.server_sign_key_pem)
+        .expect("server sign SEC1 PEM");
+    let server_enc_kp = Sm2KeyPair::from_private_key_pem(&server_certs.server_enc_key_pem)
+        .expect("server enc SEC1 PEM");
+    let acceptor = TlcpAcceptor::new().with_dual_certs(
+        server_certs.server_sign_cert_der.clone(),
+        server_certs.server_enc_cert_der.clone(),
+        server_sign_kp,
+        server_enc_kp,
+    );
+
+    // ---- Client side ------------------------------------------------------
+    // The connector uses the *client* hierarchy's certs (unrelated to
+    // the server's CA) but pins the *server's* signing pubkey for
+    // SKE verification. That is the same belt-and-suspenders shape
+    // callers already use in production.
+    let connector = TlcpConnector::new()
+        .with_cipher_suites(vec![suite])
+        .with_server_sign_key(
+            server_certs.server_sign_pub_65.clone(),
+            support::gmca_cert_setup::DEFAULT_DISTID.to_string(),
+        )
+        .with_client_certs(
+            vec![
+                client_certs.client_sign_cert_der.clone(),
+                client_certs.client_enc_cert_der.clone(),
+                client_certs.ca_cert_der.clone(),
+            ],
+            client_certs.client_sign_key_pem.clone(),
+            Some(client_certs.client_enc_key_pem.clone()),
+            None,
+        );
+
+    // ---- Run handshake ----------------------------------------------------
+    let (client_io, server_io) = tokio::io::duplex(32768);
+
+    let server_handle = tokio::spawn(async move {
+        acceptor
+            .accept_with_certs(server_io)
+            .await
+            .expect("server: handshake must succeed with no trust anchor configured")
+    });
+    let client_handle = tokio::spawn(async move {
+        connector
+            .connect_with_certs(client_io)
+            .await
+            .expect("client: handshake must succeed with no trust anchor configured")
+    });
+
+    let mut server_stream = tokio::time::timeout(std::time::Duration::from_secs(20), server_handle)
+        .await
+        .expect("server task timed out")
+        .expect("server task panicked");
+    let mut client_stream = tokio::time::timeout(std::time::Duration::from_secs(20), client_handle)
+        .await
+        .expect("client task timed out")
+        .expect("client task panicked");
+
+    // ---- Round-trip sanity (record-layer keys match) -----------------------
+    let msg: &[u8] = b"phase-c-baseline";
+    client_stream.write_all(msg).await.expect("client write");
+    client_stream.flush().await.expect("client flush");
+    let mut buf = vec![0u8; 64];
+    let n = server_stream.read(&mut buf).await.expect("server read");
+    assert_eq!(&buf[..n], msg, "server received wrong bytes");
+
+    // ---- Contract assertion: client_certificates() returns the chain ----
+    // The whole point of the test: after the handshake, the server
+    // must be able to introspect the (untrusted, unrelated) chain
+    // the client presented. Without Phase B's getter this would be
+    // impossible — the handshake state is dropped at stream
+    // construction.
+    let chain = server_stream.client_certificates();
+    assert!(
+        !chain.is_empty(),
+        "server stream must expose the client cert chain (Phase B contract)"
+    );
+    assert_eq!(
+        chain[0], client_certs.client_sign_cert_der,
+        "leaf entry of client chain must equal the sign cert the client sent"
+    );
+    assert_eq!(
+        chain[1], client_certs.client_enc_cert_der,
+        "second entry must equal the enc cert the client sent"
+    );
+
+    // Sanity: a few bytes of round-trip close_notify proves both
+    // sides made it through Finished without errors. We don't
+    // strictly need this, but a regression that breaks the
+    // handshake (e.g. a stray early-exit added by mistake) would
+    // fail to reach this point.
+    drop(client_stream);
+    let _ = server_stream.shutdown().await;
+}

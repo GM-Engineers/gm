@@ -352,7 +352,13 @@ where
         }
         let leaf_chain = OwnedCert::chain_from_pem_concat(&srv_cert.cert_chain_pem)?;
         let trust = OwnedCert::chain_from_pem_concat(ca_pem)?;
-        verify_cert_chain_sm2_chain(&leaf_chain, &trust, OffsetDateTime::now_utc(), domain)?;
+        verify_cert_chain_sm2_chain(
+            &leaf_chain,
+            &trust,
+            OffsetDateTime::now_utc(),
+            domain,
+            Some(gm_crypto::x509::verify::CertRole::TlcServer),
+        )?;
 
         // Check CRL if provided
         if let Some(ref crl) = opts.crl_info {
@@ -597,7 +603,13 @@ where
         }
         let leaf_chain = OwnedCert::chain_from_pem_concat(&cli_cert.cert_chain_pem)?;
         let trust = OwnedCert::chain_from_pem_concat(ca_pem)?;
-        verify_cert_chain_sm2_chain(&leaf_chain, &trust, OffsetDateTime::now_utc(), None)?;
+        verify_cert_chain_sm2_chain(
+            &leaf_chain,
+            &trust,
+            OffsetDateTime::now_utc(),
+            None,
+            Some(gm_crypto::x509::verify::CertRole::TlcClient),
+        )?;
 
         // Check CRL if provided
         if let Some(ref crl) = opts.crl_info {

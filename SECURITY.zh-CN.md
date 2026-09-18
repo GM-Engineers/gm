@@ -108,6 +108,45 @@ let signer = Sm2Signer::new(&keypair)?;
 > shim 的用户参考。当前 TLCP 安全指引见
 > [`gm-tlcp` README](../gm-tlcp/README.md) 及其发布说明。
 
+### TLCP 证书校验（gm-tlcp 0.6.4+）
+
+`gm-tlcp` 历史上仅依赖 `with_server_sign_key` 提供的 SKE 公钥镇接，
+**未**对服务端证书链做任何验证。这是一个审计点出的安全缺口（见
+`process/reviews/2026-09-17-gm-tlcp-cert-verification-findings.md`
+中的 `T1–T8`）。从 `gm-tlcp 0.6.4` 起，三个**选择加入**的构建器
+提供 PKI 能力：
+
+| 方法 | 作用 |
+|------|------|
+| `TlcpConnector::with_server_ca_chain(Vec<Vec<u8>>)` | 验证服务端叶子证书镇定到配置的信任锚 |
+| `TlcpConnector::with_server_name(&str)` | 验证服务端 sign 证书的 SAN/CN |
+| `TlcpAcceptor::with_client_ca_chain(Vec<Vec<u8>>)` | 验证客户端叶子证书镇定到配置的信任锚 |
+
+**默认策略 = 接受 + 警告**。未调用上述任何方法的部署会继承
+0.6.x 的 “无 PKI” 旧行为，但每握手会输出一次 stderr 警告。
+**生产部署必须**至少调用 `with_server_ca_chain`（以及
+`with_server_name`）以封堵这个缺口。
+
+**审计修复后的行为规则**：
+
+- 已设信任锚 + **空**链 → 拒绝。RFC 5246 §7.4.6 的“匿名对端”
+  例外仅适用于无信任锚路径。
+- 主机名检查与锚**独立**：仅设主机名仍能获得 SAN/CN 验证。
+- 服务端未发送签名证书 → 拒绝（我们需要它进行 SKE 镇接、
+  主机名检查、PKI 验证；过去是一个 fail-open 漏洞）。
+
+**已知限制**（审计遗留三项后续工作）：
+
+- **证书链遍历是浅层的**：每条链路都直接对着信任锚集合验证，
+  而不是 RFC 5280 §6 风格的 leaf → intermediate → … → 锚 遍历。
+  需要在 `with_server_ca_chain()` 中提供所有中间 CA。完整的链
+  式遍历计划在后续版本实现。
+- **CRL 检查尚未实现**。依赖上层的 OCSP 或短期轮换策略。
+- **空 `Certificate` 握手指消息 wire-format**：
+  `TlcpConnector::with_client_certs(vec![], ...)` **不会**按
+  RFC 5246 §7.4.6 发送空的 `Certificate` 消息；作为独立后续项目
+  跟踪。
+
 ### 双证书体系
 
 TLCP（GB/T 38636-2020）采用双证书体系：

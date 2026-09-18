@@ -127,6 +127,80 @@ Both certificates must chain to the same trusted CA, and both must be SM2 (OID `
 
 For step-by-step instructions on generating a test PKI with `gmssl sm2keygen` and `gmssl certgen`, see [Certificate Guide](./certificate-howto.en.md).
 
+## Certificate Validation & PKI Policy (0.6.4+)
+
+Starting with `gm-tlcp 0.6.4`, certificate chain validation is **off by default** to preserve 0.6.x wire compatibility, but three **opt-in** builder methods are available:
+
+| Method | Effect |
+|--------|--------|
+| `TlcpConnector::with_server_ca_chain(Vec<Vec<u8>>)` | Configure **trust anchors** for the server's certificate chain. Handshake verifies the server's sign + enc leaf certificates are anchored to one of these (issuer matches one of the anchors and the signature verifies). |
+| `TlcpConnector::with_server_name(&str)` | Configure the expected server hostname. Handshake verifies the server's sign certificate **SAN / CN** equals this string (case-insensitive). |
+| `TlcpAcceptor::with_client_ca_chain(Vec<Vec<u8>>)` | Configure **trust anchors** for the client's certificate chain. Mutual-auth setups require the client to provide a leaf anchored to one of these. |
+
+These settings are **independent**: configuring only hostname (no anchors) still gets hostname validation. Operators who configure only PKI anchors (no hostname) still get PKI validation. The connector and acceptor enforce their own half independently.
+
+### Loading anchors from a PEM bundle
+
+```rust
+// Load from a CA PEM bundle using `pem::iter_from_buffer`
+// (the `pem` crate is a dev-dep of gm-tlcp's test helpers; for
+// production code, pull in `pem = "3"` directly).
+use pem::Pem;
+
+let bundle = std::fs::read("ca-bundle.pem")?;
+let anchors: Vec<Vec<u8>> = Pem::iter_from_buffer(&bundle)
+    .map(|p| p.unwrap().into_contents())
+    .collect();
+
+let connector = TlcpConnector::new()
+    .with_server_sign_key(server_sign_pub_65, distid)
+    .with_server_ca_chain(anchors)
+    .with_server_name("api.example.com");
+```
+
+### Behaviour matrix
+
+| Anchors | Hostname | Cert chain | Hostname check | PKI check | Net |
+|---------|----------|------------|----------------|-----------|-----|
+| unset | unset | any | skipped | skipped | **accept** + warn |
+| unset | set | any | ✓ | — | hostname mismatch → reject |
+| set | unset | any | — | ✓ | chain mismatch → reject |
+| set | set | any | ✓ | ✓ | either mismatch → reject |
+| set | — | **empty** | — | — | **reject** (auth required) |
+| set | — | any leaf | — | ✓ | leaf not in anchor set → reject |
+
+### Default warning
+
+If a handshake completes without any of the above configured and the peer sent a non-empty certificate chain, the library prints a **one-shot** `eprintln!` warning to stderr:
+
+```
+gm-tlcp WARNING: accepted server certificate without validation
+(no trust anchors configured). Call
+TlcpConnector::with_server_ca_chain(anchors) to enable PKI
+enforcement.
+```
+
+### Known limitations
+
+- **Hostname check applies to the sign certificate only**. Encryption certificates typically carry no hostname.
+- **Chain validation** is per-link RFC 5280 §6-style: SM2 signature,
+  validity period, basicConstraints CA:TRUE for intermediate CAs,
+  pathLenConstraint (Phase H), and KeyUsage/ExtendedKeyUsage per
+  role (Phase H). The validator walks the leaf's chain linearly
+  (`leaf → intermediate_1 → … → root`) and tries the root against
+  each configured anchor. Peers MUST send their intermediate CAs;
+  we do not yet build candidate paths from a leaf without
+  intermediates.
+- **Hostname check** implements RFC 6125 §6.4.1 (case-insensitive
+  ASCII equality) + §6.4.3 (single-label wildcard `*.example.com`)
+  + §6.4.4 (IDN/Punycode normalization via UTS #46). Operators can
+  pass `with_server_name("中国.gov.cn")` directly; it is normalized
+  to `xn--fiqs8s.gov.cn` before SAN comparison. SAN/CN entries are
+  always IA5String per RFC 5280 §4.2.1.6 so they pass through
+  unchanged.
+- **CRL checking is not yet implemented** — operators should rely on OCSP at a higher layer or use short-validity rotation.
+- **Empty client chain + configured anchor** → rejected on the server. However, the current `TlcpConnector::with_client_certs(vec![], ...)` does NOT emit an empty `Certificate` handshake message (RFC 5246 §7.4.6 requires one); this wire-format gap is a separate work item.
+
 ## Feature flags
 
 | Feature | Status | Description |

@@ -65,11 +65,19 @@ fuzz_target!(|input: CertFuzzInput| {
         }
 
         if !chain.is_empty() && !trust_anchors.is_empty() {
+            // Phase H audit fix (2026-09-17): fuzz target was missed
+            // when `verify_cert_chain_sm2_chain` was extended with the
+            // `role: Option<CertRole>` parameter. We pass `None`
+            // because the fuzz target does not know the leaf's role
+            // (it accepts arbitrary user-supplied PEM bytes); the
+            // production code paths pass `Some(CertRole::TlsClient)`
+            // / `Some(CertRole::TlsServer)` as appropriate.
             let _ = gm_tls::gm::verify_cert_chain_sm2_chain(
                 &chain,
                 &trust_anchors,
                 now,
                 input.domain.as_deref(),
+                None,
             );
         }
     }

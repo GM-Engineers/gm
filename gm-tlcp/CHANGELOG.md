@@ -7,6 +7,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — opt-in PKI / hostname validation (Phases B/C/D/E/F/G)
+
+Resolves the **8 cert-verification findings** (`T1–T8`) from the
+2026-09-17 review (`process/reviews/2026-09-17-gm-tlcp-cert-verification-findings.md`).
+Phase E was already shipped for the basic API; this release closes
+the loop with stricter policy, missing-API coverage, and tests.
+
+**Surface change** — three new opt-in builder methods:
+
+| Method | Phase | Effect |
+|--------|-------|--------|
+| `TlcpConnector::with_server_ca_chain(Vec<Vec<u8>>)` | E | Verify server sign + enc leaves chain to one of the configured anchors. |
+| `TlcpConnector::with_server_name(&str)` | E | Verify server sign leaf's SAN/CN matches (case-insensitive). **Runs independently of anchors.** |
+| `TlcpAcceptor::with_client_ca_chain(Vec<Vec<u8>>)` | E | Verify client leaves chain to one of the configured anchors. |
+
+Plus `TlcpStream::server_certificates()` /
+`TlcpStream::client_certificates()` getters for out-of-band PKI
+inspection (Phase B).
+
+**Policy**:
+
+- Default = silent accept + one-shot warning. Callers opt into
+  PKI enforcement explicitly.
+- Anchors configured + **empty** chain → REJECT (auth required
+  but not provided). Previously the legacy "anonymous peer"
+  RFC 5246 clause silently disabled validation; this is now
+  reserved for the no-anchor path.
+- Hostname check is independent of anchors — fixing an
+  audit-identified interaction bug.
+- Missing server signing cert → REJECT (we need it for SKE pin
+  + hostname + PKI; was a fail-open hole).
+
+**Cross-crate refactor** (Phases D-1 / D-2): the X.509 chain
+validation logic was lifted out of `gm-tls` into a new
+`gm_crypto::x509::verify` module. The behavior is unchanged for
+existing `gm-tls` users (`gm-tls/src/cert_verify.rs` is now a
+thin shim re-exporting from `gm-crypto`); the new
+`verify_against_anchors(leaf_chain, anchors, now, expected_domain)`
+entry point is what `gm-tlcp` consumes.
+
+**Tests** — new `tests/gm_tlcp_cert_verify_negative.rs` covering
+8 negative cases:
+
+1. Self-signed client cert + configured anchor
+2. Client cert from unrelated CA
+3. Expired client cert
+4. Not-yet-valid client cert
+5. Tampered signature byte
+6. Non-CA intermediate in 2-element chain
+7. *(#[ignore]'d)* Empty client chain + configured anchor (waiting
+   on a separate connector wire-format fix to emit empty
+   Certificate handshake messages)
+8. Server hostname mismatch
+
+#### Known limitations (documented for users)
+
+- **Chain walking is single-path, peer-supplied**: `verify_against_anchors`
+  walks `leaf → intermediate_1 → ... → root` linearly through the
+  peer's chain, and tries the root against each configured anchor.
+  Per-link validation includes SM2 signature, validity period,
+  basicConstraints CA:TRUE, **pathLenConstraint** (Phase H), and
+  **KeyUsage / ExtendedKeyUsage** enforcement per role (Phase H).
+  What is NOT yet supported: building candidate paths from a leaf
+  without intermediates (peers MUST send their intermediate CAs),
+  RFC 5280 §4.2.1.10 nameConstraints, RFC 5280 §5.4.2.1 policyConstraints.
+- **CRL checking is not yet implemented** — separate work item
+  (CRL fetching, caching, signature verification, nextUpdate
+  freshness).
+- The empty-`Certificate` wire-format gap (Phase F #7) is
+  tracked as a separate work item.
+- IDN/Punycode normalization: now supported (Phase I). Operator
+  input is normalized to ASCII/Punycode via UTS #46 + RFC 3492
+  (`idna` crate) before comparison; SAN/CN entries are already
+  IA5String per RFC 5280 §4.2.1.6 so they pass through unchanged.
+  `with_server_name("中国.gov.cn")` now matches a cert whose SAN
+  is `xn--fiqs8s.gov.cn`.
+
+#### Verification
+
+- `cargo +stable fmt --check`: clean
+- `cargo +stable clippy --tests --features tlcp-profiles -- -D warnings`: clean
+- `cargo +stable test --features tlcp-profiles`:
+  - lib: 125 passed
+  - `gm_tlcp_cert_verify_negative`: 12 passed (8 negative + 4 support)
+  - `gm_tlcp_loopback`: 14 passed
+  - `integration_tlcp`: 32 passed (5 ignored)
+  - `gmssl_interop`: 4 passed (7 ignored, env-only)
+  - doctests: 10 passed (3 ignored)
+
 ### Documented — R-14 stale-comment cleanup (Phase 14)
 
 Phase 14 (R-14) is a docs-only cleanup. The post-Phase-13 audit
@@ -72,6 +161,107 @@ markers.
 **Audit tally post-R-14**: 7 Critical resolved, 0 Critical blocked,
 3 Major resolved, 0 Major blocked, 6 Minor resolved, 0 Minor blocked,
 2 Doc resolved, 0 Doc blocked, **1 External-Upstream-Blocker (F4)**.
+
+### Added — RFC 5280 §5 CRL revocation check (Phase J)
+
+Closes the "CRL checking is not yet implemented" entry in the
+Phase B/C/D/E/F/G "Known limitations" block. Each Phase J test
+exercises one branch of the new opt-in revocation policy.
+
+**Surface change** — four new opt-in builder methods + two
+getters:
+
+| Method | Effect |
+|--------|--------|
+| `TlcpConnector::with_server_crls(Vec<Vec<u8>>)` | Verify server sign + enc leaves are not revoked per any CRL in `crls`. |
+| `TlcpConnector::server_crls()` | Read-only access to the configured CRLs. |
+| `TlcpAcceptor::with_client_crls(Vec<Vec<u8>>)` | Verify client leaves are not revoked per any CRL in `crls`. |
+| `TlcpAcceptor::client_crls()` | Read-only access to the configured CRLs. |
+
+**Policy**:
+
+- Default = no CRL checking (opt-in, consistent with Phase E).
+- CRL signature MUST verify against the chain's matching issuer
+  cert. CRLs whose issuer is not present in the chain are silently
+  skipped (no false positives on unrelated-CRL inputs).
+- A CRL is "fresh" iff `thisUpdate ≤ now ≤ nextUpdate` per RFC 5280
+  §5.1.7.
+- A serial-number match in the CRL = rejection of the handshake
+  with `"certificate serial 0x... has been revoked per CRL"`.
+- Operators are responsible for fetching CRLs out-of-band (typically
+  HTTP from the CRL Distribution Points extension URL); we do not
+  perform HTTP fetches internally to keep the implementation
+  deterministic and to avoid network attack surface (SSRF, cache
+  poisoning).
+
+**Tests** — five new tests in
+`tests/gm_tlcp_cert_verify_negative.rs` (now `j01–j05`):
+
+| # | Scenario | Expected outcome |
+|---|----------|------------------|
+| j01 | CRL revokes server sign cert | Handshake rejected with "revoked per CRL" |
+| j02 | CRL does NOT revoke any chain cert | Handshake accepted (positive control) |
+| j03 | No CRL configured | Handshake accepted (no opt-in = no enforcement) |
+| j04 | CRL from an unrelated CA (mismatched issuer DN) | Handshake accepted (silent skip) |
+| j05 | CRL revokes client sign cert | Handshake rejected on acceptor side |
+
+**Audit-fix in `gm-ca::cert::generate_crl`** (caught while wiring
+Phase J tests against x509-parser 0.16). Two RFC 5280 §5.1/§5.2.3
+encoding bugs in the gm-ca CRL generator, both of which produce
+CRLs that x509-parser 0.16 rejects with `Eof`:
+
+1. `tbs_version` was doubly-wrapped
+   (`a0 05 02 03 02 01 01`). Per RFC 5280 §5.1 the version is a
+   PLAIN INTEGER — `02 01 01` for v2.
+2. CRL Number extension was missing the OCTET STRING wrapper
+   around its INTEGER value. Per RFC 5280 §5.2.3, `extnValue`
+   MUST be an OCTET STRING wrapping the inner DER encoding.
+   Replaced with `build_extension(CRL_NUM_OID, false, &integer)`
+   which correctly emits the wrapper.
+
+Both fixes are byte-level correctness improvements, not behavior
+changes — anyone depending on the previous output was depending
+on a broken RFC 5280 §5 encoding.
+
+**Bugfix in `gm-crypto::x509::verify::extract_crl_signature`**
+(caught by the same audit). The hand-rolled DER walker was
+computing "end of outer CRL content" rather than "end of TBS",
+which crashed on the long-form outer length (e.g. `30 81 c9`,
+always emitted by gm-ca's CRL). Replaced with a call that borrows
+the BIT STRING's raw slice from the parsed
+`CertificateRevocationList`.
+
+#### Updated "Known limitations"
+
+The Phase B/C/D/E/F/G "Known limitations" block listed:
+> CRL checking is not yet implemented — separate work item
+> (CRL fetching, caching, signature verification, nextUpdate
+> freshness).
+
+This release closes that line item. CRL **signature verification
+and nextUpdate freshness are checked**; CRL **fetching and caching
+remain operator responsibilities** (no HTTP fetcher in this crate).
+
+#### Cross-crate dependency bumps
+
+- `gm-crypto` 0.3.1 → 0.3.2 (new `check_revocations` API,
+  `OwnedCert::from_der` / `from_pem_or_der` helpers, and
+  `extract_crl_signature` bugfix)
+- `gm-ca` 0.2.0 → 0.2.1 (the `generate_crl` audit-fix above;
+  consumed as a dev-dep by `gm-tlcp` tests)
+
+#### Verification
+
+- `cargo +stable fmt --check`: clean
+- `cargo +stable clippy --tests --features tlcp-profiles -- -D warnings`: clean
+- `cargo +stable test --features tlcp-profiles`:
+  - lib: 125 passed
+  - `gm_tlcp_cert_verify_negative`: 19 passed (8 f0x negative +
+    2 f0x positive + 5 j0x CRL + 4 support)
+  - `gm_tlcp_loopback`: 14 passed
+  - `integration_tlcp`: 32 passed (5 ignored)
+  - `gmssl_interop`: 4 passed (7 ignored, env-only)
+  - doctests: 10 passed (3 ignored)
 
 ## [0.6.4] - 2026-09-11
 

@@ -226,6 +226,21 @@ impl TlcpServerHandshake {
         self.client_certs = chain;
     }
 
+    /// Read-only access to the client certificate chain received during
+    /// the handshake, in leaf-first order.
+    ///
+    /// **Important**: gm-tlcp does NOT verify the contents of this
+    /// chain. By default (without
+    /// `TlcpAcceptor::with_client_ca_chain`)
+    /// the server accepts any non-empty chain. The returned DER bytes
+    /// are provided so the caller can implement their own PKI policy
+    /// (chain building, expiration, hostname, CRL, …) outside the
+    /// library. An empty slice means the client did not present a
+    /// certificate in response to the server's `CertificateRequest`.
+    pub fn client_certs(&self) -> &[Vec<u8>] {
+        &self.client_certs
+    }
+
     /// Complete the key exchange and derive master secret.
     ///
     /// Per GB/T 38636-2020 §6.1, uses the same PRF derivation as the
