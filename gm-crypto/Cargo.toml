@@ -1,7 +1,7 @@
 [package]
 rust-version = "1.85"
 name = "gm-crypto"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 authors = ["Eric Zhang"]
 license = "MIT OR Apache-2.0"
@@ -48,3 +48,14 @@ criterion = { version = "0.5", features = ["html_reports"] }
 [[bench]]
 name = "sm_benchmarks"
 harness = false
+
+[dev-dependencies.gm-ca]
+path = "../gm-ca"
+version = "0.2.1"
+default-features = false
+features = ["tlcp-profiles"]
+
+[dev-dependencies.chrono]
+version = "0.4"
+default-features = false
+features = ["clock"]

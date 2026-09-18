@@ -33,7 +33,10 @@
 #![cfg(feature = "tlcp-profiles")]
 
 mod support;
-use support::gmca_cert_setup::{GmcaCerts, generate_gmca_test_certs};
+use support::gmca_cert_setup::{
+    GmcaCerts, cert_serial_hex, generate_gmca_test_certs, generate_gmca_with_signer,
+    generate_gmca_with_signer_and_cn, generate_test_crl,
+};
 
 use gm_crypto::sm2::{GM_TLS_DEFAULT_ID, Sm2KeyPair, Sm2Signer};
 use gm_der::{
@@ -956,5 +959,337 @@ async fn f10_case_folded_hostname_accepted() {
         "client must accept case-folded hostname match; got server={:?} client={:?}",
         server_res,
         client_res
+    );
+}
+
+// ============================================================================
+// Phase J tests — CRL revocation
+// ============================================================================
+
+/// Build a CRL that revokes the server sign cert (and only that),
+/// signed by the CA in the test hierarchy. Returns the CRL DER bytes
+/// plus the certs struct (which includes the CA cert DER needed to
+/// configure trust anchors).
+fn build_revoking_server_sign_crl(tmp: &std::path::Path) -> (GmcaCerts, Vec<u8>) {
+    let (certs, ca_signer) = generate_gmca_with_signer(tmp).expect("generate hierarchy + signer");
+    let server_sign_serial =
+        cert_serial_hex(&certs.server_sign_cert_der).expect("extract server sign cert serial");
+    let crl_der = generate_test_crl(&ca_signer, &[server_sign_serial])
+        .expect("generate CRL revoking server sign");
+    (certs, crl_der)
+}
+
+/// j01 — a CRL that revokes the server's signing cert causes the
+/// connector to reject the handshake. The CA chain still validates
+/// (cert signatures are valid, cert is within validity), but the
+/// revocation check trips and the handshake fails with a
+/// "certificate ... has been revoked per CRL" message.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn j01_revoked_server_sign_cert_rejected() {
+    let tmp = std::env::temp_dir().join(format!("gm-tlcp-j01-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    let (certs, crl_der) = build_revoking_server_sign_crl(&tmp);
+
+    let server_sign_kp =
+        Sm2KeyPair::from_private_key_pem(&certs.server_sign_key_pem).expect("server sign SEC1 PEM");
+    let server_enc_kp =
+        Sm2KeyPair::from_private_key_pem(&certs.server_enc_key_pem).expect("server enc SEC1 PEM");
+
+    let acceptor = TlcpAcceptor::new().with_dual_certs(
+        certs.server_sign_cert_der.clone(),
+        certs.server_enc_cert_der.clone(),
+        server_sign_kp,
+        server_enc_kp,
+    );
+
+    let connector = TlcpConnector::new()
+        .with_cipher_suites(vec![[0xE0, 0x51]])
+        .with_server_sign_key(
+            certs.server_sign_pub_65.clone(),
+            support::gmca_cert_setup::DEFAULT_DISTID.to_string(),
+        )
+        .with_server_ca_chain(vec![certs.ca_cert_der.clone()])
+        .with_server_name("server-sign.local")
+        // Server sends CertificateRequest because dual-certs are
+        // configured, so we MUST provide a client chain. Use the
+        // same hierarchy (the server has no client CA chain, so
+        // any client cert would technically fail — but here we
+        // want to test the REVOCATION rejection, not PKI. To avoid
+        // noise from a separate PKI failure, give it a working
+        // chain by also configuring the server's client CA chain
+        // via the connector side).
+        .with_client_certs(
+            vec![
+                certs.client_sign_cert_der.clone(),
+                certs.client_enc_cert_der.clone(),
+            ],
+            certs.client_sign_key_pem.clone(),
+            Some(certs.client_enc_key_pem.clone()),
+            None,
+        )
+        .with_server_crls(vec![crl_der]);
+
+    let (server_res, client_res) = attempt_handshake(acceptor, connector).await;
+    let client_msg = format!("{:?}", client_res);
+    let server_msg = format!("{:?}", server_res);
+    assert!(
+        client_res.is_err() || server_res.is_err(),
+        "revoked cert must be rejected; got server={:?} client={:?}",
+        server_msg,
+        client_msg
+    );
+    let combined = format!("{} {}", server_msg, client_msg);
+    assert!(
+        combined.contains("revoked") || combined.contains("CRL"),
+        "rejection must mention CRL/revoked; got: {}",
+        combined
+    );
+}
+
+/// j02 — a CRL that does NOT contain the server sign cert's serial
+/// is accepted (the cert is not revoked per the configured CRL).
+/// This is the positive control for j01: the CRL machinery works
+/// but doesn't false-positive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn j02_unrevoked_server_sign_cert_accepted_with_crl() {
+    let tmp = std::env::temp_dir().join(format!("gm-tlcp-j02-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    let (certs, ca_signer) = generate_gmca_with_signer(&tmp).expect("hierarchy + signer");
+    // Sign a CRL that revokes nothing — empty revocation list.
+    let empty_crl = generate_test_crl(&ca_signer, &[]).expect("generate empty CRL");
+
+    let server_sign_kp =
+        Sm2KeyPair::from_private_key_pem(&certs.server_sign_key_pem).expect("server sign SEC1 PEM");
+    let server_enc_kp =
+        Sm2KeyPair::from_private_key_pem(&certs.server_enc_key_pem).expect("server enc SEC1 PEM");
+
+    let acceptor = TlcpAcceptor::new().with_dual_certs(
+        certs.server_sign_cert_der.clone(),
+        certs.server_enc_cert_der.clone(),
+        server_sign_kp,
+        server_enc_kp,
+    );
+
+    let connector = TlcpConnector::new()
+        .with_cipher_suites(vec![[0xE0, 0x51]])
+        .with_server_sign_key(
+            certs.server_sign_pub_65.clone(),
+            support::gmca_cert_setup::DEFAULT_DISTID.to_string(),
+        )
+        .with_server_ca_chain(vec![certs.ca_cert_der.clone()])
+        .with_server_name("server-sign.local")
+        // Dual-certs server sends CertificateRequest; provide a
+        // valid client chain so the handshake reaches the server's
+        // CRL check on its own sign-cert.
+        .with_client_certs(
+            vec![
+                certs.client_sign_cert_der.clone(),
+                certs.client_enc_cert_der.clone(),
+            ],
+            certs.client_sign_key_pem.clone(),
+            Some(certs.client_enc_key_pem.clone()),
+            None,
+        )
+        .with_server_crls(vec![empty_crl]);
+
+    let (server_res, client_res) = attempt_handshake(acceptor, connector).await;
+    assert!(
+        client_res.is_ok(),
+        "non-revoked cert must be accepted when CRL is configured; \
+         got server={:?} client={:?}",
+        server_res,
+        client_res
+    );
+}
+
+/// j03 — no CRL configured: existing behavior is preserved (a valid
+/// cert is accepted, no CRL machinery runs). This is the
+/// "no opt-in = no enforcement" contract.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn j03_no_crl_unchanged_behavior() {
+    let tmp = std::env::temp_dir().join(format!("gm-tlcp-j03-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    let certs = generate_gmca_test_certs(&tmp).expect("hierarchy");
+
+    let server_sign_kp =
+        Sm2KeyPair::from_private_key_pem(&certs.server_sign_key_pem).expect("server sign SEC1 PEM");
+    let server_enc_kp =
+        Sm2KeyPair::from_private_key_pem(&certs.server_enc_key_pem).expect("server enc SEC1 PEM");
+
+    let acceptor = TlcpAcceptor::new().with_dual_certs(
+        certs.server_sign_cert_der.clone(),
+        certs.server_enc_cert_der.clone(),
+        server_sign_kp,
+        server_enc_kp,
+    );
+
+    let connector = TlcpConnector::new()
+        .with_cipher_suites(vec![[0xE0, 0x51]])
+        .with_server_sign_key(
+            certs.server_sign_pub_65.clone(),
+            support::gmca_cert_setup::DEFAULT_DISTID.to_string(),
+        )
+        .with_server_ca_chain(vec![certs.ca_cert_der.clone()])
+        .with_server_name("server-sign.local")
+        // Dual-certs server sends CertificateRequest; provide a
+        // valid client chain so the handshake reaches the server's
+        // PKI validation step. (No `with_server_crls` call —
+        // j03 specifically tests the "no opt-in = no enforcement"
+        // contract.)
+        .with_client_certs(
+            vec![
+                certs.client_sign_cert_der.clone(),
+                certs.client_enc_cert_der.clone(),
+            ],
+            certs.client_sign_key_pem.clone(),
+            Some(certs.client_enc_key_pem.clone()),
+            None,
+        );
+
+    let (server_res, client_res) = attempt_handshake(acceptor, connector).await;
+    assert!(
+        client_res.is_ok(),
+        "no-CRL path must accept a valid cert; got server={:?} client={:?}",
+        server_res,
+        client_res
+    );
+}
+
+/// j04 — a CRL whose issuer DN does NOT match any cert in the chain
+/// is silently skipped (no error). The chain validates normally and
+/// the handshake succeeds. Documents the contract: CRL is per-CA,
+/// mismatched CRLs do not block the handshake.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn j04_unmatched_crl_silently_ignored() {
+    let tmp = std::env::temp_dir().join(format!("gm-tlcp-j04-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    // One hierarchy for the server (the one actually negotiated).
+    let (certs, _) = generate_gmca_with_signer(&tmp).expect("server hierarchy");
+
+    // A *separate* hierarchy to produce a CRL whose issuer is a
+    // completely different CA. Both hierarchies use the default
+    // "gm-tlcp test CA (gmca)" CN, so to genuinely produce a
+    // mismatched issuer we generate the "other" CA with a
+    // distinct CN. Otherwise `check_revocations` would byte-match
+    // the two CAs' subject DNs and try (and fail) to verify the
+    // unrelated CRL's signature against the chain's CA cert.
+    let tmp2 = std::env::temp_dir().join(format!("gm-tlcp-j04-other-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp2);
+    let (_, other_signer) =
+        generate_gmca_with_signer_and_cn(&tmp2, "j04 unrelated test CA").expect("other hierarchy");
+    let unrelated_crl = generate_test_crl(&other_signer, &[]).expect("generate unrelated CRL");
+
+    let server_sign_kp =
+        Sm2KeyPair::from_private_key_pem(&certs.server_sign_key_pem).expect("server sign SEC1 PEM");
+    let server_enc_kp =
+        Sm2KeyPair::from_private_key_pem(&certs.server_enc_key_pem).expect("server enc SEC1 PEM");
+
+    let acceptor = TlcpAcceptor::new().with_dual_certs(
+        certs.server_sign_cert_der.clone(),
+        certs.server_enc_cert_der.clone(),
+        server_sign_kp,
+        server_enc_kp,
+    );
+
+    let connector = TlcpConnector::new()
+        .with_cipher_suites(vec![[0xE0, 0x51]])
+        .with_server_sign_key(
+            certs.server_sign_pub_65.clone(),
+            support::gmca_cert_setup::DEFAULT_DISTID.to_string(),
+        )
+        .with_server_ca_chain(vec![certs.ca_cert_der.clone()])
+        .with_server_name("server-sign.local")
+        // Dual-certs server sends CertificateRequest; provide a
+        // valid client chain so the handshake reaches the server's
+        // CRL check on its own sign-cert.
+        .with_client_certs(
+            vec![
+                certs.client_sign_cert_der.clone(),
+                certs.client_enc_cert_der.clone(),
+            ],
+            certs.client_sign_key_pem.clone(),
+            Some(certs.client_enc_key_pem.clone()),
+            None,
+        )
+        .with_server_crls(vec![unrelated_crl]);
+
+    let (server_res, client_res) = attempt_handshake(acceptor, connector).await;
+    assert!(
+        client_res.is_ok(),
+        "unmatched CRL must not block the handshake; got server={:?} client={:?}",
+        server_res,
+        client_res
+    );
+}
+
+/// j05 — client-side CRL: a CRL revoking the client sign cert
+/// causes the acceptor to reject the handshake. The
+/// `with_client_crls` API mirrors `with_server_crls` but checks the
+/// chain in the opposite direction.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn j05_revoked_client_sign_cert_rejected() {
+    let tmp = std::env::temp_dir().join(format!("gm-tlcp-j05-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    let (certs, ca_signer) = generate_gmca_with_signer(&tmp).expect("hierarchy + signer");
+    let client_sign_serial =
+        cert_serial_hex(&certs.client_sign_cert_der).expect("extract client sign cert serial");
+    let crl_der = generate_test_crl(&ca_signer, &[client_sign_serial])
+        .expect("generate CRL revoking client sign");
+
+    let server_sign_kp =
+        Sm2KeyPair::from_private_key_pem(&certs.server_sign_key_pem).expect("server sign SEC1 PEM");
+    let server_enc_kp =
+        Sm2KeyPair::from_private_key_pem(&certs.server_enc_key_pem).expect("server enc SEC1 PEM");
+
+    let acceptor = TlcpAcceptor::new()
+        .with_dual_certs(
+            certs.server_sign_cert_der.clone(),
+            certs.server_enc_cert_der.clone(),
+            server_sign_kp,
+            server_enc_kp,
+        )
+        .with_client_ca_chain(vec![certs.ca_cert_der.clone()])
+        .with_client_crls(vec![crl_der]);
+
+    // (j05 doesn't need explicit client key bindings because the CRL
+    // rejection must occur on the server side BEFORE the client
+    // produces a CertificateVerify signature.)
+    let _client_sign_kp =
+        Sm2KeyPair::from_private_key_pem(&certs.client_sign_key_pem).expect("client sign SEC1 PEM");
+    let _client_enc_kp =
+        Sm2KeyPair::from_private_key_pem(&certs.client_enc_key_pem).expect("client enc SEC1 PEM");
+
+    let connector = TlcpConnector::new()
+        .with_cipher_suites(vec![[0xE0, 0x51]])
+        .with_server_sign_key(
+            certs.server_sign_pub_65.clone(),
+            support::gmca_cert_setup::DEFAULT_DISTID.to_string(),
+        )
+        .with_client_certs(
+            vec![
+                certs.client_sign_cert_der.clone(),
+                certs.client_enc_cert_der.clone(),
+            ],
+            certs.client_sign_key_pem.clone(),
+            Some(certs.client_enc_key_pem.clone()),
+            None,
+        );
+
+    let (server_res, client_res) = attempt_handshake(acceptor, connector).await;
+    let combined = format!("{:?} {:?}", server_res, client_res);
+    assert!(
+        server_res.is_err() || client_res.is_err(),
+        "revoked client cert must be rejected; got: {}",
+        combined
+    );
+    assert!(
+        combined.contains("revoked") || combined.contains("CRL"),
+        "rejection must mention CRL/revoked; got: {}",
+        combined
     );
 }

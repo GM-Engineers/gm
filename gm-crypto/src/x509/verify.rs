@@ -60,6 +60,43 @@ impl OwnedCert {
         ))
     }
 
+    /// Accept a single DER certificate (raw bytes that are NOT a PEM
+    /// envelope). Used by callers like gm-tlcp that receive certs
+    /// from the TLCP wire-format (which is DER) and need to feed them
+    /// into the verifier. Phase J helper.
+    pub fn from_der(der: &[u8]) -> Result<Self, CryptoError> {
+        // Sanity check: must parse as an X.509 cert. We do a
+        // throwaway parse here to surface malformed DER early,
+        // rather than letting `as_x509()` fail later.
+        let _ = Self::parse_der(der)?;
+        Ok(Self { der: der.to_vec() })
+    }
+
+    /// Accept either PEM-encoded bytes (with a `-----BEGIN ...-----`
+    /// header) or raw DER bytes. Useful for unit-test fixtures that
+    /// sometimes ship as one form, sometimes the other.
+    pub fn from_pem_or_der(bytes: &[u8]) -> Self {
+        // Detect PEM: ASCII start with `-----BEGIN`.
+        let is_pem = bytes
+            .iter()
+            .take(11)
+            .all(|b| b.is_ascii_graphic() || b.is_ascii_whitespace());
+        let looks_pem = is_pem && bytes.starts_with(b"-----BEGIN");
+        if looks_pem {
+            Self::from_pem(bytes).expect("OwnedCert::from_pem_or_der: PEM parse failed")
+        } else {
+            Self::from_der(bytes).expect("OwnedCert::from_pem_or_der: DER parse failed")
+        }
+    }
+
+    fn parse_der(der: &[u8]) -> Result<X509Certificate<'_>, CryptoError> {
+        X509Certificate::from_der(der)
+            .map_err(|e| {
+                CryptoError::CertificateVerificationFailed(format!("DER parse failed: {:?}", e))
+            })
+            .map(|r| r.1)
+    }
+
     /// Parse a PEM certificate chain (concatenated PEM blocks).
     pub fn chain_from_pem_concat(pem_bytes: &[u8]) -> Result<Vec<Self>, CryptoError> {
         let mut out = Vec::new();
@@ -797,6 +834,83 @@ pub fn verify_cert_crl(
     verify_crl(&cert_serial, cert_issuer, ca_cert, &crl, now)
 }
 
+/// Phase J.1: revocation check helper for `verify_against_anchors`.
+///
+/// `chain` is the validated certificate set (leaf + intermediates +
+/// root — anything that has been validated). `crls` is a list of
+/// CRL DER blobs; each is matched against the cert in `chain` whose
+/// issuer DN equals the CRL's issuer DN.
+///
+/// The CRL's signature is verified against the cert in `chain`
+/// whose subject equals the CRL's issuer DN (the CA that issued the
+/// CRL). Revocation check then proceeds for each cert in `chain`
+/// whose issuer matches the CRL's issuer.
+///
+/// Mismatched CRLs (issuer not present in the chain) are silently
+/// skipped — the operator is expected to provide CRLs that match
+/// their configured anchors. Malformed CRLs are also silently
+/// skipped (one bad CRL does not invalidate the whole handshake).
+pub fn check_revocations(
+    chain: &[OwnedCert],
+    crls: &[Vec<u8>],
+    now: OffsetDateTime,
+) -> Result<(), CryptoError> {
+    if crls.is_empty() {
+        return Ok(());
+    }
+    for crl_der in crls {
+        let crl = match CrlInfo::from_der(crl_der) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let crl_issuer_der = match crl.issuer_der() {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        // Find the CA cert in the chain (the one whose subject
+        // matches the CRL's issuer). This is the cert whose public
+        // key will verify the CRL's signature.
+        let ca_cert = chain.iter().find_map(|c| {
+            if let Ok(parsed) = c.as_x509() {
+                if parsed.subject().as_raw() == crl_issuer_der.as_slice() {
+                    return Some(parsed);
+                }
+            }
+            None
+        });
+        let ca_cert = match ca_cert {
+            Some(c) => c,
+            None => continue, // no matching CA in chain
+        };
+        // Verify CRL signature against this CA
+        verify_crl_signature(&crl, &ca_cert)?;
+        // Check CRL freshness (thisUpdate <= now <= nextUpdate).
+        if !crl.is_valid(now) {
+            return Err(CryptoError::CrlVerificationFailed(
+                "CRL has expired (nextUpdate < now) or not yet valid (lastUpdate > now)".into(),
+            ));
+        }
+        // Check each cert whose issuer matches this CRL's issuer.
+        for cert_owned in chain {
+            let cert = match cert_owned.as_x509() {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            if cert.issuer().as_raw() != crl_issuer_der.as_slice() {
+                continue;
+            }
+            let serial = cert.serial.to_bytes_be();
+            if crl.is_cert_revoked(&serial) {
+                return Err(CryptoError::CrlVerificationFailed(format!(
+                    "certificate serial 0x{} has been revoked per CRL",
+                    hex::encode(&serial)
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Verify SM2 signature on a certificate using the issuer's public key
 fn verify_cert_signature(
     leaf_cert: &X509Certificate<'_>,
@@ -956,106 +1070,76 @@ fn verify_crl_signature(crl: &CrlInfo, ca_cert: &X509Certificate<'_>) -> Result<
 
 /// Extract signature bits from a CRL DER encoding
 fn extract_crl_signature(der: &[u8]) -> Result<&[u8], CryptoError> {
-    // CRL structure: SEQUENCE { tbsCertList, signatureAlgorithm, signatureValue }
-    // We need to find the BIT STRING (signatureValue) which comes after TBSCertList
+    // CRL structure: SEQUENCE { tbsCertList, signatureAlgorithm, signatureValue }.
+    //
+    // Phase J fix: previous hand-rolled walker stopped at the end of the
+    // OUTER CRL content (i.e. past signatureAlgorithm + signatureValue),
+    // not at the end of the TBS — so it reported "CRL signature algorithm
+    // SEQUENCE not found" for CRLs whose outer length used the long form
+    // (e.g. `30 81 c9 ...`). The signature BIT STRING now lives at the
+    // end of the buffer, so the walker would index out of bounds.
+    //
+    // The robust fix is to reuse the parser's view of the CRL: we already
+    // parsed it (CrlInfo::from_der succeeded), so just borrow
+    // signature_value from the parsed object. We can't return
+    // `crl.signature_value.as_ref()` directly because the returned slice
+    // is tied to the parser's local, not to the caller's `der`; so we
+    // compute the BIT STRING's byte range from the raw DER.
+    let (_, crl) = CertificateRevocationList::from_der(der)
+        .map_err(|e| CryptoError::CrlVerificationFailed(format!("CRL parse failed: {:?}", e)))?;
+    let sig_value: &[u8] = crl.signature_value.as_ref();
+    // Re-locate the BIT STRING's data in the original `der` buffer so
+    // the returned slice has the caller's lifetime.
+    find_bitstring_in_outer(der, sig_value).ok_or_else(|| {
+        CryptoError::CrlVerificationFailed(
+            "CRL signature BIT STRING data not found in outer DER".into(),
+        )
+    })
+}
 
-    if der.len() < 8 {
-        return Err(CryptoError::CrlVerificationFailed(
-            "CRL DER too short".into(),
-        ));
-    }
-
-    if der[0] != 0x30 {
-        return Err(CryptoError::CrlVerificationFailed(
-            "invalid CRL: expected SEQUENCE".into(),
-        ));
-    }
-
-    // Parse outer SEQUENCE to find where TBSCertList ends
-    let mut pos = 1;
-    let first_len_byte = der[pos];
-    let tbs_end = if first_len_byte < 0x80 {
-        pos += 1;
-        let content_len = first_len_byte as usize;
-        pos + content_len
-    } else {
-        let num_len_bytes = (first_len_byte & 0x7F) as usize;
-        pos += 1;
-        let mut content_len = 0usize;
-        for i in 0..num_len_bytes {
-            content_len = (content_len << 8) | (der[pos + i] as usize);
+/// Locate the byte range of `target` (the signature BIT STRING's content)
+/// inside `der`. The BIT STRING content is preceded by a 1-byte
+/// `unused_bits` count, so the actual signature starts 1 byte after the
+/// tag+length header. We scan for the BIT STRING tag (0x03), skip its
+/// length, then look for the `unused_bits` byte followed by `target`.
+fn find_bitstring_in_outer<'a>(der: &'a [u8], target: &[u8]) -> Option<&'a [u8]> {
+    // Walk the outermost CRL SEQUENCE to find the LAST BIT STRING
+    // (the signatureValue BIT STRING — there is exactly one after the
+    // TBSCertList's optional extensions BIT STRING, but the extensions
+    // BIT STRING is wrapped in CONTEXT[0] (0xa0) so a tag of 0x03 alone
+    // uniquely identifies the signatureValue).
+    let mut pos = 0;
+    while pos < der.len() {
+        if der[pos] == 0x03 && pos + 1 < der.len() {
+            // parse length
+            let len_byte = der[pos + 1];
+            let (data_start, sig_len) = if len_byte < 0x80 {
+                (pos + 2, len_byte as usize)
+            } else {
+                let n = (len_byte & 0x7F) as usize;
+                if pos + 2 + n > der.len() {
+                    pos += 1;
+                    continue;
+                }
+                let mut len = 0usize;
+                for i in 0..n {
+                    len = (len << 8) | (der[pos + 2 + i] as usize);
+                }
+                (pos + 2 + n, len)
+            };
+            // BIT STRING content: 1 byte unused_bits + sig_len bytes
+            if sig_len >= 1 && data_start < der.len() && data_start + sig_len <= der.len() {
+                let content = &der[data_start + 1..data_start + sig_len];
+                if content == target {
+                    return Some(content);
+                }
+            }
+            pos = data_start + sig_len;
+        } else {
+            pos += 1;
         }
-        pos += num_len_bytes;
-        pos + content_len
-    };
-
-    // After TBSCertList comes signatureAlgorithm (SEQUENCE) then signatureValue (BIT STRING)
-    // Parse the AlgorithmIdentifier SEQUENCE to skip it properly
-    if tbs_end >= der.len() || der[tbs_end] != 0x30 {
-        return Err(CryptoError::CrlVerificationFailed(
-            "CRL signature algorithm SEQUENCE not found".into(),
-        ));
     }
-
-    // Skip the AlgorithmIdentifier SEQUENCE
-    let mut alg_pos = tbs_end + 1;
-    let alg_len_byte = der[alg_pos];
-    let _alg_len = if alg_len_byte < 0x80 {
-        alg_pos += 1;
-        alg_len_byte as usize
-    } else {
-        let num_len_bytes = (alg_len_byte & 0x7F) as usize;
-        alg_pos += 1;
-        let mut alg_len = 0usize;
-        for i in 0..num_len_bytes {
-            alg_len = (alg_len << 8) | (der[alg_pos + i] as usize);
-        }
-        alg_pos += num_len_bytes;
-        alg_len
-    };
-
-    // Now we should be at the signature BIT STRING
-    let mut sig_pos = alg_pos;
-    if sig_pos >= der.len() || der[sig_pos] != 0x03 {
-        return Err(CryptoError::CrlVerificationFailed(
-            "CRL signature BIT STRING not found".into(),
-        ));
-    }
-
-    // Skip BIT STRING tag and length
-    sig_pos += 1;
-    let sig_len_byte = der[sig_pos];
-    let sig_content_start = if sig_len_byte < 0x80 {
-        sig_pos += 1;
-        sig_pos + (sig_len_byte as usize)
-    } else {
-        let num_len_bytes = (sig_len_byte & 0x7F) as usize;
-        sig_pos += 1;
-        let mut sig_len = 0usize;
-        for i in 0..num_len_bytes {
-            sig_len = (sig_len << 8) | (der[sig_pos + i] as usize);
-        }
-        sig_pos += num_len_bytes;
-        sig_pos + sig_len
-    };
-
-    // BIT STRING content starts with unused bits count (usually 0), then actual signature
-    if sig_content_start >= der.len() {
-        return Err(CryptoError::CrlVerificationFailed(
-            "CRL signature content out of bounds".into(),
-        ));
-    }
-
-    let _unused_bits = der[sig_content_start];
-    let sig_start = sig_content_start + 1;
-
-    if sig_start >= der.len() {
-        return Err(CryptoError::CrlVerificationFailed(
-            "CRL signature data out of bounds".into(),
-        ));
-    }
-
-    Ok(&der[sig_start..])
+    None
 }
 
 // ============== TBS Extraction Helpers ==============

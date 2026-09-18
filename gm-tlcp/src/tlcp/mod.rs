@@ -183,6 +183,7 @@ use crate::metrics;
 use crate::record::next_nonce;
 use gm_crypto::sm3::Sm3Hmac;
 use gm_crypto::sm4::{SM4_BLOCK_SIZE, SM4_GCM_NONCE_LENGTH, Sm4Cipher};
+use gm_crypto::x509::verify::OwnedCert;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -1510,6 +1511,16 @@ pub struct TlcpConnector {
     /// hostname check — encryption certs do not typically carry a
     /// hostname.
     server_name: Option<String>,
+    /// Phase J: optional CRLs (raw DER bytes) for revocation checks.
+    /// Each entry is one CRL. The validator matches each cert in
+    /// the chain against the CRL whose issuer DN equals the cert's
+    /// issuer. CRL signature verification uses the matching issuer
+    /// cert from the chain (the cert whose subject equals the CRL's
+    /// issuer). Operators are responsible for fetching CRLs
+    /// out-of-band (e.g. via HTTP GET on the CRL Distribution
+    /// Points extension URL); we do not perform HTTP fetches
+    /// internally.
+    server_crls: Vec<Vec<u8>>,
 }
 impl Default for TlcpConnector {
     fn default() -> Self {
@@ -1552,6 +1563,7 @@ impl TlcpConnector {
             rsa_server_pub: None,
             server_ca_anchors: None,
             server_name: None,
+            server_crls: Vec::new(),
         }
     }
     /// Create a connector with a shared session cache for resumption.
@@ -1887,6 +1899,39 @@ impl TlcpConnector {
         self.server_name.as_deref()
     }
 
+    /// Configure CRLs (raw DER bytes) for revocation checks against
+    /// the server's certificate chain (Phase J).
+    ///
+    /// Each entry in `crls` is one CRL. The validator matches each
+    /// cert in the chain against the CRL whose issuer DN equals the
+    /// cert's issuer; the CRL's signature is verified against the
+    /// matching issuer cert from the chain. CAs in the chain that
+    /// have no corresponding CRL are NOT checked (silent skip —
+    /// consistent with the opt-in nature of all Phase E/J policy:
+    /// absence = no enforcement).
+    ///
+    /// Operators are responsible for fetching CRLs out-of-band
+    /// (typically via HTTP GET on the CRL Distribution Points
+    /// extension URL). We do not perform HTTP fetches internally to
+    /// keep the implementation deterministic and to avoid introducing
+    /// network-side attack surface (SSRF, cache poisoning).
+    ///
+    /// Empty `crls` (the default) disables revocation checking.
+    /// Adding CRLs without configuring trust anchors via
+    /// [`with_server_ca_chain`](Self::with_server_ca_chain) is
+    /// permitted but the CRL signature still must verify against the
+    /// chain's issuer cert — so without anchors we cannot detect
+    /// an untrusted issuer. In practice configure both.
+    pub fn with_server_crls(mut self, crls: Vec<Vec<u8>>) -> Self {
+        self.server_crls = crls;
+        self
+    }
+
+    /// Read-only access to the configured CRLs (raw DER bytes).
+    pub fn server_crls(&self) -> &[Vec<u8>] {
+        &self.server_crls
+    }
+
     pub async fn connect_with_certs<S>(&self, transport: S) -> Result<TlcpStream<S>, TlcpError>
     where
         S: AsyncRead + AsyncWrite + Unpin,
@@ -2017,6 +2062,34 @@ impl TlcpConnector {
                     e
                 ))
             })?;
+            // Phase J: revocation check against the configured CRLs.
+            // Only runs when CRLs are configured (server_crls non-empty).
+            // The sign cert + its chain are checked; the enc cert chain
+            // is checked separately below. CRL signatures verify against
+            // the matching issuer cert in the chain.
+            if !self.server_crls.is_empty() {
+                // The CRL signature must verify against the CA
+                // cert (the cert whose subject equals the CRL's
+                // issuer DN). The leaf alone doesn't include the
+                // CA, so we build a 2-element chain [leaf, ...anchors]
+                // for the revocation check.
+                let mut sign_chain_for_crl = Vec::with_capacity(1 + anchors.len());
+                sign_chain_for_crl.push(OwnedCert::from_pem_or_der(&cert_pair.sign_cert));
+                for a in anchors {
+                    sign_chain_for_crl.push(OwnedCert::from_pem_or_der(a));
+                }
+                gm_crypto::x509::verify::check_revocations(
+                    &sign_chain_for_crl,
+                    &self.server_crls,
+                    now,
+                )
+                .map_err(|e| {
+                    TlcpError::HandshakeFailed(format!(
+                        "server signing certificate revocation check failed: {}",
+                        e
+                    ))
+                })?;
+            }
             // Enc leaf (only for dual-cert layouts; RSA suites leave
             // `enc_cert` empty per `TlcpCertPair::is_single_cert`).
             // We pass role=None for the enc cert because the
@@ -2040,6 +2113,28 @@ impl TlcpConnector {
                         e
                     ))
                 })?;
+                // Phase J: revocation check for the enc cert (if CRLs configured).
+                if !self.server_crls.is_empty() {
+                    // Build [enc_leaf, ...anchors] so the CRL can
+                    // find its issuer cert in the chain. (Same
+                    // logic as the sign-cert path above.)
+                    let mut enc_chain_for_crl = Vec::with_capacity(1 + anchors.len());
+                    enc_chain_for_crl.push(OwnedCert::from_pem_or_der(&cert_pair.enc_cert));
+                    for a in anchors {
+                        enc_chain_for_crl.push(OwnedCert::from_pem_or_der(a));
+                    }
+                    gm_crypto::x509::verify::check_revocations(
+                        &enc_chain_for_crl,
+                        &self.server_crls,
+                        now,
+                    )
+                    .map_err(|e| {
+                        TlcpError::HandshakeFailed(format!(
+                            "server encryption certificate revocation check failed: {}",
+                            e
+                        ))
+                    })?;
+                }
             }
         } else {
             // Legacy path: no anchors; hostname check (if any) was
@@ -3200,6 +3295,11 @@ pub struct TlcpAcceptor {
     /// Cert chains that fail validation cause the handshake to
     /// fail with a clear `CertificateVerificationFailed` error.
     client_ca_anchors: Option<Vec<Vec<u8>>>,
+    /// Phase J: optional CRLs (raw DER bytes) for revocation checks
+    /// against the client's certificate chain. Each entry is one CRL.
+    /// Matched against certs in the chain by issuer DN; CRL signature
+    /// verified against the matching issuer cert in the chain.
+    client_crls: Vec<Vec<u8>>,
 }
 impl Default for TlcpAcceptor {
     fn default() -> Self {
@@ -3227,6 +3327,7 @@ impl TlcpAcceptor {
             rsa_decryptor: None,
             rsa_single_cert_mode: false,
             client_ca_anchors: None,
+            client_crls: Vec::new(),
         }
     }
     /// Create an acceptor with a shared session cache for resumption.
@@ -3415,6 +3516,24 @@ impl TlcpAcceptor {
     /// tests.
     pub fn client_ca_anchors(&self) -> Option<&[Vec<u8>]> {
         self.client_ca_anchors.as_deref()
+    }
+
+    /// Configure CRLs (raw DER bytes) for revocation checks against
+    /// the client's certificate chain (Phase J).
+    ///
+    /// Same semantics as [`TlcpConnector::with_server_crls`]: each
+    /// entry is one CRL; matched by issuer DN; signature verified
+    /// against the matching issuer cert in the chain. Operators are
+    /// responsible for fetching CRLs out-of-band; we do not perform
+    /// HTTP fetches internally.
+    pub fn with_client_crls(mut self, crls: Vec<Vec<u8>>) -> Self {
+        self.client_crls = crls;
+        self
+    }
+
+    /// Read-only access to the configured client-side CRLs.
+    pub fn client_crls(&self) -> &[Vec<u8>] {
+        &self.client_crls
     }
 
     /// Accept a TLCP client connection over the given transport.
@@ -3968,6 +4087,31 @@ impl TlcpAcceptor {
                             idx, e
                         ))
                     })?;
+                    // Phase J: revocation check against the configured
+                    // CRLs (only runs when client_crls is non-empty).
+                    if !self.client_crls.is_empty() {
+                        // Build [leaf, ...anchors] so the CRL can
+                        // find its issuer cert in the chain (same
+                        // approach as the connector's server-side
+                        // CRL check).
+                        let mut chain_for_crl = Vec::with_capacity(1 + anchors.len());
+                        chain_for_crl.push(OwnedCert::from_pem_or_der(leaf_der));
+                        for a in anchors {
+                            chain_for_crl.push(OwnedCert::from_pem_or_der(a));
+                        }
+                        gm_crypto::x509::verify::check_revocations(
+                            &chain_for_crl,
+                            &self.client_crls,
+                            now,
+                        )
+                        .map_err(|e| {
+                            TlcpError::HandshakeFailed(format!(
+                                "client cert chain entry {} revocation \
+                                 check failed: {}",
+                                idx, e
+                            ))
+                        })?;
+                    }
                 }
             } else if !client_certs.is_empty() {
                 // Legacy path: any non-empty chain is accepted.

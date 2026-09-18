@@ -1,7 +1,7 @@
 [package]
 authors = ["Eric Zhang"]
 name = "gm-tlcp"
-version = "0.6.4"
+version = "0.6.5"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "TLCP (Transport Layer Cryptographic Protocol, GB/T 38636-2020) core library in pure Rust with SM2/SM3/SM4 support"
@@ -45,7 +45,7 @@ exclude = [
 
 [dependencies]
 # 国密算法原语（SM2/SM3/SM4/SM9）
-gm-crypto = { path = "../gm-crypto", version = "0.3" }
+gm-crypto = { path = "../gm-crypto", version = "0.3.2" }
 gm-sm9-rs = { path = "../gm-sm9-rs", version = "0.1", default-features = false, features = ["pure-rust"] }
 
 # Phase E: `time` is required by `gm_crypto::x509::verify::verify_against_anchors`
@@ -186,7 +186,7 @@ hex = "0.4"
 # We do NOT enable the `rsa` feature here — the RSA in-process tests
 # use a dummy 100-byte cert blob and a locally-generated
 # `RsaKeyPair::generate(2048)` (no cert issuance needed).
-gm-ca = { path = "../gm-ca", version = "0.2", default-features = false, features = ["tlcp-profiles"] }
+gm-ca = { path = "../gm-ca", version = "0.2.1", default-features = false, features = ["tlcp-profiles"] }
 
 # Phase 12: `pem::parse` is used by `gmca_cert_setup` to extract DER
 # from PEM-encoded certs returned by `gm_ca::CaSigner`. It's a
@@ -199,6 +199,15 @@ pem = "3"
 # `gm-crypto` has no `RsaCsrBuilder`). It's a transitive dependency
 # of `gm-ca` and `gm-crypto` but integration tests need it directly.
 gm-der = { path = "../gm-der", version = "0.1" }
+
+# Phase J: CRL test fixtures. `gm-ca`'s `CaSigner::generate_crl`
+# takes `chrono::DateTime<Utc>` (gm-ca is an open-source external
+# dep so we pin the version gm-ca uses).
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# `gm-crypto` exposes x509-parser 0.16 transitively but we need it
+# directly in `gmca_cert_setup` to extract the cert serial number
+# for CRL entry construction.
+x509-parser = "0.16"
 
 # 注：以下依赖**不**进本 crate（避免污染 TLCP 边界 / 未直接使用）：
 #   - metrics/audit：emit 端直接用 tracing；落库/告警由应用层负责

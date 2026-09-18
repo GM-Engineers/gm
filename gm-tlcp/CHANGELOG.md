@@ -162,6 +162,107 @@ markers.
 3 Major resolved, 0 Major blocked, 6 Minor resolved, 0 Minor blocked,
 2 Doc resolved, 0 Doc blocked, **1 External-Upstream-Blocker (F4)**.
 
+### Added — RFC 5280 §5 CRL revocation check (Phase J)
+
+Closes the "CRL checking is not yet implemented" entry in the
+Phase B/C/D/E/F/G "Known limitations" block. Each Phase J test
+exercises one branch of the new opt-in revocation policy.
+
+**Surface change** — four new opt-in builder methods + two
+getters:
+
+| Method | Effect |
+|--------|--------|
+| `TlcpConnector::with_server_crls(Vec<Vec<u8>>)` | Verify server sign + enc leaves are not revoked per any CRL in `crls`. |
+| `TlcpConnector::server_crls()` | Read-only access to the configured CRLs. |
+| `TlcpAcceptor::with_client_crls(Vec<Vec<u8>>)` | Verify client leaves are not revoked per any CRL in `crls`. |
+| `TlcpAcceptor::client_crls()` | Read-only access to the configured CRLs. |
+
+**Policy**:
+
+- Default = no CRL checking (opt-in, consistent with Phase E).
+- CRL signature MUST verify against the chain's matching issuer
+  cert. CRLs whose issuer is not present in the chain are silently
+  skipped (no false positives on unrelated-CRL inputs).
+- A CRL is "fresh" iff `thisUpdate ≤ now ≤ nextUpdate` per RFC 5280
+  §5.1.7.
+- A serial-number match in the CRL = rejection of the handshake
+  with `"certificate serial 0x... has been revoked per CRL"`.
+- Operators are responsible for fetching CRLs out-of-band (typically
+  HTTP from the CRL Distribution Points extension URL); we do not
+  perform HTTP fetches internally to keep the implementation
+  deterministic and to avoid network attack surface (SSRF, cache
+  poisoning).
+
+**Tests** — five new tests in
+`tests/gm_tlcp_cert_verify_negative.rs` (now `j01–j05`):
+
+| # | Scenario | Expected outcome |
+|---|----------|------------------|
+| j01 | CRL revokes server sign cert | Handshake rejected with "revoked per CRL" |
+| j02 | CRL does NOT revoke any chain cert | Handshake accepted (positive control) |
+| j03 | No CRL configured | Handshake accepted (no opt-in = no enforcement) |
+| j04 | CRL from an unrelated CA (mismatched issuer DN) | Handshake accepted (silent skip) |
+| j05 | CRL revokes client sign cert | Handshake rejected on acceptor side |
+
+**Audit-fix in `gm-ca::cert::generate_crl`** (caught while wiring
+Phase J tests against x509-parser 0.16). Two RFC 5280 §5.1/§5.2.3
+encoding bugs in the gm-ca CRL generator, both of which produce
+CRLs that x509-parser 0.16 rejects with `Eof`:
+
+1. `tbs_version` was doubly-wrapped
+   (`a0 05 02 03 02 01 01`). Per RFC 5280 §5.1 the version is a
+   PLAIN INTEGER — `02 01 01` for v2.
+2. CRL Number extension was missing the OCTET STRING wrapper
+   around its INTEGER value. Per RFC 5280 §5.2.3, `extnValue`
+   MUST be an OCTET STRING wrapping the inner DER encoding.
+   Replaced with `build_extension(CRL_NUM_OID, false, &integer)`
+   which correctly emits the wrapper.
+
+Both fixes are byte-level correctness improvements, not behavior
+changes — anyone depending on the previous output was depending
+on a broken RFC 5280 §5 encoding.
+
+**Bugfix in `gm-crypto::x509::verify::extract_crl_signature`**
+(caught by the same audit). The hand-rolled DER walker was
+computing "end of outer CRL content" rather than "end of TBS",
+which crashed on the long-form outer length (e.g. `30 81 c9`,
+always emitted by gm-ca's CRL). Replaced with a call that borrows
+the BIT STRING's raw slice from the parsed
+`CertificateRevocationList`.
+
+#### Updated "Known limitations"
+
+The Phase B/C/D/E/F/G "Known limitations" block listed:
+> CRL checking is not yet implemented — separate work item
+> (CRL fetching, caching, signature verification, nextUpdate
+> freshness).
+
+This release closes that line item. CRL **signature verification
+and nextUpdate freshness are checked**; CRL **fetching and caching
+remain operator responsibilities** (no HTTP fetcher in this crate).
+
+#### Cross-crate dependency bumps
+
+- `gm-crypto` 0.3.1 → 0.3.2 (new `check_revocations` API,
+  `OwnedCert::from_der` / `from_pem_or_der` helpers, and
+  `extract_crl_signature` bugfix)
+- `gm-ca` 0.2.0 → 0.2.1 (the `generate_crl` audit-fix above;
+  consumed as a dev-dep by `gm-tlcp` tests)
+
+#### Verification
+
+- `cargo +stable fmt --check`: clean
+- `cargo +stable clippy --tests --features tlcp-profiles -- -D warnings`: clean
+- `cargo +stable test --features tlcp-profiles`:
+  - lib: 125 passed
+  - `gm_tlcp_cert_verify_negative`: 19 passed (8 f0x negative +
+    2 f0x positive + 5 j0x CRL + 4 support)
+  - `gm_tlcp_loopback`: 14 passed
+  - `integration_tlcp`: 32 passed (5 ignored)
+  - `gmssl_interop`: 4 passed (7 ignored, env-only)
+  - doctests: 10 passed (3 ignored)
+
 ## [0.6.4] - 2026-09-11
 
 ### Documented — R-13 test-quality hardening (Phase 13)
