@@ -657,10 +657,9 @@ mod tests {
         // KU: keyCertSign | cRLSign (same bit positions as SM2)
         let ku = find_ext(&cert, KEY_USAGE_OID).expect("KU present");
         assert!(ku.critical);
-        // The KU extnValue is now a BIT STRING TLV (tag 0x03, length,
-        // unused-bits byte, flags). Assert via the parsed extension
-        // rather than raw byte positions so the test stays valid if
-        // the BIT STRING header bytes change in a future fix.
+        // KU extnValue is a BIT STRING TLV (tag 0x03, length, unused-bits
+        // byte, flags). Assert via the parsed extension so the test
+        // stays valid against any future BIT STRING header layout.
         match ku.parsed_extension() {
             ParsedExtension::KeyUsage(ku_inner) => {
                 assert!(
@@ -757,9 +756,9 @@ mod tests {
         // KU: digitalSignature(0) | keyEncipherment(2) = 0xA0
         let ku = find_ext(&cert, KEY_USAGE_OID).expect("KU present");
         assert!(ku.critical);
-        // Use the parsed KeyUsage rather than ku.value[1] — the latter
-        // used to be the flags byte before the BIT STRING wrapper fix
-        // and is now the BIT STRING length byte.
+        // KU extnValue is a BIT STRING TLV; use the parsed KeyUsage
+        // rather than raw byte positions so the test stays valid
+        // against any future BIT STRING header layout.
         match ku.parsed_extension() {
             ParsedExtension::KeyUsage(ku_inner) => {
                 assert!(

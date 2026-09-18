@@ -1082,18 +1082,9 @@ mod tests {
         );
     }
 
-    /// Regression test for the SM2 OID byte encoding bug fixed at
-    /// the cert.rs level.
-    ///
-    /// Before the fix, the byte sequences claimed to encode
-    /// `1.2.156.10197.1.501` (sm3WithSM2) actually decoded to a
-    /// different OID (`1.2.26620389.106.2.1.*`) because the base-128
-    /// sub-component encoding used non-canonical continuation bytes
-    /// for the 156 / 10197 arcs. As a result, openssl rejected the
-    /// cert with "BAD OBJECT".
-    ///
-    /// This test asserts the byte sequences are the canonical DER
-    /// encoding of the standard GM/T OIDs:
+    /// Pins the canonical DER base-128 encoding of the standard GM/T OIDs
+    /// emitted in `signatureAlgorithm`, `SubjectPublicKeyInfo`, and the
+    /// CRL Number extension:
     ///   - 1.2.156.10197.1.501 (sm3WithSM2 signature)
     ///   - 1.2.156.10197.1.301 (SM2 public key)
     ///   - 1.2.156.10197.1.106 (CRL Number extension)
@@ -1103,12 +1094,13 @@ mod tests {
     ///   - 501 (X=sig)    → 0x83 0x75     (501 = 3*128 + 117)
     ///   - 301 (X=pubkey) → 0x82 0x2D     (301 = 2*128 + 45)
     ///   - 106 (X=crlnum) → 0x6A          (single byte, <128)
+    ///
+    /// The byte sequences are also round-trip decoded to the documented
+    /// OID strings; both directions must agree.
     #[test]
     fn sm2_oid_byte_sequences_match_gm_t_standard() {
         // Reference byte sequences are computed from the OID strings
-        // via standard DER base-128 encoding. If any of these constants
-        // is changed, verify the new bytes still decode to the
-        // documented OID — openssl will reject the cert otherwise.
+        // via standard DER base-128 encoding.
         assert_eq!(
             SM2_SIG_OID,
             &[0x2A, 0x81, 0x1C, 0xCF, 0x55, 0x01, 0x83, 0x75],
