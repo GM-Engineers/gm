@@ -7,11 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Test-only: stale comment in `gm_tlcp_loopback.rs`**
+  (`gm_tlcp_acceptor_accepts_unrelated_client_cert_without_trust_anchor`)
+  referred to `with_client_ca_chain` as *"does not exist yet (Phase E)"*
+  and an unrealised *"Phase F#7"* inverted-contract test. Both are
+  long-since shipped (`f02_client_cert_from_unrelated_ca_rejected`
+  is the inverted contract). The comment now describes the two
+  tests as paired positive/negative controls guarding against
+  silent regression in either direction. Variable names and the
+  baseline message label were also renamed away from `phase-c`
+  to reflect the legacy-path contract they pin.
+
 ### Added
 
 ### Changed
-
-### Fixed
 
 ### Documented
 

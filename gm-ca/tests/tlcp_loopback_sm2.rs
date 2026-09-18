@@ -328,19 +328,17 @@ fn sm2_issued_sign_cert_has_sm2_spki_and_sm3withsm2_sig() {
         .expect("x509-parser must accept CaSigner SM2 output");
 
     // SM2 PK OID: 1.2.156.10197.1.301 (per `cert.rs::SM2_PK_OID`).
-    // gm-ca emits this exact byte sequence; the encoding uses a 4-byte
-    // continuation chain `8C D8 E3 65` for the 156 / 10197 arcs (non-
-    // canonical BER — equivalent to 81 1C CF 55 in canonical DER but
-    // matches the byte sequence every other GM library produces).
+    // Canonical DER base-128 encoding: 2A 81 1C CF 55 01 82 2D.
     assert_eq!(
         parsed.public_key().algorithm.algorithm.as_bytes(),
-        &[0x2A, 0x8C, 0xD8, 0xE3, 0x65, 0x6A, 0x01, 0x01],
+        &[0x2A, 0x81, 0x1C, 0xCF, 0x55, 0x01, 0x82, 0x2D],
         "SPKI OID must be SM2 (1.2.156.10197.1.301)"
     );
     // sm3WithSM2 OID: 1.2.156.10197.1.501 (per `cert.rs::SM2_SIG_OID`).
+    // Canonical DER base-128 encoding: 2A 81 1C CF 55 01 83 75.
     assert_eq!(
         parsed.signature_algorithm.algorithm.as_bytes(),
-        &[0x2A, 0x8C, 0xD8, 0xE3, 0x65, 0x6A, 0x02, 0x01, 0xF5],
+        &[0x2A, 0x81, 0x1C, 0xCF, 0x55, 0x01, 0x83, 0x75],
         "outer signature OID must be sm3WithSM2 (1.2.156.10197.1.501)"
     );
 }

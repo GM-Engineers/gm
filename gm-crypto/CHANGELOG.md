@@ -50,6 +50,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **SM2 signature / public-key OID byte sequences corrected
+  to canonical DER** (1.2.156.10197.1.501 / 1.2.156.10197.1.301).
+  The constants `SM2_SIG_OID_CSR` and `SM2_PK_OID_CSR` carried
+  byte sequences that encoded a different OID (`1.2.26620389.*`)
+  with a dangling continuation byte — a malformed OID per X.690.
+  Fixed to the canonical GM/T 38636-2020 §6.4.6 encoding so
+  the CSRs and certs `CsrBuilder` produces are interoperable
+  with openssl.
+
+- **`x509::verify::verify_against_anchors` no longer hardcodes
+  `CertRole::Ca` on a single-element chain.** Previously, when
+  the caller passed `chain = [leaf]` (the connector/acceptor
+  call shape, distinct from the documented leaf-first full-chain
+  shape `[leaf, intermediate, root]`), the root-branch always
+  enforced `CertRole::Ca` — rejecting any legitimate TLCP leaf
+  certificate (which carries `digitalSignature` and not
+  `keyCertSign`). The closure `role_for_idx` now returns
+  `Option<CertRole>` (None = skip role enforcement, the
+  enc-cert path); the else-branch reads the caller's `role`
+  option when the chain has length 1 and falls back to
+  `CertRole::Ca` only when the chain has more entries
+  (i.e. this really is the root).
+
 ### Added
 
 ### Changed

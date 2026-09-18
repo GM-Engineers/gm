@@ -877,22 +877,20 @@ async fn gm_tlcp_ecc_loopback_with_real_keys_cbc() {
 // Baseline contract: server accepts ANY client certificate chain when
 // the operator has NOT configured a trust anchor.
 //
-// Phase C of the cert-verification plan freezes the CURRENT behavior
-// (`mod.rs:3495-3519`: "We accept any non-empty chain") into an
-// explicit assertion. This way, when Phase E introduces opt-in
-// `with_client_ca_chain` validation, this test is the canary that
-// tells us we have NOT silently broken the legacy "no PKI" path.
+// This test freezes the legacy "no PKI" path so we have a positive
+// control for the inverted contract tested by
+// `f02_client_cert_from_unrelated_ca_rejected` in
+// `tests/gm_tlcp_cert_verify_negative.rs`: there, the server DOES
+// configure `with_client_ca_chain` against its own CA and an unrelated
+// client cert is rejected. Together these two tests guard against
+// silent regression in either direction — neither direction may
+// collapse into the other.
 //
 // The test deliberately uses TWO independent GmcaCerts hierarchies
 // (one for server, one for client) so the two sides have unrelated
-// CA roots. The server must still complete the handshake because
-// `TlcpAcceptor::with_client_ca_chain` does not exist yet (Phase E)
-// and `CertificateVerify` is self-referential (finding T3).
-//
-// Once Phase E adds `with_client_ca_chain`, a SECOND test (Phase F#7)
-// will assert the inverted contract: configured trust anchor +
-// unrelated client cert → handshake FAILS. That pair of tests guards
-// against silent regression in either direction.
+// CA roots. The connector pins the server's signing pubkey for SKE
+// verification, mirroring the belt-and-suspenders shape callers use
+// in production when they have not opted into PKI enforcement.
 // =============================================================================
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -900,9 +898,9 @@ async fn gm_tlcp_acceptor_accepts_unrelated_client_cert_without_trust_anchor() {
     use gm_tlcp::tlcp::*;
 
     let server_tmp =
-        std::env::temp_dir().join(format!("gm-tlcp-phase-c-server-{}", std::process::id()));
+        std::env::temp_dir().join(format!("gm-tlcp-baseline-server-{}", std::process::id()));
     let client_tmp =
-        std::env::temp_dir().join(format!("gm-tlcp-phase-c-client-{}", std::process::id()));
+        std::env::temp_dir().join(format!("gm-tlcp-baseline-client-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&server_tmp);
     let _ = std::fs::remove_dir_all(&client_tmp);
 
@@ -978,7 +976,7 @@ async fn gm_tlcp_acceptor_accepts_unrelated_client_cert_without_trust_anchor() {
         .expect("client task panicked");
 
     // ---- Round-trip sanity (record-layer keys match) -----------------------
-    let msg: &[u8] = b"phase-c-baseline";
+    let msg: &[u8] = b"baseline-no-pki";
     client_stream.write_all(msg).await.expect("client write");
     client_stream.flush().await.expect("client flush");
     let mut buf = vec![0u8; 64];

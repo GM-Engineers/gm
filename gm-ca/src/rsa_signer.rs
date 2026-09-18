@@ -657,7 +657,28 @@ mod tests {
         // KU: keyCertSign | cRLSign (same bit positions as SM2)
         let ku = find_ext(&cert, KEY_USAGE_OID).expect("KU present");
         assert!(ku.critical);
-        assert_eq!(ku.value[1], 0x06, "KU bits must be keyCertSign|cRLSign");
+        // The KU extnValue is now a BIT STRING TLV (tag 0x03, length,
+        // unused-bits byte, flags). Assert via the parsed extension
+        // rather than raw byte positions so the test stays valid if
+        // the BIT STRING header bytes change in a future fix.
+        match ku.parsed_extension() {
+            ParsedExtension::KeyUsage(ku_inner) => {
+                assert!(
+                    ku_inner.key_cert_sign(),
+                    "CA cert must carry keyCertSign; flags = 0b{:09b}",
+                    ku_inner.flags
+                );
+                assert!(
+                    ku_inner.crl_sign(),
+                    "CA cert must carry cRLSign; flags = 0b{:09b}",
+                    ku_inner.flags
+                );
+            }
+            other => panic!(
+                "expected KeyUsage, got {:?}; extnValue = {:02x?}",
+                other, ku.value
+            ),
+        }
 
         // SKI = SHA-1(CA PKCS#1 RSAPublicKey)[:20]
         let ski = find_ext(&cert, SUBJECT_KEY_ID_OID).expect("SKI present");
@@ -735,10 +756,33 @@ mod tests {
 
         // KU: digitalSignature(0) | keyEncipherment(2) = 0xA0
         let ku = find_ext(&cert, KEY_USAGE_OID).expect("KU present");
-        assert_eq!(
-            ku.value[1], 0xA0,
-            "KU bits must be digitalSignature|keyEncipherment"
-        );
+        assert!(ku.critical);
+        // Use the parsed KeyUsage rather than ku.value[1] — the latter
+        // used to be the flags byte before the BIT STRING wrapper fix
+        // and is now the BIT STRING length byte.
+        match ku.parsed_extension() {
+            ParsedExtension::KeyUsage(ku_inner) => {
+                assert!(
+                    ku_inner.digital_signature(),
+                    "end-entity cert must carry digitalSignature; flags = 0b{:09b}",
+                    ku_inner.flags
+                );
+                assert!(
+                    ku_inner.key_encipherment(),
+                    "end-entity cert must carry keyEncipherment; flags = 0b{:09b}",
+                    ku_inner.flags
+                );
+                assert!(
+                    !ku_inner.key_cert_sign(),
+                    "end-entity cert must NOT carry keyCertSign; flags = 0b{:09b}",
+                    ku_inner.flags
+                );
+            }
+            other => panic!(
+                "expected KeyUsage, got {:?}; extnValue = {:02x?}",
+                other, ku.value
+            ),
+        }
 
         // AKI must key on the CA's pubkey (NOT the leaf's)
         let aki = find_ext(&cert, AUTHORITY_KEY_ID_OID).expect("AKI present");

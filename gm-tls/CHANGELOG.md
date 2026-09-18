@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **SM2 signature / public-key OID byte sequences corrected
+  to canonical DER** (1.2.156.10197.1.501 / 1.2.156.10197.1.301).
+  The `der::SM2_SIG_OID` and `der::SM2_PK_OID` constants carried
+  byte sequences that encoded a different OID (`1.2.26620389.*`)
+  with a dangling continuation byte — a malformed OID per X.690.
+  Fixed to the canonical GM/T 38636-2020 §6.4.6 encoding so the
+  handshake emits `SignatureScheme: sm2withsm3` with a parsable
+  AlgorithmIdentifier OID.
+
 ### Changed
 
 - README / README.en.md: documentation accuracy pass.

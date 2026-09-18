@@ -60,14 +60,18 @@ pub fn extract_csr_subject_cn(csr_input: &[u8]) -> Result<String, CaError> {
     ))
 }
 
-// SM2 signature OID: 1.2.156.10197.1.501
-const SM2_SIG_OID: &[u8] = &[0x2A, 0x8C, 0xD8, 0xE3, 0x65, 0x6A, 0x02, 0x01, 0xF5];
-// SM2 public key OID: 1.2.156.10197.1.301
-const SM2_PK_OID: &[u8] = &[0x2A, 0x8C, 0xD8, 0xE3, 0x65, 0x6A, 0x01, 0x01];
+// SM2 signature OID: 1.2.156.10197.1.501 (sm3WithSM2).
+// Encoded in DER base-128: 1.2 = 0x2A, 156 = 0x81 0x1C, 10197 = 0xCF 0x55,
+// 1 = 0x01, 501 = 0x83 0x75.
+const SM2_SIG_OID: &[u8] = &[0x2A, 0x81, 0x1C, 0xCF, 0x55, 0x01, 0x83, 0x75];
+// SM2 public key OID: 1.2.156.10197.1.301.
+// Encoded in DER base-128: ... 301 = 0x82 0x2D.
+const SM2_PK_OID: &[u8] = &[0x2A, 0x81, 0x1C, 0xCF, 0x55, 0x01, 0x82, 0x2D];
 // CN OID: 2.5.4.3
 const CN_OID: &[u8] = &[0x55, 0x04, 0x03];
-// CRL Number extension OID: 1.2.156.10197.1.106
-const CRL_NUM_OID: &[u8] = &[0x2A, 0x8C, 0xD8, 0xE3, 0x65, 0x6A, 0x01, 0x06];
+// CRL Number extension OID: 1.2.156.10197.1.106.
+// Encoded in DER base-128: ... 106 = 0x6A (single byte since <128).
+const CRL_NUM_OID: &[u8] = &[0x2A, 0x81, 0x1C, 0xCF, 0x55, 0x01, 0x6A];
 
 // KeyUsage OID: 2.5.29.15
 const KEY_USAGE_OID: &[u8] = &[0x55, 0x1D, 0x0F];
@@ -619,11 +623,22 @@ pub(crate) fn build_extensions(
         || profile.key_usage.encipher_only
         || profile.key_usage.decipher_only;
     if ku_has_any_bit {
-        exts.push(build_extension(
-            KEY_USAGE_OID,
-            true,
-            &profile.key_usage.to_der_bytes(),
-        ));
+        // KeyUsage per RFC 5280 §4.2.1.3 has the wire form
+        //   Extension ::= SEQUENCE { extnID OID, critical BOOLEAN,
+        //                            extnValue OCTET STRING }
+        //   extnValue ::= BIT STRING { unused-bits-prefix, bytes... }
+        // `KeyUsageBits::to_der_bytes()` returns the BIT STRING
+        // content (the unused-bits byte plus the payload); the
+        // caller is responsible for the BIT STRING tag+length.
+        // Wrapping with `der_len()` here handles both short-form
+        // length (current KU content is at most 3 bytes) and any
+        // future long-form length without an off-by-one.
+        let ku_content = profile.key_usage.to_der_bytes();
+        let mut ku_bit_string = Vec::with_capacity(2 + ku_content.len());
+        ku_bit_string.push(0x03);
+        ku_bit_string.extend_from_slice(&der_len(ku_content.len()));
+        ku_bit_string.extend_from_slice(&ku_content);
+        exts.push(build_extension(KEY_USAGE_OID, true, &ku_bit_string));
     }
 
     // 3. ExtendedKeyUsage — emit when at least one purpose
@@ -917,15 +932,37 @@ mod tests {
         // _ = OID registry alias reference (silences unused-import lint if needed)
         let _ = OID_X509_EXT_BASIC_CONSTRAINTS;
 
-        // KeyUsage: keyCertSign(bit 5) | cRLSign(bit 6) only
+        // KeyUsage: keyCertSign(bit 5) | cRLSign(bit 6) only.
+        // The fix for `to_der_bytes()` wrapping makes the OCTET STRING
+        // body now hold a proper BIT STRING TLV (`03 <len> <unused> <flags>`)
+        // instead of raw content; x509-parser's KU parser consequently
+        // returns the parsed `KeyUsage` instead of `ParseError`.
         let ku = find_ext(&cert, KEY_USAGE_OID_TEST).expect("KU present");
         assert!(ku.critical, "KU should be critical per §4.2.1.3 SHOULD");
-        // BIT STRING is MSB-first within the byte:
-        //   bit 5 (keyCertSign) = 0x80 >> 5 = 0x04
-        //   bit 6 (cRLSign)     = 0x80 >> 6 = 0x02
-        //   combined            = 0x06
-        // ku.value contains [unused_bits, byte0, ...]
-        assert_eq!(ku.value[1], 0x06, "KU bits must be keyCertSign|cRLSign");
+        let parsed = ku.parsed_extension();
+        match parsed {
+            x509_parser::extensions::ParsedExtension::KeyUsage(ku_inner) => {
+                assert!(
+                    ku_inner.key_cert_sign(),
+                    "CA cert must carry keyCertSign; flags = 0b{:09b}",
+                    ku_inner.flags
+                );
+                assert!(
+                    ku_inner.crl_sign(),
+                    "CA cert must carry cRLSign; flags = 0b{:09b}",
+                    ku_inner.flags
+                );
+                assert!(
+                    !ku_inner.digital_signature(),
+                    "CA cert must NOT carry digitalSignature; flags = 0b{:09b}",
+                    ku_inner.flags
+                );
+            }
+            other => panic!(
+                "expected KeyUsage, got {:?}; BIT STRING body = {:02x?}",
+                other, ku.value
+            ),
+        }
 
         // SKI: SM3(CA pubkey)[:20]
         let ski = find_ext(&cert, SUBJECT_KEY_ID_OID_TEST).expect("SKI present");
@@ -986,15 +1023,37 @@ mod tests {
             other => panic!("expected BC, got {:?}", other),
         }
 
-        // KU: digitalSignature(0) | keyEncipherment(2)
-        // bit 0 (digitalSig)   = 0x80 >> 0 = 0x80
-        // bit 2 (keyEncipher)  = 0x80 >> 2 = 0x20
-        // combined             = 0xA0
+        // KU: digitalSignature(bit 0) | keyEncipherment(bit 2).
+        // The OCTET STRING body is a BIT STRING TLV (`03 02 01 A0`):
+        // tag 0x03, length 0x02, unused-bits 0x01, flags 0xA0.
+        // x509-parser's KU parser returns the parsed KeyUsage (the
+        // BIT STRING is now wrapped correctly, so the parse no
+        // longer returns ParseError).
         let ku = find_ext(&cert, KEY_USAGE_OID_TEST).expect("KU present");
-        assert_eq!(
-            ku.value[1], 0xA0,
-            "KU bits must be digitalSignature|keyEncipherment"
-        );
+        assert!(ku.critical, "KU should be critical per §4.2.1.3 SHOULD");
+        match ku.parsed_extension() {
+            x509_parser::extensions::ParsedExtension::KeyUsage(ku_inner) => {
+                assert!(
+                    ku_inner.digital_signature(),
+                    "end-entity cert must carry digitalSignature; flags = 0b{:09b}",
+                    ku_inner.flags
+                );
+                assert!(
+                    ku_inner.key_encipherment(),
+                    "end-entity cert must carry keyEncipherment; flags = 0b{:09b}",
+                    ku_inner.flags
+                );
+                assert!(
+                    !ku_inner.key_cert_sign(),
+                    "end-entity cert must NOT carry keyCertSign; flags = 0b{:09b}",
+                    ku_inner.flags
+                );
+            }
+            other => panic!(
+                "expected KeyUsage, got {:?}; BIT STRING body = {:02x?}",
+                other, ku.value
+            ),
+        }
 
         // AKI must key on the CA's pubkey (not the leaf's)
         let aki = find_ext(&cert, AUTHORITY_KEY_ID_OID_TEST).expect("AKI present");
@@ -1021,5 +1080,108 @@ mod tests {
             san_bytes.windows(16).any(|w| w == b"leaf.example.com"),
             "SAN must contain dNSName leaf.example.com"
         );
+    }
+
+    /// Regression test for the SM2 OID byte encoding bug fixed at
+    /// the cert.rs level.
+    ///
+    /// Before the fix, the byte sequences claimed to encode
+    /// `1.2.156.10197.1.501` (sm3WithSM2) actually decoded to a
+    /// different OID (`1.2.26620389.106.2.1.*`) because the base-128
+    /// sub-component encoding used non-canonical continuation bytes
+    /// for the 156 / 10197 arcs. As a result, openssl rejected the
+    /// cert with "BAD OBJECT".
+    ///
+    /// This test asserts the byte sequences are the canonical DER
+    /// encoding of the standard GM/T OIDs:
+    ///   - 1.2.156.10197.1.501 (sm3WithSM2 signature)
+    ///   - 1.2.156.10197.1.301 (SM2 public key)
+    ///   - 1.2.156.10197.1.106 (CRL Number extension)
+    ///
+    /// Encoded form (canonical DER base-128):
+    ///   - 1.2.156.10197.1.X = 0x2A 0x81 0x1C 0xCF 0x55 0x01 <X>
+    ///   - 501 (X=sig)    → 0x83 0x75     (501 = 3*128 + 117)
+    ///   - 301 (X=pubkey) → 0x82 0x2D     (301 = 2*128 + 45)
+    ///   - 106 (X=crlnum) → 0x6A          (single byte, <128)
+    #[test]
+    fn sm2_oid_byte_sequences_match_gm_t_standard() {
+        // Reference byte sequences are computed from the OID strings
+        // via standard DER base-128 encoding. If any of these constants
+        // is changed, verify the new bytes still decode to the
+        // documented OID — openssl will reject the cert otherwise.
+        assert_eq!(
+            SM2_SIG_OID,
+            &[0x2A, 0x81, 0x1C, 0xCF, 0x55, 0x01, 0x83, 0x75],
+            "SM2_SIG_OID bytes must encode 1.2.156.10197.1.501 (sm3WithSM2) canonically"
+        );
+        assert_eq!(
+            SM2_PK_OID,
+            &[0x2A, 0x81, 0x1C, 0xCF, 0x55, 0x01, 0x82, 0x2D],
+            "SM2_PK_OID bytes must encode 1.2.156.10197.1.301 (SM2 public key) canonically"
+        );
+        assert_eq!(
+            CRL_NUM_OID,
+            &[0x2A, 0x81, 0x1C, 0xCF, 0x55, 0x01, 0x6A],
+            "CRL_NUM_OID bytes must encode 1.2.156.10197.1.106 (CRL Number) canonically"
+        );
+
+        // Round-trip assertion: take the bytes through a DER OID
+        // decoder and verify they decode to the documented OID.
+        // We use the `x509_parser::oid_registry::asn1_rs::oid` helper
+        // indirectly: build the OID from the byte sequence and assert
+        // its textual form matches.
+        let sig_oid_parsed = format_oid_from_bytes(SM2_SIG_OID);
+        assert_eq!(
+            sig_oid_parsed.as_deref(),
+            Some("1.2.156.10197.1.501"),
+            "SM2_SIG_OID bytes must round-trip-decode to 1.2.156.10197.1.501"
+        );
+        let pk_oid_parsed = format_oid_from_bytes(SM2_PK_OID);
+        assert_eq!(
+            pk_oid_parsed.as_deref(),
+            Some("1.2.156.10197.1.301"),
+            "SM2_PK_OID bytes must round-trip-decode to 1.2.156.10197.1.301"
+        );
+        let crlnum_oid_parsed = format_oid_from_bytes(CRL_NUM_OID);
+        assert_eq!(
+            crlnum_oid_parsed.as_deref(),
+            Some("1.2.156.10197.1.106"),
+            "CRL_NUM_OID bytes must round-trip-decode to 1.2.156.10197.1.106"
+        );
+    }
+
+    /// Decode a DER OID body (no tag, no length — just the components)
+    /// into dotted-decimal form, validating that no continuation byte
+    /// is left dangling at the end. Returns `None` if the encoding is
+    /// malformed.
+    fn format_oid_from_bytes(body: &[u8]) -> Option<String> {
+        if body.is_empty() {
+            return None;
+        }
+        // First byte encodes components 1 and 2 per X.690.
+        let first = body[0];
+        let mut comps: Vec<u64> = vec![(first / 40) as u64, (first % 40) as u64];
+        let mut value: u64 = 0;
+        for &b in &body[1..] {
+            // high bit set → continuation
+            value = (value << 7) | ((b & 0x7F) as u64);
+            if (b & 0x80) == 0 {
+                // last byte of this component
+                comps.push(value);
+                value = 0;
+            }
+        }
+        // If `value` is non-zero here, the last byte had its
+        // continuation bit set with no terminator → malformed.
+        if value != 0 {
+            return None;
+        }
+        Some(
+            comps
+                .iter()
+                .map(|c| c.to_string())
+                .collect::<Vec<_>>()
+                .join("."),
+        )
     }
 }

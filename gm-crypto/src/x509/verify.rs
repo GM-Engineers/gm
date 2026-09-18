@@ -452,13 +452,20 @@ pub fn verify_cert_chain_sm2_chain(
         )));
     }
 
-    // Pre-compute the role per index (idx=0 leaf uses the supplied
-    // role; idx>=1 are intermediate CAs).
-    let role_for_idx = |idx: usize| -> CertRole {
+    // Pre-compute the role per index.
+    //   - `idx == 0` is the leaf cert, so use the caller's role
+    //     option directly. `Some(role)` enforces that role; `None`
+    //     skips the role check (the TLCP enc cert path uses None
+    //     because GB/T 38636-2020 §6.4.6.1.2 b) makes enc-cert
+    //     KU/EKU permissive).
+    //   - `idx > 0` is either an intermediate or the root cert;
+    //     intermediates are by definition CA certs and the root
+    //     matches a trust anchor, so always enforce `Ca`.
+    let role_for_idx = |idx: usize| -> Option<CertRole> {
         if idx == 0 {
-            role.unwrap_or(CertRole::Ca)
+            role
         } else {
-            CertRole::Ca
+            Some(CertRole::Ca)
         }
     };
 
@@ -475,7 +482,9 @@ pub fn verify_cert_chain_sm2_chain(
             let child_cert = child_owned.as_x509()?;
 
             // KU/EKU enforcement per role.
-            verify_cert_role(&child_cert, role_for_idx(idx))?;
+            if let Some(r) = role_for_idx(idx) {
+                verify_cert_role(&child_cert, r)?;
+            }
 
             // Check CA BasicConstraints for intermediate CAs
             let basic_constraints = child_cert
@@ -525,14 +534,25 @@ pub fn verify_cert_chain_sm2_chain(
                 ));
             }
         } else {
-            // Root cert: try each trust anchor until one validates successfully
+            // Last entry of leaf_chain.
+            //   - Multi-element chain: this is the root cert; treat
+            //     as Ca regardless of the caller's role option.
+            //   - 1-element chain: this is the leaf cert (the
+            //     connector/acceptor call shape). Apply the
+            //     caller's role option: `Some(role)` enforces it;
+            //     `None` skips role enforcement (enc-cert path).
+            let this_role = if leaf_chain.len() == 1 {
+                role
+            } else {
+                Some(CertRole::Ca)
+            };
             let mut last_err = None;
             for anchor in trust_anchors {
                 match verify_cert_chain_sm2(child_owned, anchor, now, domain) {
                     Ok(()) => {
-                        // KU/EKU enforcement for the trust anchor (treated as CA).
-                        let root_cert = child_owned.as_x509()?;
-                        verify_cert_role(&root_cert, CertRole::Ca)?;
+                        if let Some(r) = this_role {
+                            verify_cert_role(&child_owned.as_x509()?, r)?;
+                        }
                         last_err = None;
                         break;
                     }

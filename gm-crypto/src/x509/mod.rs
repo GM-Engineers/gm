@@ -118,10 +118,13 @@ pub fn extract_sm2_pubkey_from_der(cert_der: &[u8]) -> Result<Vec<u8>, CryptoErr
 // gm-ca's `rsa` feature flag.
 // =============================================================================
 
-// SM2 signature OID: 1.2.156.10197.1.501 = 2A 8C D8 E3 65 6A 02 01 F5
-const SM2_SIG_OID_CSR: &[u8] = &[0x2A, 0x8C, 0xD8, 0xE3, 0x65, 0x6A, 0x02, 0x01, 0xF5];
-// SM2 public key OID: 1.2.156.10197.1.301 = 2A 8C D8 E3 65 6A 01 01
-const SM2_PK_OID_CSR: &[u8] = &[0x2A, 0x8C, 0xD8, 0xE3, 0x65, 0x6A, 0x01, 0x01];
+// SM2 signature OID: 1.2.156.10197.1.501 (sm3WithSM2).
+// DER base-128: 1.2 = 0x2A, 156 = 0x81 0x1C, 10197 = 0xCF 0x55,
+// 1 = 0x01, 501 = 0x83 0x75.
+const SM2_SIG_OID_CSR: &[u8] = &[0x2A, 0x81, 0x1C, 0xCF, 0x55, 0x01, 0x83, 0x75];
+// SM2 public key OID: 1.2.156.10197.1.301.
+// DER base-128: ... 301 = 0x82 0x2D.
+const SM2_PK_OID_CSR: &[u8] = &[0x2A, 0x81, 0x1C, 0xCF, 0x55, 0x01, 0x82, 0x2D];
 // CN OID: 2.5.4.3 = 55 04 03
 const CN_OID_CSR: &[u8] = &[0x55, 0x04, 0x03];
 

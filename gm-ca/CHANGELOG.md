@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **SM2 signature / public-key / CRL Number OID byte sequences
+  corrected to canonical DER.** The constants
+  `SM2_SIG_OID` (1.2.156.10197.1.501 / sm3WithSM2),
+  `SM2_PK_OID` (1.2.156.10197.1.301), and `CRL_NUM_OID`
+  (1.2.156.10197.1.106) carried byte sequences whose base-128
+  sub-component encoding for the `156` and `10197` arcs was
+  non-canonical. The bytes produced a numeric OID of
+  `1.2.26620389.106.*.*` (private arc) plus a dangling
+  continuation byte at the end, which made the OID invalid
+  per X.690. As a result, openssl rejected every certificate
+  gm-ca emitted with "BAD OBJECT" / "unsupported". The bytes
+  are now the canonical GM/T 38636-2020 §6.4.6 encoding
+  (`2A 81 1C CF 55 01 ...`), and openssl parses gm-ca-issued
+  certs as `Signature Algorithm: SM2-with-SM3` /
+  `Public Key Algorithm: sm2`. A regression test
+  (`cert::tests::sm2_oid_byte_sequences_match_gm_t_standard`)
+  decodes the bytes back to the documented OID strings and
+  fails if any future change drifts away from the standard.
+
+- **KeyUsage extension now carries the proper BIT STRING TLV**
+  (the wire form required by x509-parser 0.16 + RFC 5280
+  §4.2.1.3). `KeyUsageBits::to_der_bytes()` returns the BIT
+  STRING content (unused-bits prefix + payload); the caller
+  in `build_extensions` now wraps it with the BIT STRING
+  tag + length before passing it to `build_extension`.
+  Without this wrapper x509-parser's KU parser returns
+  `ParseError`, which previously caused every KU/EKU role
+  assertion in `verify_cert_role` to silently no-op. The
+  RSA signer unit tests were also updated from raw-byte
+  position assertions (`ku.value[1] == 0x06`) to parsed
+  `KeyUsage` checks so the tests stay valid against any
+  future BIT STRING header layout change.
+
 ### Added
 
 ### Changed
