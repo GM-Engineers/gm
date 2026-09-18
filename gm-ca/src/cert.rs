@@ -19,9 +19,10 @@ use zeroize::ZeroizeOnDrop;
 /// that a freshly-revoked cert can't be "resurrected" by clock
 /// drift. See R2 in `2026-09-18-gm-tlcp-fix-verification-v2.md`.
 ///
-/// Combined with `utctime()`'s sub-second truncation at
-/// [`gm_ca::cert::utctime`], the back-date also stabilises
-/// back-to-back sign-then-verify test loops that previously hit
+/// Combined with `utctime()`'s sub-second truncation (the private
+/// helper that encodes `OffsetDateTime` to ASN.1 UTCTime with second
+/// precision), the back-date also stabilises back-to-back
+/// sign-then-verify test loops that previously hit
 /// `certificate has expired or is not yet valid` near the
 /// second boundary.
 const NOT_BEFORE_CLOCK_SKEW_TOLERANCE: std::time::Duration = std::time::Duration::from_secs(300);
