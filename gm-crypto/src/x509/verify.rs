@@ -578,27 +578,43 @@ pub fn verify_cert_chain_sm2_chain(
 ///
 /// # Chain layout
 ///
-/// `leaf_chain_der` is **leaf-first**: `[leaf, intermediate_1, ...,
-/// intermediate_n, root]`. The chain depth (including the root) is
-/// bounded by [`MAX_CERT_CHAIN_DEPTH`].
+/// `leaf_chain_der` is the **leaf-only chain** plus, optionally,
+/// the root: `[leaf]` or `[leaf, root]`. The chain depth
+/// (including the root) is bounded by [`MAX_CERT_CHAIN_DEPTH`].
+///
+/// Callers **must not** include intermediates in the slice — pass
+/// the leaf cert alone and let the verifier reach the CA via
+/// `anchors_der`. (See R1 in `2026-09-18-gm-tlcp-fix-verification-v2.md`:
+/// passing `[leaf, ca]` would route the leaf through the
+/// "intermediate CA" branch, which demands `BasicConstraints CA:TRUE`
+/// — a condition leaf certs by definition do not satisfy. The
+/// public docs of this function previously recommended exactly that
+/// form; that recommendation was wrong and has been corrected here.)
+///
+/// For the rare case where a multi-hop chain must be validated
+/// end-to-end without a separate anchor, use
+/// [`verify_cert_chain_sm2_chain`] (PEM path), which already
+/// supports `[leaf, intermediate, ..., root]`.
 ///
 /// # Anchor matching
 ///
-/// The root entry of `leaf_chain_der` must chain (subject DN match +
-/// signature) to **one of** `anchors_der` for the chain to validate.
-/// This matches the X.509 trust-store model: a CA is trusted
-/// implicitly, so the chain usually ends at the CA cert itself
-/// rather than a separately-named anchor.
+/// The root entry of `leaf_chain_der`, when present, must chain
+/// (subject DN match + signature) to **one of** `anchors_der` for
+/// the chain to validate. When `leaf_chain_der` contains only the
+/// leaf, `anchors_der` must contain the issuing CA. This matches
+/// the X.509 trust-store model: a CA is trusted implicitly, so the
+/// chain usually ends at the CA cert itself rather than a
+/// separately-named anchor.
 ///
 /// # TLCP usage
 ///
 /// TLCP dual-cert model sends sign + enc as separate Certificate
-/// entries that share a common CA. Callers should pass the
-/// sign-leaf chain (e.g. `[sign_cert, ca_cert]`) and the enc-leaf
-/// chain (e.g. `[enc_cert, ca_cert]`) separately, both anchored
-/// against the same `anchors_der`. The same anchors being valid for
-/// both is the "sign + enc share one chain" invariant from the
-/// Phase D design decision.
+/// entries that share a common CA. Callers should pass **just the
+/// leaf** for each call (e.g. `[sign_cert]` and `[enc_cert]`),
+/// both anchored against the same `anchors_der` (e.g.
+/// `[ca_cert]`). The same anchors being valid for both is the
+/// "sign + enc share one chain" invariant from the Phase D design
+/// decision.
 ///
 /// # Errors
 ///

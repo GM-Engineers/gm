@@ -1853,8 +1853,9 @@ impl TlcpConnector {
     /// validated; only the out-of-band `with_server_sign_key` SKE
     /// signature pin is enforced. The first time a server cert is
     /// received **without** a configured anchor set, the connector
-    /// emits a one-shot `eprintln!` warning so operators notice the
-    /// missing PKI policy in logs.
+    /// emits a one-shot `log::warn!` so host applications can
+    /// capture / silence / persist the warning via their chosen
+    /// logging subscriber.
     ///
     /// # Examples
     ///
@@ -2139,9 +2140,12 @@ impl TlcpConnector {
         } else {
             // Legacy path: no anchors; hostname check (if any) was
             // already done above. Out-of-band `with_server_sign_key`
-            // SKE pin is the only validation. One-shot warning.
-            eprintln!(
-                "gm-tlcp WARNING: accepted server certificate without validation \
+            // SKE pin is the only validation. One-shot warning routed
+            // through the `log` facade so host applications can
+            // capture / silence / persist it via their chosen logging
+            // subscriber. See CHANGELOG 0.6.7 (NEW-5).
+            log::warn!(
+                "gm-tlcp: accepted server certificate without validation \
                  (no trust anchors configured). Call \
                  TlcpConnector::with_server_ca_chain(anchors) to enable PKI \
                  enforcement."
@@ -3483,8 +3487,9 @@ impl TlcpAcceptor {
     /// proof-of-possession only (audit finding T3). The first
     /// time a non-empty client chain is received **without** a
     /// configured anchor set, the acceptor emits a one-shot
-    /// `eprintln!` warning so operators notice the missing PKI
-    /// policy in logs without breaking production builds.
+    /// `log::warn!` so host applications can capture / silence /
+    /// persist the warning via their chosen logging subscriber,
+    /// without breaking production builds.
     ///
     /// # Examples
     ///
@@ -4116,11 +4121,14 @@ impl TlcpAcceptor {
                 // Legacy path: any non-empty chain is accepted.
                 // Emit a one-shot warning so operators notice
                 // they have no PKI policy in production logs.
-                // Throttling not needed — the warning is per
-                // handshake, and the cost of printing once per
-                // connection is acceptable.
-                eprintln!(
-                    "gm-tlcp WARNING: accepted client certificate without \
+                // Routed through the `log` facade (NEW-5, see
+                // CHANGELOG 0.6.7) so host applications can
+                // capture / silence / persist it via their chosen
+                // logging subscriber. Throttling not needed — the
+                // warning is per handshake, and the cost of
+                // emitting once per connection is acceptable.
+                log::warn!(
+                    "gm-tlcp: accepted client certificate without \
                      validation (no trust anchors configured). Call \
                      TlcpAcceptor::with_client_ca_chain(anchors) to enable \
                      PKI enforcement."

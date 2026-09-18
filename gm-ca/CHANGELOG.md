@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+### Changed
+
+### Fixed
+
+- **`notBefore` is now back-dated by 5 minutes when issuing a new
+  certificate**, so freshly-issued certs do not trigger
+  `"certificate has expired or is not yet valid"` on a verifier
+  whose clock is modestly behind the CA's. The back-date is
+  applied via a new `now_utc_for_x509()` helper (constant
+  `NOT_BEFORE_CLOCK_SKEW_TOLERANCE = 300 s`). Combined with
+  `utctime()`'s sub-second truncation, this also stabilises
+  back-to-back sign-then-verify test loops near the second
+  boundary. See R2 in
+  `2026-09-18-gm-tlcp-fix-verification-v2.md` and
+  RFC 5280 §4.1.2.5.
+
+## [0.2.2] - 2026-09-18
+
 ### Fixed
 
 - **SM2 signature / public-key / CRL Number OID byte sequences
@@ -41,12 +61,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   position assertions (`ku.value[1] == 0x06`) to parsed
   `KeyUsage` checks so the tests stay valid against any
   future BIT STRING header layout change.
-
-### Added
-
-### Changed
-
-### Fixed
 
 ## [0.2.1] - 2026-09-18
 

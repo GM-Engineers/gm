@@ -11,6 +11,28 @@ use x509_parser::prelude::FromDer;
 
 use zeroize::ZeroizeOnDrop;
 
+/// Back-dating window applied to `notBefore` when issuing a new
+/// certificate, to tolerate modest clock skew between the CA and
+/// the verifier. RFC 5280 §4.1.2.5 specifically anticipates this
+/// need, and the GM/T 0034 CA practice code in the wild uses
+/// 5–10 minutes. Five minutes is conservative and short enough
+/// that a freshly-revoked cert can't be "resurrected" by clock
+/// drift. See R2 in `2026-09-18-gm-tlcp-fix-verification-v2.md`.
+///
+/// Combined with `utctime()`'s sub-second truncation at
+/// [`gm_ca::cert::utctime`], the back-date also stabilises
+/// back-to-back sign-then-verify test loops that previously hit
+/// `certificate has expired or is not yet valid` near the
+/// second boundary.
+const NOT_BEFORE_CLOCK_SKEW_TOLERANCE: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Current wall-clock UTC time, back-dated for X.509 issuance so
+/// the resulting `notBefore` tolerates modest verifier-clock skew.
+/// See [`NOT_BEFORE_CLOCK_SKEW_TOLERANCE`].
+fn now_utc_for_x509() -> time::OffsetDateTime {
+    time::OffsetDateTime::now_utc() - NOT_BEFORE_CLOCK_SKEW_TOLERANCE
+}
+
 /// Decode CSR from PEM or raw DER. Handles both PEM-encoded and raw DER input.
 fn decode_csr(csr_input: &[u8]) -> Result<Vec<u8>, CaError> {
     // Try PEM first
@@ -191,7 +213,7 @@ impl CaSigner {
             )));
         }
 
-        let not_before = time::OffsetDateTime::now_utc();
+        let not_before = now_utc_for_x509();
         let not_after = not_before + std::time::Duration::from_secs(86400 * validity_days as u64);
 
         // Random 20-byte positive serial number
@@ -291,7 +313,7 @@ impl CaSigner {
         })?;
 
         // Validity period
-        let not_before = time::OffsetDateTime::now_utc();
+        let not_before = now_utc_for_x509();
         let not_after = not_before + std::time::Duration::from_secs(86400 * validity_days as u64);
 
         // Random 20-byte positive serial number
@@ -388,7 +410,7 @@ impl CaSigner {
             ));
         }
 
-        let not_before = time::OffsetDateTime::now_utc();
+        let not_before = now_utc_for_x509();
         let not_after = not_before + std::time::Duration::from_secs(86400 * validity_days as u64);
 
         let mut serial_bytes = [0u8; 20];

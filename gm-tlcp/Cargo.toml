@@ -95,6 +95,14 @@ rand = { version = "0.10" }  # for SM9 IBC sign/encrypt (rand_core 0.6 OsRng doe
 subtle = "2.6"
 
 # 结构化日志（handshake 状态、alert、错误追踪）
+#
+# We use the `log` facade (no implementation bundled) so the warning
+# can be captured by any log subscriber the host application
+# installs (env_logger / tracing-subscriber / slog / etc.) — see the
+# NEW-5 fix in CHANGELOG 0.6.7. Previously this warning went to
+# stderr via eprintln!, which polluted caller output and could not
+# be silenced / routed by the host's logging pipeline.
+log = "0.4"
 
 # Prometheus 指标（仅 record_bytes）
 metrics = "0.23"

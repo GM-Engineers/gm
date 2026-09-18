@@ -79,6 +79,25 @@ jobs:
       - name: Run tests - gm-tls (grpc)
         # No --all-targets: the criterion bench target rejects libtest args.
         run: timeout 240 cargo test -p gm-tls --features grpc -- --test-threads=1 --nocapture
+      - name: Run tests - gm-tlcp
+        # Phase J (cert-verification + role-check + CRL): without this step
+        # the 19 gm_tlcp_cert_verify_negative tests + 14 gm_tlcp_loopback
+        # tests + 125 lib unit tests that guard the cert-verification
+        # contract were not in CI (only the continue-on-error GmSSL
+        # interop job ran gm-tlcp binaries, and that is intentionally
+        # non-blocking). With this step the regression tests added for
+        # the NEW-1..NEW-4 / R1 fixes actually gate merges.
+        # `--features tlcp-profiles` enables the gm_tlcp_loopback tests
+        # and their gmca_cert_setup helper (gated on this feature). The
+        # tlcp-gmssl-compat + SM9 pair is intentionally NOT enabled here
+        # because that combination is mutually exclusive in the suite
+        # (SM9 IBSDH is not GmSSL-master-compatible); a separate
+        # GmSSL interop job covers that surface.
+        # `--test-threads=1` because each test spawns a tokio runtime
+        # and parallel token-bucket tests deadlock on CI runners.
+        # 600s budget: full suite (125 lib + 19 cert-verify-negative +
+        # 14 loopback + doc + others) measured at 5-7 min in practice.
+        run: timeout 600 cargo test -p gm-tlcp --features tlcp-profiles -- --test-threads=1 --nocapture
       - name: Run tests - gm-ca
         run: timeout 240 cargo test -p gm-ca --all-targets -- --test-threads=1 --nocapture
       - name: Run tests - gm-http-client

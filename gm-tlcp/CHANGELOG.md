@@ -7,7 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+### Changed
+
 ### Fixed
+
+### Documented
+
+### Security
+
+## [0.6.6] - 2026-09-18
+
+### Fixed
+
+- **Legacy-path PKI-missing warnings are now routed through the
+  `log` facade, not stderr.** Previously, when `TlcpConnector`
+  or `TlcpAcceptor` received a cert chain without a configured
+  anchor set, the library wrote a one-shot warning directly to
+  stderr via `eprintln!`. This polluted caller output, could not
+  be silenced or routed by the host's logging pipeline, and
+  contradicted the crate's documented "emit-only, host
+  handles persistence" policy. The two call sites in
+  `tlcp/mod.rs` (server-cert validation, client-cert validation)
+  now emit `log::warn!`. Host applications can capture, silence,
+  or persist the warning by installing any `log`-compatible
+  subscriber (env_logger, tracing-subscriber, slog, etc.). The
+  `log = "0.4"` dependency has been added to `gm-tlcp`'s direct
+  deps (facade only; no implementation bundled). See NEW-5 in
+  `2026-09-18-gm-tlcp-fix-verification-v2.md`.
 
 - **Test-only: stale comment in `gm_tlcp_loopback.rs`**
   (`gm_tlcp_acceptor_accepts_unrelated_client_cert_without_trust_anchor`)

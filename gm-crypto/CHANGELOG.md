@@ -50,6 +50,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+### Changed
+
+### Fixed
+
+## [0.3.3] - 2026-09-18
+
 ### Fixed
 
 - **SM2 signature / public-key OID byte sequences corrected
@@ -75,12 +83,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CertRole::Ca` only when the chain has more entries
   (i.e. this really is the root).
 
-### Added
-
-### Changed
-
-### Fixed
-
+- **`verify_against_anchors` doc comments now reflect actual
+  semantics.** The previous docs recommended passing
+  `[leaf, ca]` (a multi-element chain), but the function routes
+  the first element through the "intermediate CA" branch —
+  demanding `BasicConstraints CA:TRUE`, a condition leaf certs
+  by definition do not satisfy. Docs now explicitly say
+  callers should pass `[leaf]` (with the CA in `anchors_der`)
+  or `[leaf, root]` (with an optional root in `anchors_der`).
+  See R1 in `2026-09-18-gm-tlcp-fix-verification-v2.md`.
 
 ## [0.3.2] - 2026-09-18
 
