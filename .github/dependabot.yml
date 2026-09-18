@@ -198,6 +198,24 @@ updates:
         # Avoid surprise MSRV bumps; bump manually.
         versions:
           - ">=2.0.0, <3.0.0"
+      - dependency-name: "sha1"
+        # sha1 0.10 → 0.11 must move together with sha2 (shared
+        # `digest` trait; bumping only one half leaves the
+        # dependency graph inconsistent and gm-ca rsa_signer.rs
+        # hits the E0599 "multiple versions of crate digest" error
+        # visible in CI run #34795009185). Bump manually with the
+        # paired sha2 bump + rsa_signer.rs adaptation + openssl
+        # interop retest.
+        versions:
+          - ">=0.11.0, <1.0.0"
+      - dependency-name: "sha2"
+        # sha2 0.10 → 0.11 is a RustCrypto hashes refactor that
+        # breaks `Sha256::new()` in gm-ca rsa_signer.rs (the new
+        # API needs an explicit `use sha2::Digest;` and a single
+        # `digest` crate version). Bump manually with the paired
+        # sha1 bump + openssl interop retest.
+        versions:
+          - ">=0.11.0, <1.0.0"
 
   - package-ecosystem: "github-actions"
     directory: "/"
