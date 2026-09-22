@@ -170,6 +170,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
+      - name: Install protobuf compiler
+        # PR-2.4: gm-tls's `tests/spiffe_uri.rs` integration tests use
+        # `gm_ca::cert::CaSigner` to issue SPIFFE-ID-bearing certs, so
+        # the test binary now transitively pulls in gm-ca's build.rs
+        # (which uses tonic-build / prost-build and requires `protoc`).
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
