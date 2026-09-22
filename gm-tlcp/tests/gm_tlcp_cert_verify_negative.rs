@@ -1162,11 +1162,18 @@ async fn j03_no_crl_unchanged_behavior() {
 }
 
 /// j04 — a CRL whose issuer DN does NOT match any cert in the chain
-/// is silently skipped (no error). The chain validates normally and
-/// the handshake succeeds. Documents the contract: CRL is per-CA,
-/// mismatched CRLs do not block the handshake.
+/// is **rejected** under the strict (default) CRL policy of
+/// `gm_crypto::x509::verify::check_revocations` (RFC 5280 §6.3
+/// fail-closed semantics, gm-crypto 0.3.4+). Previously (gm-crypto
+/// ≤ 0.3.3) such CRLs were silently skipped, which contradicted
+/// RFC 5280 and allowed CRL-feed misconfigurations to silently
+/// disable revocation checking. This test pins the new contract:
+/// "an unmatched CRL is treated as an error and the handshake
+/// fails." Operators that need the legacy fail-open behaviour for
+/// a specific deployment must opt in explicitly at the gm-crypto
+/// level via `CrlVerifyPolicy::Permissive`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn j04_unmatched_crl_silently_ignored() {
+async fn j04_unmatched_crl_rejected() {
     let tmp = std::env::temp_dir().join(format!("gm-tlcp-j04-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
 
@@ -1221,11 +1228,22 @@ async fn j04_unmatched_crl_silently_ignored() {
         .with_server_crls(vec![unrelated_crl]);
 
     let (server_res, client_res) = attempt_handshake(acceptor, connector).await;
+    // STRICT default: the unrelated CRL fails the "no CA in chain
+    // matches CRL issuer" check inside `check_revocations`, which
+    // surfaces as a CRL verification failure on the path that
+    // validated the server sign cert.
+    let combined = format!("{:?} {:?}", server_res, client_res);
     assert!(
-        client_res.is_ok(),
-        "unmatched CRL must not block the handshake; got server={:?} client={:?}",
+        server_res.is_err() || client_res.is_err(),
+        "unmatched CRL must be rejected under STRICT policy; got server={:?} client={:?}",
         server_res,
         client_res
+    );
+    assert!(
+        combined.contains("no CA in chain matches CRL issuer")
+            || combined.contains("CRL verification failed"),
+        "rejection must mention the CRL/issuer mismatch; got: {}",
+        combined
     );
 }
 
