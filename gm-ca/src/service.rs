@@ -144,8 +144,7 @@ impl CaService for CaServiceImpl {
 
         // Calculate validity period for DB storage (sub-day granularity).
         let not_before = time::OffsetDateTime::now_utc();
-        let not_after =
-            not_before + std::time::Duration::from_secs(validity_seconds as u64);
+        let not_after = not_before + std::time::Duration::from_secs(validity_seconds as u64);
         let not_before_dt =
             sqlx::types::chrono::DateTime::<Utc>::from_timestamp(not_before.unix_timestamp(), 0)
                 .unwrap_or_else(Utc::now);

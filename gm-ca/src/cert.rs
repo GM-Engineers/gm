@@ -280,7 +280,7 @@ impl CaSigner {
         }
         self.sign_csr_with_profile_and_seconds(csr_input, validity_days * 86400, profile)
     }
-    
+
     /// PR-3.1 (gm-ca 0.3.0, P1-9): sub-day TTL on CSR signing.
     ///
     /// SPIRE Workload API SVID rotation requires hour-granularity (typical
@@ -304,21 +304,21 @@ impl CaSigner {
                 validity_seconds
             )));
         }
-    
+
         let csr_der = decode_csr(csr_input)?;
         let (_, csr) = X509CertificationRequest::from_der(&csr_der)
             .map_err(|e| CaError::InvalidCsr(format!("CSR parse failed: {}", e)))?;
-    
+
         let csr_info: &X509CertificationRequestInfo = &csr.certification_request_info;
-    
+
         // Subject DN raw DER bytes from CSR (for embedding in certificate)
         let subject_der = csr_info.subject.as_raw();
-    
+
         // Extract public key from CSR's SubjectPublicKeyInfo (already DER encoded)
         // BitString.data contains the raw public key bytes
         let spki_bytes = &csr_info.subject_pki.subject_public_key.data;
         let pk_algorithm_oid = csr_info.subject_pki.algorithm.algorithm.as_bytes();
-    
+
         // Validate CSR public key is SM2 (only accept SM2_PK_OID, not generic EC OID)
         // RFC 3279 specifies that EC OID (1.2.840.10045.2.1) with brainpoolP256r1
         // or other curves is NOT SM2. Only SM2 OID (1.2.156.10197.1.301) is valid.
@@ -327,7 +327,7 @@ impl CaSigner {
                 "CSR public key must use SM2 algorithm OID (1.2.156.10197.1.301)".to_string(),
             ));
         }
-    
+
         // Verify CSR signature to prove the requester owns the corresponding private key
         let sig_bytes = csr.signature_value.data.as_ref();
         let decompressed_pk = decompress_sm2_pubkey(spki_bytes)
@@ -338,11 +338,10 @@ impl CaSigner {
         verifier.verify(csr_info_bytes, sig_bytes).map_err(|e| {
             CaError::InvalidCsr(format!("CSR signature verification failed: {}", e))
         })?;
-    
+
         // Validity period (sub-day granularity; P1-9 fix)
         let not_before = now_utc_for_x509();
-        let not_after =
-            not_before + std::time::Duration::from_secs(validity_seconds as u64);
+        let not_after = not_before + std::time::Duration::from_secs(validity_seconds as u64);
 
         // Random 20-byte positive serial number
         let mut serial_bytes = [0u8; 20];
@@ -464,8 +463,7 @@ impl CaSigner {
         }
 
         let not_before = now_utc_for_x509();
-        let not_after =
-            not_before + std::time::Duration::from_secs(validity_seconds as u64);
+        let not_after = not_before + std::time::Duration::from_secs(validity_seconds as u64);
 
         let mut serial_bytes = [0u8; 20];
         rand::rng().fill_bytes(&mut serial_bytes);

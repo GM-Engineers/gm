@@ -346,8 +346,7 @@ impl RsaCaSigner {
 
         // Validity period (sub-day granularity; P1-9 fix)
         let not_before = time::OffsetDateTime::now_utc();
-        let not_after =
-            not_before + std::time::Duration::from_secs(validity_seconds as u64);
+        let not_after = not_before + std::time::Duration::from_secs(validity_seconds as u64);
 
         // Random 20-byte positive serial number.
         let mut serial_bytes = [0u8; 20];

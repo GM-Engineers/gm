@@ -55,9 +55,7 @@ use std::net::IpAddr;
 /// (LSB-first encoding per DER). Defaults to all-false so callers can
 /// use struct-update syntax (`Self { digital_signature: true, .. }`)
 /// to opt in bit-by-bit.
-#[derive(
-    Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KeyUsageBits {
     pub digital_signature: bool, // bit 0

@@ -14,9 +14,7 @@
 //!
 //! References: SPIFFE Workload API; SPIFFE-ID §2.1 (URI SAN).
 
-use gm_ca::ca::v1::{
-    CaService, RenewCertificateRequest, SignCertificateRequest,
-};
+use gm_ca::ca::v1::{CaService, RenewCertificateRequest, SignCertificateRequest};
 use gm_ca::cert::CaSigner;
 use gm_ca::db::DbStore;
 use gm_ca::service::CaServiceImpl;
@@ -62,8 +60,7 @@ fn build_test_csr_pem(subject_cn: &str) -> String {
 fn cert_not_before_unix(pem_str: &str) -> i64 {
     let pem_obj = pem::parse(pem_str.as_bytes()).expect("PEM parse");
     let der = pem_obj.into_contents();
-    let (_, cert) =
-        x509_parser::prelude::X509Certificate::from_der(&der).expect("X509 parse");
+    let (_, cert) = x509_parser::prelude::X509Certificate::from_der(&der).expect("X509 parse");
     cert.validity().not_before.timestamp()
 }
 
@@ -71,8 +68,7 @@ fn cert_not_before_unix(pem_str: &str) -> i64 {
 fn cert_not_after_unix(pem_str: &str) -> i64 {
     let pem_obj = pem::parse(pem_str.as_bytes()).expect("PEM parse");
     let der = pem_obj.into_contents();
-    let (_, cert) =
-        x509_parser::prelude::X509Certificate::from_der(&der).expect("X509 parse");
+    let (_, cert) = x509_parser::prelude::X509Certificate::from_der(&der).expect("X509 parse");
     cert.validity().not_after.timestamp()
 }
 
@@ -109,8 +105,8 @@ async fn pr31_v3_subday_ttl_validity_seconds_1h() {
 
     let req = Request::new(SignCertificateRequest {
         csr_pem: build_test_csr_pem("spiffe-svid-1h.example.com"),
-        validity_days: 0,                  // legacy field unused
-        validity_seconds: 3600,            // 1 hour
+        validity_days: 0,       // legacy field unused
+        validity_seconds: 3600, // 1 hour
         profile_json: String::new(),
     });
 
@@ -228,8 +224,7 @@ async fn pr31_v3_seconds_priority_over_days() {
     let pem = resp.certificate_pem;
     let pem_obj = pem::parse(pem.as_bytes()).expect("PEM parse");
     let der = pem_obj.into_contents();
-    let (_, cert) =
-        x509_parser::prelude::X509Certificate::from_der(&der).expect("X509 parse");
+    let (_, cert) = x509_parser::prelude::X509Certificate::from_der(&der).expect("X509 parse");
     let nb = cert.validity().not_before.to_datetime();
     let na = cert.validity().not_after.to_datetime();
     let secs = (na - nb).whole_seconds();
@@ -286,8 +281,7 @@ async fn pr31_v3_profile_json_uri_san() {
     let der = pem::parse(pem.as_bytes())
         .expect("PEM parse")
         .into_contents();
-    let (_, cert) =
-        x509_parser::prelude::X509Certificate::from_der(&der).expect("X509 parse");
+    let (_, cert) = x509_parser::prelude::X509Certificate::from_der(&der).expect("X509 parse");
     let san_ext = cert
         .extensions()
         .iter()
@@ -353,8 +347,7 @@ async fn pr31_v3_profile_json_default_when_empty() {
     // dNSName:empty-profile.example.com SAN.
     let pem = resp.certificate_pem;
     let der = pem::parse(pem.as_bytes()).expect("PEM").into_contents();
-    let (_, cert) =
-        x509_parser::prelude::X509Certificate::from_der(&der).expect("X509");
+    let (_, cert) = x509_parser::prelude::X509Certificate::from_der(&der).expect("X509");
     let san_ext = cert
         .extensions()
         .iter()
