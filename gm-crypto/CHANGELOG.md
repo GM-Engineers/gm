@@ -50,6 +50,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-09-22
+
+### Security
+
+- **`x509::verify::verify_against_anchors` and
+  `verify_cert_chain_sm2_chain` now default to fail-closed SM2
+  distid semantics (only accept the GM/T standard
+  `"1234567812345678"`).** Previously (gm-crypto ≤ 0.3.4) both
+  helpers silently fell back to the empty distid `""` (OpenSSL 3.x
+  default) after the GM/T standard distid failed. This created an
+  asymmetric weakness: the gm-ca signer always uses the GM/T
+  standard distid (`gm-ca/src/cert.rs:366` etc.), but the verifier
+  would accept both — an attacker who obtained a cert signed with
+  the empty distid (any tool using OpenSSL 3.x defaults) could
+  bypass the stronger standard-distid requirement without leaving
+  an audit trail.
+
+  Migration:
+
+  - **Default callers** (`verify_against_anchors(..)`,
+    `verify_cert_chain_sm2_chain(..)`) automatically get the new
+    strict behaviour. Audit the leaf-cert issuance path before
+    upgrading if any peer signer is known to use the empty distid
+    (OpenSSL 3.x without an explicit `distid` override).
+
+  - **Operators that need OpenSSL 3.x interop** must opt in
+    explicitly via the new
+    [`verify_against_anchors_with_distid_policy(.., DistidPolicy::Permissive{..})`]
+    entry point (or the PEM-path equivalent
+    `verify_cert_chain_sm2_chain_with_distid_policy`). The
+    permissive variant accepts the GM/T standard distid first, then
+    tries a caller-provided list of fallback distids (typically
+    `[""]` for OpenSSL 3.x); each successful fallback fires an
+    audit callback with the accepted distid so operators can log,
+    metric, or alert.
+
+  - **CRL signatures** also use the strict default; the
+    policy-aware `verify_crl_signature_with_distid` exists for
+    parity but CRLs from a GmSSL-standard CA are always
+    strict-compatible, so `Permissive` is rarely useful there.
+
+### Added
+
+- **`x509::verify::DistidPolicy`** — public enum with two
+  variants (`Strict` default, `Permissive { fallback_distids,
+  audit_on_fallback }`). `#[derive(Default)]` puts `Strict` behind
+  any `..Default::default()` use.
+- **`x509::verify::GM_TLS_DISTID`** — public constant for the
+  GM/T standard distid `"1234567812345678"` (re-export of the
+  internal string for callers that need it).
+- **`x509::verify::verify_against_anchors_with_distid_policy(.., DistidPolicy)`**
+  — policy-aware variant of `verify_against_anchors`.
+- **`x509::verify::verify_cert_chain_sm2_chain_with_distid_policy(.., DistidPolicy)`**
+  — policy-aware variant of `verify_cert_chain_sm2_chain`.
+- **Four new unit tests** in [`src/x509/verify.rs`](src/x509/verify.rs)
+  covering: default policy, STRICT rejects empty-distid signatures,
+  PERMISSIVE accepts and fires the audit callback exactly once,
+  PERMISSIVE silent when the audit callback is `None`.
+
 ## [0.3.4] - 2026-09-22
 
 ### Security
@@ -250,6 +309,7 @@ removed. The crate's public surface is fully backwards-compatible with
 the 0.1.x series.
 
 [Unreleased]: https://github.com/GM-Engineers/gm/compare/main...HEAD
+[0.3.5]: https://github.com/GM-Engineers/gm/compare/gm-crypto-v0.3.4...gm-crypto-v0.3.5
 [0.3.4]: https://github.com/GM-Engineers/gm/compare/gm-crypto-v0.3.3...gm-crypto-v0.3.4
 [0.3.2]: https://github.com/GM-Engineers/gm/compare/gm-crypto-v0.3.1...gm-crypto-v0.3.2
 [0.3.1]: https://github.com/GM-Engineers/gm/compare/gm-crypto-v0.3.0...gm-crypto-v0.3.1

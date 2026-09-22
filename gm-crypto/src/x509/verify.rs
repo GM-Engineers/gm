@@ -31,11 +31,18 @@
 
 use crate::error::CryptoError;
 use crate::sm2::{Sm2Verifier, decompress_sm2_pubkey};
+use std::sync::Arc;
 use time::OffsetDateTime;
 use x509_parser::pem::Pem;
 use x509_parser::prelude::FromDer;
 use x509_parser::prelude::X509Certificate;
 use x509_parser::revocation_list::CertificateRevocationList;
+
+/// Audit callback invoked when [`DistidPolicy::Permissive`] accepts
+/// a non-standard SM2 signature distid. Receives the accepted
+/// distid as `&str`; the callback may log, increment a metric, or
+/// trigger an alert.
+type DistidAuditCallback = Arc<dyn Fn(&str) + Send + Sync>;
 
 // ============== Owned Certificate ==============
 
@@ -130,6 +137,51 @@ impl OwnedCert {
 
 // ============== Certificate Validation ==============
 
+/// Attempt SM2 signature verification with a list of fallback distids.
+///
+/// Used by [`verify_cert_signature_with_distid`] and
+/// [`verify_crl_signature_with_distid`] when the caller passes
+/// [`DistidPolicy::Permissive`]. Iterates `fallback_distids` in order
+/// and returns the first matching verification result; on success,
+/// invokes the audit callback (if configured) with the accepted
+/// distid.
+///
+/// `kind` is `"SM2"` or `"CRL SM2"` and is used in error messages
+/// only — it does not affect behaviour.
+fn verify_with_distid_fallbacks(
+    sm2_pub_key: &[u8],
+    tbs_bytes: &[u8],
+    sig_raw: &[u8],
+    fallback_distids: &[String],
+    audit_on_fallback: Option<&DistidAuditCallback>,
+    kind: &str,
+) -> Result<(), CryptoError> {
+    for distid in fallback_distids {
+        let verifier = Sm2Verifier::new(sm2_pub_key, distid).map_err(|e| {
+            CryptoError::CertificateVerificationFailed(format!(
+                "failed to create fallback {kind} verifier (distid len = {}): {}",
+                distid.len(),
+                e
+            ))
+        })?;
+        if verifier.verify(tbs_bytes, sig_raw).is_ok() {
+            // Audit callback fires only when we actually fell back
+            // (i.e. when the standard distid failed first). Operators
+            // can attach a metrics counter, log line, or alerting
+            // hook here.
+            if let Some(cb) = audit_on_fallback {
+                cb(distid.as_str());
+            }
+            return Ok(());
+        }
+    }
+    Err(CryptoError::CertificateVerificationFailed(format!(
+        "{kind} verification failed under permissive distid policy: \
+         tried GM/T standard distid and {} fallback distid(s)",
+        fallback_distids.len()
+    )))
+}
+
 /// Validate a PEM certificate (parse + validate).
 pub fn validate_cert_pem(
     cert_pem: &[u8],
@@ -203,6 +255,78 @@ pub enum CertRole {
     TlcClient,
     /// Intermediate / root CA cert.
     Ca,
+}
+
+/// GM/T standard SM2 signature distinguishing identifier.
+///
+/// This is the distid all GmSSL / Tongsuo / openHiTLS / gm-ca
+/// implementations use by default when signing. See GB/T 32918.2-2016
+/// §6.1 and GM/T 0003.2-2012 §7.1.3.2.
+pub const GM_TLS_DISTID: &str = "1234567812345678";
+
+/// SM2 signature distinguishing-identifier policy for
+/// [`verify_against_anchors_with_distid_policy`] and
+/// [`verify_cert_chain_sm2_chain_with_distid_policy`].
+///
+/// `Strict` is the secure default: only the GM/T standard distid
+/// (see [`GM_TLS_DISTID`]) is accepted. `Permissive` preserves the
+/// gm-crypto ≤ 0.3.4 behaviour of also accepting caller-provided
+/// fallback distids (typically `[""]` for OpenSSL 3.x interop, which
+/// defaults to the empty distid) and emits an audit callback for
+/// every fallback event so operators can detect handshakes that
+/// relied on a non-standard distid.
+///
+/// Note: this knob governs the SM2 `distid` only. The cryptographic
+/// signature decision (r/s validation, public-key binding, etc.) is
+/// unchanged.
+#[derive(Clone, Default)]
+pub enum DistidPolicy {
+    /// Only accept the GM/T standard distid
+    /// ([`GM_TLS_DISTID`] = `"1234567812345678"`). Default since
+    /// gm-crypto 0.3.5.
+    #[default]
+    Strict,
+    /// Accept the GM/T standard distid first, then fall back to
+    /// the caller-provided list of weaker distids (the typical
+    /// entry is `[""]` for OpenSSL 3.x interop). The callback
+    /// (if set) is invoked once per fallback event with the
+    /// accepted distid so the operator can log / alert.
+    ///
+    /// Provided for v0.3.4 and earlier deployments; new code should
+    /// not enable this unless interop with a non-GmSSL-standard
+    /// signer is required.
+    Permissive {
+        /// Ordered list of distids to attempt after
+        /// [`GM_TLS_DISTID`]. The first match wins.
+        fallback_distids: Vec<String>,
+        /// Called when a fallback distid (not the GM/T standard
+        /// one) was used to verify a signature. Receives the
+        /// accepted distid as `&str`. Set to `None` to silence.
+        audit_on_fallback: Option<DistidAuditCallback>,
+    },
+}
+
+// Manual `Debug` impl: trait objects (`dyn Fn`) don't implement
+// `Debug`, so we cannot `#[derive(Debug)]` on the enum directly.
+// We surface only the public fields of the `Permissive` variant
+// and elide the callback as `"<fn>"`.
+impl std::fmt::Debug for DistidPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DistidPolicy::Strict => f.write_str("DistidPolicy::Strict"),
+            DistidPolicy::Permissive {
+                fallback_distids,
+                audit_on_fallback,
+            } => f
+                .debug_struct("DistidPolicy::Permissive")
+                .field("fallback_distids", fallback_distids)
+                .field(
+                    "audit_on_fallback",
+                    &audit_on_fallback.as_ref().map(|_| "<fn>"),
+                )
+                .finish(),
+        }
+    }
 }
 
 /// Check the certificate's KeyUsage and ExtendedKeyUsage extensions
@@ -432,12 +556,51 @@ pub const MAX_CERT_CHAIN_DEPTH: usize = 10;
 /// [`CertRole::Ca`] role is enforced. Pass [`None`] to skip role
 /// checks (e.g. when the caller has not yet decided or when
 /// validating an opaque chain).
+///
+/// **Default distid policy is [`DistidPolicy::Strict`]** (since
+/// gm-crypto 0.3.5): only the GM/T standard SM2 distid
+/// `"1234567812345678"` is accepted. Callers that need OpenSSL 3.x
+/// interop (which defaults to empty distid) must use the
+/// policy-aware variant
+/// [`verify_cert_chain_sm2_chain_with_distid_policy`].
 pub fn verify_cert_chain_sm2_chain(
     leaf_chain: &[OwnedCert],
     trust_anchors: &[OwnedCert],
     now: OffsetDateTime,
     expected_domain: Option<&str>,
     role: Option<CertRole>,
+) -> Result<(), CryptoError> {
+    verify_cert_chain_sm2_chain_with_distid_policy(
+        leaf_chain,
+        trust_anchors,
+        now,
+        expected_domain,
+        role,
+        DistidPolicy::Strict,
+    )
+}
+
+/// Policy-aware variant of [`verify_cert_chain_sm2_chain`]. See
+/// [`DistidPolicy`] for the strict vs permissive trade-off.
+///
+/// # Policy differences
+///
+/// | Failure source                                  | `Strict`              | `Permissive`                    |
+/// |--------------------------------------------------|-----------------------|---------------------------------|
+/// | Standard distid (`"1234567812345678"`) succeeds  | `Ok(())`              | `Ok(())` (no audit)             |
+/// | Standard distid fails, fallback distid succeeds  | `Err(...)`            | `Ok(())` + audit callback fires |
+/// | All distids fail                                  | `Err(...)`            | `Err(...)`                      |
+///
+/// Revocation, key usage, basic constraints, expiry, hostname
+/// matching, etc. are policy-agnostic — see
+/// [`verify_cert_chain_sm2_chain`] for the rest of the contract.
+pub fn verify_cert_chain_sm2_chain_with_distid_policy(
+    leaf_chain: &[OwnedCert],
+    trust_anchors: &[OwnedCert],
+    now: OffsetDateTime,
+    expected_domain: Option<&str>,
+    role: Option<CertRole>,
+    distid_policy: DistidPolicy,
 ) -> Result<(), CryptoError> {
     if leaf_chain.is_empty() || trust_anchors.is_empty() {
         return Err(CryptoError::CertificateVerificationFailed(
@@ -472,7 +635,13 @@ pub fn verify_cert_chain_sm2_chain(
         if idx + 1 < leaf_chain.len() {
             // Intermediate CA: issuer is the next cert in the chain
             let issuer_owned = &leaf_chain[idx + 1];
-            verify_cert_chain_sm2(child_owned, issuer_owned, now, domain)?;
+            verify_cert_chain_sm2_with_distid(
+                child_owned,
+                issuer_owned,
+                now,
+                domain,
+                &distid_policy,
+            )?;
 
             let child_cert = child_owned.as_x509()?;
 
@@ -543,7 +712,13 @@ pub fn verify_cert_chain_sm2_chain(
             };
             let mut last_err = None;
             for anchor in trust_anchors {
-                match verify_cert_chain_sm2(child_owned, anchor, now, domain) {
+                match verify_cert_chain_sm2_with_distid(
+                    child_owned,
+                    anchor,
+                    now,
+                    domain,
+                    &distid_policy,
+                ) {
                     Ok(()) => {
                         if let Some(r) = this_role {
                             verify_cert_role(&child_owned.as_x509()?, r)?;
@@ -629,12 +804,38 @@ pub fn verify_cert_chain_sm2_chain(
 ///   * `"certificate has expired or is not yet valid"`
 ///   * `"domain name mismatch"`
 ///   * SM2 signature verification failures (delegated)
+///
+/// **Default distid policy is [`DistidPolicy::Strict`]** (since
+/// gm-crypto 0.3.5). For deployments that need OpenSSL 3.x interop
+/// (which defaults to empty SM2 distid), use
+/// [`verify_against_anchors_with_distid_policy`] with
+/// [`DistidPolicy::Permissive`].
 pub fn verify_against_anchors(
     leaf_chain_der: &[Vec<u8>],
     anchors_der: &[Vec<u8>],
     now: OffsetDateTime,
     expected_domain: Option<&str>,
     role: Option<CertRole>,
+) -> Result<(), CryptoError> {
+    verify_against_anchors_with_distid_policy(
+        leaf_chain_der,
+        anchors_der,
+        now,
+        expected_domain,
+        role,
+        DistidPolicy::Strict,
+    )
+}
+
+/// Policy-aware variant of [`verify_against_anchors`]. See
+/// [`DistidPolicy`] for the strict vs permissive trade-off.
+pub fn verify_against_anchors_with_distid_policy(
+    leaf_chain_der: &[Vec<u8>],
+    anchors_der: &[Vec<u8>],
+    now: OffsetDateTime,
+    expected_domain: Option<&str>,
+    role: Option<CertRole>,
+    distid_policy: DistidPolicy,
 ) -> Result<(), CryptoError> {
     // Build OwnedCert wrappers from the DER bytes. This is the only
     // point in this module that parses the wire-format bytes; the
@@ -648,14 +849,22 @@ pub fn verify_against_anchors(
         .iter()
         .map(|der| OwnedCert { der: der.clone() })
         .collect::<Vec<_>>();
-    verify_cert_chain_sm2_chain(&leaf_chain, &trust_anchors, now, expected_domain, role)
+    verify_cert_chain_sm2_chain_with_distid_policy(
+        &leaf_chain,
+        &trust_anchors,
+        now,
+        expected_domain,
+        role,
+        distid_policy,
+    )
 }
 
-fn verify_cert_chain_sm2(
+fn verify_cert_chain_sm2_with_distid(
     leaf: &OwnedCert,
     ca: &OwnedCert,
     now: OffsetDateTime,
     expected_domain: Option<&str>,
+    distid_policy: &DistidPolicy,
 ) -> Result<(), CryptoError> {
     let leaf_cert = leaf.as_x509()?;
     let ca_cert = ca.as_x509()?;
@@ -669,7 +878,7 @@ fn verify_cert_chain_sm2(
         ));
     }
 
-    verify_cert_signature(&leaf_cert, &ca_cert, &leaf.der)?;
+    verify_cert_signature_with_distid(&leaf_cert, &ca_cert, &leaf.der, distid_policy)?;
     Ok(())
 }
 
@@ -821,8 +1030,11 @@ pub fn verify_crl(
         ));
     }
 
-    // Verify CRL signature using CA's public key
-    verify_crl_signature(crl, ca_cert)?;
+    // Verify CRL signature using CA's public key.
+    // The CRL signature is verified with the strict (GM/T
+    // standard) distid policy — there is no OpenSSL 3.x interop
+    // scenario for CRL signatures.
+    verify_crl_signature_with_distid(crl, ca_cert, &DistidPolicy::Strict)?;
 
     // Check if CRL is still valid
     if !crl.is_valid(now) {
@@ -989,7 +1201,11 @@ pub fn check_revocations_with_policy(
         // Verify CRL signature against this CA — always fail-closed
         // (a CRL signed by the wrong key MUST be rejected regardless
         // of policy; otherwise revocation cannot be trusted).
-        verify_crl_signature(&crl, &ca_cert)?;
+        // CRL signatures always use the GM/T standard distid
+        // (CRLs are issued by GmSSL-standard CAs); there is no
+        // OpenSSL 3.x interop scenario that requires a weaker
+        // distid on a CRL, so we hardcode Strict here.
+        verify_crl_signature_with_distid(&crl, &ca_cert, &DistidPolicy::Strict)?;
         // Check CRL freshness (thisUpdate <= now <= nextUpdate) —
         // also always fail-closed; an expired CRL is unreliable for
         // revocation decisions.
@@ -1025,10 +1241,11 @@ pub fn check_revocations_with_policy(
 }
 
 /// Verify SM2 signature on a certificate using the issuer's public key
-fn verify_cert_signature(
+fn verify_cert_signature_with_distid(
     leaf_cert: &X509Certificate<'_>,
     ca_cert: &X509Certificate<'_>,
     leaf_der: &[u8],
+    distid_policy: &DistidPolicy,
 ) -> Result<(), CryptoError> {
     // Get the raw TBS (To-Be-Signed) certificate bytes
     let tbs_bytes = extract_tbs_bytes(leaf_der)?;
@@ -1086,34 +1303,43 @@ fn verify_cert_signature(
     // Verify the signature using SM2 (verifier hashes internally with SM3)
     //
     // SM2 signature verification requires the signing ID (ZA computation).
-    // GM/T standard uses "1234567812345678", but OpenSSL 3.x defaults to empty string.
-    // Try the GM/T standard ID first, then fall back to empty ID.
-    let verifier = Sm2Verifier::new(&sm2_pub_key, "1234567812345678").map_err(|e| {
+    // The strict (default) policy only accepts the GM/T standard
+    // distid (`"1234567812345678"`); `Permissive` additionally tries
+    // the caller-provided fallback list (typically `[""]` for
+    // OpenSSL 3.x interop) and emits the audit callback on success.
+    let verifier = Sm2Verifier::new(&sm2_pub_key, GM_TLS_DISTID).map_err(|e| {
         CryptoError::CertificateVerificationFailed(format!("failed to create SM2 verifier: {}", e))
     })?;
 
     match verifier.verify(tbs_bytes, &sig_raw) {
         Ok(()) => Ok(()),
-        Err(_) => {
-            // Fall back to empty ID (OpenSSL 3.x default)
-            let verifier2 = Sm2Verifier::new(&sm2_pub_key, "").map_err(|e| {
-                CryptoError::CertificateVerificationFailed(format!(
-                    "failed to create fallback SM2 verifier: {}",
-                    e
-                ))
-            })?;
-            verifier2.verify(tbs_bytes, &sig_raw).map_err(|e| {
-                CryptoError::CertificateVerificationFailed(format!(
-                    "SM2 verification failed (tried both GM/T ID and empty ID): {}",
-                    e
-                ))
-            })
-        }
+        Err(primary_err) => match distid_policy {
+            DistidPolicy::Strict => Err(CryptoError::CertificateVerificationFailed(format!(
+                "SM2 verification failed under strict distid policy ({}); \
+                 no fallback to weaker distid will be attempted",
+                primary_err
+            ))),
+            DistidPolicy::Permissive {
+                fallback_distids,
+                audit_on_fallback,
+            } => verify_with_distid_fallbacks(
+                &sm2_pub_key,
+                tbs_bytes,
+                &sig_raw,
+                fallback_distids,
+                audit_on_fallback.as_ref(),
+                "SM2",
+            ),
+        },
     }
 }
 
 /// Verify SM2 signature on a CRL using the CA's public key
-fn verify_crl_signature(crl: &CrlInfo, ca_cert: &X509Certificate<'_>) -> Result<(), CryptoError> {
+fn verify_crl_signature_with_distid(
+    crl: &CrlInfo,
+    ca_cert: &X509Certificate<'_>,
+    distid_policy: &DistidPolicy,
+) -> Result<(), CryptoError> {
     // Get the raw TBS CRL bytes
     let tbs_bytes = crl.raw_tbs_bytes()?;
 
@@ -1157,27 +1383,47 @@ fn verify_crl_signature(crl: &CrlInfo, ca_cert: &X509Certificate<'_>) -> Result<
         )));
     };
 
-    // Verify the signature using SM2 (try both GM/T ID and empty ID)
-    let verifier = Sm2Verifier::new(&sm2_pub_key, "1234567812345678").map_err(|e| {
+    // Verify the signature using SM2. The strict (default) policy only
+    // accepts the GM/T standard distid; `Permissive` additionally
+    // tries the caller-provided fallback list and emits the audit
+    // callback on success. CRL signatures are always GmSSL-standard,
+    // so `Strict` is the typical case; `Permissive` is plumbed
+    // through for parity with `verify_cert_signature_with_distid`.
+    let verifier = Sm2Verifier::new(&sm2_pub_key, GM_TLS_DISTID).map_err(|e| {
         CryptoError::CrlVerificationFailed(format!("failed to create SM2 verifier: {}", e))
     })?;
 
     match verifier.verify(tbs_bytes, &sig_raw) {
         Ok(()) => Ok(()),
-        Err(_) => {
-            let verifier2 = Sm2Verifier::new(&sm2_pub_key, "").map_err(|e| {
-                CryptoError::CrlVerificationFailed(format!(
-                    "failed to create fallback SM2 verifier: {}",
-                    e
-                ))
-            })?;
-            verifier2.verify(tbs_bytes, &sig_raw).map_err(|e| {
-                CryptoError::CrlVerificationFailed(format!(
-                    "SM2 CRL verification failed (tried both GM/T ID and empty ID): {}",
-                    e
-                ))
-            })
-        }
+        Err(primary_err) => match distid_policy {
+            DistidPolicy::Strict => Err(CryptoError::CrlVerificationFailed(format!(
+                "SM2 CRL verification failed under strict distid policy ({}); \
+                 no fallback to weaker distid will be attempted",
+                primary_err
+            ))),
+            DistidPolicy::Permissive {
+                fallback_distids,
+                audit_on_fallback,
+            } => {
+                // The helper returns `CertificateVerificationFailed`
+                // on failure; remap to `CrlVerificationFailed` here
+                // so the error type matches the CRL path's contract.
+                match verify_with_distid_fallbacks(
+                    &sm2_pub_key,
+                    tbs_bytes,
+                    &sig_raw,
+                    fallback_distids,
+                    audit_on_fallback.as_ref(),
+                    "CRL SM2",
+                ) {
+                    Ok(()) => Ok(()),
+                    Err(CryptoError::CertificateVerificationFailed(msg)) => {
+                        Err(CryptoError::CrlVerificationFailed(msg))
+                    }
+                    Err(other) => Err(other),
+                }
+            }
+        },
     }
 }
 
@@ -1747,5 +1993,182 @@ mod tests {
             }
             other => panic!("Strict must reject malformed CRL, got {other:?}"),
         }
+    }
+
+    // ========================================================================
+    // PR-2.2 (P0-7): DistidPolicy strict default + Permissive opt-in
+    // ========================================================================
+
+    /// The default [`DistidPolicy`] must be `Strict`. Any caller using
+    /// `..Default::default()` picks up the secure GM/T-only behaviour;
+    /// no silent fallback to weaker distids.
+    #[test]
+    fn pr22_distid_policy_default_is_strict() {
+        assert!(
+            matches!(DistidPolicy::default(), DistidPolicy::Strict),
+            "DistidPolicy::default() must be Strict"
+        );
+    }
+
+    /// Signing a payload with the empty distid (OpenSSL 3.x default)
+    /// and then verifying it under `DistidPolicy::Strict` must fail
+    /// — this is the P0-7 fix: gm-crypto ≤ 0.3.4 silently accepted
+    /// these signatures after the standard distid failed, which is
+    /// exactly the asymmetric weakness the audit flagged.
+    ///
+    /// We exercise the contract at two levels:
+    ///
+    /// 1. The GM/T standard-distid verifier must reject the empty-
+    ///    distid signature on its own (sanity: without any fallback
+    ///    logic, the standard distid alone would already reject).
+    /// 2. The policy-aware path (`verify_with_distid_fallbacks`) only
+    ///    iterates the caller's fallback list under `Permissive`.
+    ///    We feed the helper an empty fallback list and assert it
+    ///    returns an error — which is the behaviour that makes
+    ///    `DistidPolicy::Strict` "no fallback attempted" by design.
+    #[test]
+    fn pr22_strict_rejects_empty_distid_signature() {
+        use crate::sm2::{Sm2KeyPair, Sm2Signer};
+
+        let key_pair = Sm2KeyPair::generate().expect("generate SM2 keypair");
+        let data = b"some arbitrary payload to sign";
+
+        // Sign with the empty distid (OpenSSL 3.x default).
+        let signer =
+            Sm2Signer::new_with_distid(&key_pair, "").expect("create signer with empty distid");
+        let signature = signer.sign(data).expect("sign with empty distid");
+
+        // (1) Verify with the GM/T standard distid alone — must fail.
+        let verifier_standard =
+            Sm2Verifier::new(&key_pair.public_key_bytes_uncompressed(), GM_TLS_DISTID)
+                .expect("create verifier with standard distid");
+        assert!(
+            verifier_standard.verify(data, &signature).is_err(),
+            "standard-distid verifier must reject an empty-distid signature"
+        );
+
+        // (2) STRICT semantics: the policy-aware helper is only
+        //     invoked by `verify_cert_signature_with_distid` when the
+        //     policy is `Permissive`. The helper's behaviour when
+        //     the fallback list is empty is the contract that makes
+        //     "strict" equivalent to "no fallbacks were attempted".
+        let pub_65 = key_pair.public_key_bytes_uncompressed();
+        let empty_fallback = verify_with_distid_fallbacks(
+            &pub_65,
+            data,
+            &signature,
+            &[], // no fallbacks at all
+            None,
+            "SM2",
+        );
+        assert!(
+            empty_fallback.is_err(),
+            "verify_with_distid_fallbacks with an empty fallback list must reject"
+        );
+    }
+
+    /// Under `DistidPolicy::Permissive`, an empty-distid signature
+    /// is accepted (after the standard distid fails), and the audit
+    /// callback fires once with the accepted distid. This is the
+    /// migration path for OpenSSL 3.x interop: the operator keeps
+    /// the handshake alive but gets a metric / log line per fallback.
+    #[test]
+    fn pr22_permissive_accepts_empty_distid_and_audits() {
+        use crate::sm2::{Sm2KeyPair, Sm2Signer};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let key_pair = Sm2KeyPair::generate().expect("generate SM2 keypair");
+        let data = b"another payload, signed with empty distid";
+
+        let signer =
+            Sm2Signer::new_with_distid(&key_pair, "").expect("create signer with empty distid");
+        let signature = signer.sign(data).expect("sign with empty distid");
+
+        let accepted_distid = Arc::new(AtomicUsize::new(0));
+        let accepted_clone = accepted_distid.clone();
+        let observed = Arc::new(std::sync::Mutex::new(String::new()));
+        let observed_clone = observed.clone();
+
+        let audit_cb: DistidAuditCallback = Arc::new(move |distid: &str| {
+            accepted_clone.fetch_add(1, Ordering::SeqCst);
+            *observed_clone.lock().unwrap() = distid.to_string();
+        });
+
+        let pub_65 = key_pair.public_key_bytes_uncompressed();
+        let permissive = DistidPolicy::Permissive {
+            fallback_distids: vec![String::new()], // accept empty distid
+            audit_on_fallback: Some(audit_cb),
+        };
+
+        // Sanity: standard-distid verifier must fail (otherwise the
+        // audit callback would never fire on the fallback path).
+        let verifier_standard =
+            Sm2Verifier::new(&pub_65, GM_TLS_DISTID).expect("create verifier with standard distid");
+        assert!(
+            verifier_standard.verify(data, &signature).is_err(),
+            "standard-distid verifier must reject empty-distid signature"
+        );
+
+        let res = verify_with_distid_fallbacks(
+            &pub_65,
+            data,
+            &signature,
+            match &permissive {
+                DistidPolicy::Permissive {
+                    fallback_distids, ..
+                } => fallback_distids,
+                _ => unreachable!(),
+            },
+            match &permissive {
+                DistidPolicy::Permissive {
+                    audit_on_fallback, ..
+                } => audit_on_fallback.as_ref(),
+                _ => unreachable!(),
+            },
+            "SM2",
+        );
+        assert!(
+            res.is_ok(),
+            "Permissive must accept empty-distid signature, got {res:?}"
+        );
+        assert_eq!(
+            accepted_distid.load(Ordering::SeqCst),
+            1,
+            "audit callback must fire exactly once"
+        );
+        assert_eq!(
+            observed.lock().unwrap().as_str(),
+            "",
+            "audit callback must receive the accepted (empty) distid"
+        );
+    }
+
+    /// Permissive with `audit_on_fallback = None` must still accept
+    /// the fallback distid; the callback absence just means the
+    /// event is silent. This is the "fire-and-forget interop" mode.
+    #[test]
+    fn pr22_permissive_silent_when_no_audit_callback() {
+        use crate::sm2::{Sm2KeyPair, Sm2Signer};
+
+        let key_pair = Sm2KeyPair::generate().expect("generate SM2 keypair");
+        let data = b"silent permissive path";
+
+        let signer =
+            Sm2Signer::new_with_distid(&key_pair, "").expect("create signer with empty distid");
+        let signature = signer.sign(data).expect("sign with empty distid");
+
+        let pub_65 = key_pair.public_key_bytes_uncompressed();
+        let res = verify_with_distid_fallbacks(
+            &pub_65,
+            data,
+            &signature,
+            &[String::new()],
+            None, // no audit callback
+            "SM2",
+        );
+        assert!(
+            res.is_ok(),
+            "Permissive without audit must accept empty-distid signature, got {res:?}"
+        );
     }
 }
