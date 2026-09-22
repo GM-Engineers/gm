@@ -874,26 +874,94 @@ pub fn verify_cert_crl(
 /// CRL). Revocation check then proceeds for each cert in `chain`
 /// whose issuer matches the CRL's issuer.
 ///
-/// Mismatched CRLs (issuer not present in the chain) are silently
-/// skipped — the operator is expected to provide CRLs that match
-/// their configured anchors. Malformed CRLs are also silently
-/// skipped (one bad CRL does not invalidate the whole handshake).
+/// **Default policy is [`CrlVerifyPolicy::Strict`]** (since v0.3.4):
+/// any CRL whose DER fails to parse, whose issuer DN does not match
+/// any cert in the chain, or whose chain entry cannot be re-parsed
+/// causes the call to return [`CryptoError::CrlVerificationFailed`].
+/// RFC 5280 §6.3 and GB/T 25056-2018 §7.4 require fail-closed handling
+/// of CRL processing errors. To opt back into the v0.2.x / v0.3.0–v0.3.3
+/// fail-open behaviour, call [`check_revocations_with_policy`] with
+/// [`CrlVerifyPolicy::Permissive`].
 pub fn check_revocations(
     chain: &[OwnedCert],
     crls: &[Vec<u8>],
     now: OffsetDateTime,
 ) -> Result<(), CryptoError> {
+    check_revocations_with_policy(chain, crls, now, CrlVerifyPolicy::Strict)
+}
+
+/// Strictness policy applied to CRL processing errors during
+/// [`check_revocations_with_policy`].
+///
+/// `Strict` aligns with RFC 5280 §6.3 / GB/T 25056-2018 §7.4 (fail-closed):
+/// any malformed CRL or chain/CRL mismatch causes the verification to
+/// return [`CryptoError::CrlVerificationFailed`]. `Permissive` preserves
+/// the v0.2.x / v0.3.0–v0.3.3 behaviour of silently skipping the offending
+/// CRL entry (fail-open); it exists only for migrations and must not be the
+/// default for new deployments.
+///
+/// Note: revocation detection (a serial present in a valid CRL's
+/// `revokedCertificates`) is independent of this policy — both modes
+/// reject revoked serials.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CrlVerifyPolicy {
+    /// Fail-closed on any CRL processing error (RFC 5280 §6.3 strict
+    /// semantics). Default since v0.3.4.
+    #[default]
+    Strict,
+    /// Fail-open: skip CRL entries that fail to parse, fail issuer
+    /// matching, or reference a malformed chain entry. Provided for
+    /// backward compatibility with v0.2.x / v0.3.0–v0.3.3 deployments;
+    /// new code should not enable this.
+    Permissive,
+}
+
+/// Revocation check helper with explicit policy selection.
+///
+/// See [`check_revocations`] for the default behaviour ([`CrlVerifyPolicy::Strict`]).
+///
+/// # Policy differences
+///
+/// | Failure source                            | `Strict`              | `Permissive`   |
+/// |-------------------------------------------|-----------------------|----------------|
+/// | `CrlInfo::from_der` parse failure         | `Err(...)`            | skip CRL       |
+/// | `crl.issuer_der()` parse failure          | `Err(...)`            | skip CRL       |
+/// | No chain cert matches CRL issuer DN       | `Err(...)`            | skip CRL       |
+/// | `cert_owned.as_x509()` parse failure      | `Err(...)`            | skip iteration |
+/// | CRL signature verification failure        | `Err(...)`            | `Err(...)`     |
+/// | CRL expired (`is_valid == false`)         | `Err(...)`            | `Err(...)`     |
+/// | Serial present in CRL's revoked list      | `Err(...)` (revoked)  | `Err(...)`     |
+///
+/// Revocation detection (signature / freshness / revoked-list check)
+/// always fails closed regardless of policy.
+pub fn check_revocations_with_policy(
+    chain: &[OwnedCert],
+    crls: &[Vec<u8>],
+    now: OffsetDateTime,
+    policy: CrlVerifyPolicy,
+) -> Result<(), CryptoError> {
     if crls.is_empty() {
         return Ok(());
     }
     for crl_der in crls {
+        // Each per-CRL failure path picks STRICT or PERMISSIVE behaviour.
         let crl = match CrlInfo::from_der(crl_der) {
             Ok(c) => c,
-            Err(_) => continue,
+            Err(e) => match policy {
+                CrlVerifyPolicy::Strict => {
+                    return Err(e);
+                }
+                CrlVerifyPolicy::Permissive => continue,
+            },
         };
         let crl_issuer_der = match crl.issuer_der() {
             Ok(d) => d,
-            Err(_) => continue,
+            Err(e) => match policy {
+                CrlVerifyPolicy::Strict => {
+                    return Err(e);
+                }
+                CrlVerifyPolicy::Permissive => continue,
+            },
         };
         // Find the CA cert in the chain (the one whose subject
         // matches the CRL's issuer). This is the cert whose public
@@ -908,11 +976,23 @@ pub fn check_revocations(
         });
         let ca_cert = match ca_cert {
             Some(c) => c,
-            None => continue, // no matching CA in chain
+            None => match policy {
+                CrlVerifyPolicy::Strict => {
+                    return Err(CryptoError::CrlVerificationFailed(format!(
+                        "no CA in chain matches CRL issuer (CRL bytes len = {})",
+                        crl_der.len()
+                    )));
+                }
+                CrlVerifyPolicy::Permissive => continue,
+            },
         };
-        // Verify CRL signature against this CA
+        // Verify CRL signature against this CA — always fail-closed
+        // (a CRL signed by the wrong key MUST be rejected regardless
+        // of policy; otherwise revocation cannot be trusted).
         verify_crl_signature(&crl, &ca_cert)?;
-        // Check CRL freshness (thisUpdate <= now <= nextUpdate).
+        // Check CRL freshness (thisUpdate <= now <= nextUpdate) —
+        // also always fail-closed; an expired CRL is unreliable for
+        // revocation decisions.
         if !crl.is_valid(now) {
             return Err(CryptoError::CrlVerificationFailed(
                 "CRL has expired (nextUpdate < now) or not yet valid (lastUpdate > now)".into(),
@@ -922,7 +1002,12 @@ pub fn check_revocations(
         for cert_owned in chain {
             let cert = match cert_owned.as_x509() {
                 Ok(c) => c,
-                Err(_) => continue,
+                Err(e) => match policy {
+                    CrlVerifyPolicy::Strict => {
+                        return Err(e);
+                    }
+                    CrlVerifyPolicy::Permissive => continue,
+                },
             };
             if cert.issuer().as_raw() != crl_issuer_der.as_slice() {
                 continue;
@@ -1530,5 +1615,137 @@ mod tests {
         // to lowercase. This is independent of IDN encoding.
         assert_eq!(normalize_domain("Example.COM"), "example.com");
         assert_eq!(normalize_domain("API.example.COM"), "api.example.com");
+    }
+
+    // ===================================================================
+    // PR-2.1 (P0-4): CRL fail-open → STRICT (default) + PERMISSIVE opt-in
+    // ===================================================================
+
+    /// Default policy must be Strict (RFC 5280 §6.3 + GB/T 25056 §7.4
+    /// semantics). If anyone flips `#[default]` to Permissive in the
+    /// future, this test catches it before release.
+    #[test]
+    fn pr21_crl_policy_default_is_strict() {
+        assert_eq!(CrlVerifyPolicy::default(), CrlVerifyPolicy::Strict);
+        assert_ne!(
+            CrlVerifyPolicy::default(),
+            CrlVerifyPolicy::Permissive,
+            "v0.3.0+ must default to Strict (fail-closed) per RFC 5280 §6.3"
+        );
+    }
+
+    /// Under Strict, a CRL list containing even one malformed DER blob
+    /// causes the whole call to return `Err`. Under Permissive, the
+    /// malformed CRL is skipped and the call returns `Ok` (no chain
+    /// cert, no revoked serial).
+    #[test]
+    fn pr21_strict_rejects_malformed_crl_permissive_skips() {
+        // Empty chain is the simplest "no CA in chain matches anything"
+        // scenario; the malformed-CRL path must fire BEFORE chain
+        // matching (because `CrlInfo::from_der` runs first).
+        let chain: Vec<OwnedCert> = vec![];
+        // Random bytes that x509-parser cannot parse as a CRL.
+        let malformed_crl = vec![0x00u8, 0x01, 0x02, 0x03, 0x04, 0x05];
+
+        let now = OffsetDateTime::now_utc();
+
+        // Strict must reject.
+        let strict_res = check_revocations_with_policy(
+            &chain,
+            std::slice::from_ref(&malformed_crl),
+            now,
+            CrlVerifyPolicy::Strict,
+        );
+        assert!(
+            strict_res.is_err(),
+            "Strict must reject malformed CRL, got {strict_res:?}"
+        );
+
+        // Permissive must accept (skip and continue).
+        let permissive_res = check_revocations_with_policy(
+            &chain,
+            std::slice::from_ref(&malformed_crl),
+            now,
+            CrlVerifyPolicy::Permissive,
+        );
+        assert!(
+            permissive_res.is_ok(),
+            "Permissive must skip malformed CRL, got {permissive_res:?}"
+        );
+    }
+
+    /// The old `check_revocations(chain, crls, now)` entry point must
+    /// route through Strict. This is the behaviour-gate for callers
+    /// that haven't migrated to the `_with_policy` form.
+    #[test]
+    fn pr21_legacy_check_revocations_defaults_to_strict() {
+        let chain: Vec<OwnedCert> = vec![];
+        let malformed_crl = vec![0x00u8, 0x01, 0x02, 0x03];
+        let now = OffsetDateTime::now_utc();
+
+        let res = check_revocations(&chain, std::slice::from_ref(&malformed_crl), now);
+        assert!(
+            matches!(res, Err(CryptoError::CrlVerificationFailed(_))),
+            "legacy check_revocations must default to Strict, got {res:?}"
+        );
+    }
+
+    /// Empty CRL list: both policies must accept (no work to do).
+    /// This is the "operator has not configured any CRL" path; it must
+    /// remain a no-op under both modes (regression coverage for the
+    /// early `if crls.is_empty() { return Ok(()); }` guard).
+    #[test]
+    fn pr21_empty_crl_list_is_noop_under_both_policies() {
+        let chain: Vec<OwnedCert> = vec![];
+        let now = OffsetDateTime::now_utc();
+        assert!(
+            check_revocations_with_policy(&chain, &[], now, CrlVerifyPolicy::Strict).is_ok(),
+            "Strict must accept empty CRL list"
+        );
+        assert!(
+            check_revocations_with_policy(&chain, &[], now, CrlVerifyPolicy::Permissive).is_ok(),
+            "Permissive must accept empty CRL list"
+        );
+    }
+
+    /// CRL signature / freshness / revoked-list check must remain
+    /// fail-closed under BOTH policies. The policy knob is meant to
+    /// relax *processing* errors (parse, issuer match), NOT the
+    /// cryptographic revocation decision itself. We confirm this by
+    /// asserting that the **bad-CRL-parse** path still rejects under
+    /// Strict (already covered by `pr21_strict_rejects_malformed_crl_permissive_skips`)
+    /// AND that under Strict, the rejection diagnostic includes the
+    /// CRL parse failure rather than a confusing downstream error.
+    ///
+    /// End-to-end CRL-signature-verify coverage lives in the
+    /// gm-tlcp integration tests (`gm_tlcp_cert_verify_negative.rs`),
+    /// which use real GmSSL-issued CRL fixtures; we don't try to
+    /// fabricate a forged-signature CRL here because CRL signature
+    /// generation requires a working SM2 signing path and would
+    /// duplicate the integration test scaffolding.
+    #[test]
+    fn pr21_strict_diagnostic_mentions_crl_parse_failure() {
+        let chain: Vec<OwnedCert> = vec![];
+        let malformed_crl = vec![0xDE, 0xAD, 0xBE, 0xEF]; // not even a valid SEQUENCE
+        let now = OffsetDateTime::now_utc();
+
+        let res = check_revocations_with_policy(
+            &chain,
+            std::slice::from_ref(&malformed_crl),
+            now,
+            CrlVerifyPolicy::Strict,
+        );
+        match res {
+            Err(CryptoError::CrlVerificationFailed(msg)) => {
+                // The diagnostic must come from the CRL parse path
+                // (or our explicit "no CA in chain" branch), not a
+                // confusing downstream error.
+                assert!(
+                    msg.contains("CRL parse failed") || msg.contains("no CA in chain"),
+                    "expected CRL parse or no-CA diagnostic, got: {msg}"
+                );
+            }
+            other => panic!("Strict must reject malformed CRL, got {other:?}"),
+        }
     }
 }

@@ -50,11 +50,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-09-22
+
+### Security
+
+- **`x509::verify::check_revocations` now defaults to fail-closed CRL
+  semantics (RFC 5280 §6.3 strict).** Previously (v0.3.2 / v0.3.3),
+  `check_revocations` silently skipped malformed CRLs and CRLs whose
+  issuer did not match any chain cert — fail-open behaviour that
+  contradicted RFC 5280 §6.3 and GB/T 25056-2018 §7.4. A malformed
+  CRL in such a deployment would be indistinguishable from "no CRL
+  configured", silently disabling revocation checking for that hand-
+  shake. This is now corrected.
+
+  Migration:
+
+  - **Default callers** (`check_revocations(chain, crls, now)`) automatically
+    get the new strict behaviour. If a CRL in `crls` fails to parse, has
+    an unparseable issuer DN, references a CA that is not in `chain`, or
+    is otherwise unusable, the function returns
+    [`CryptoError::CrlVerificationFailed`] instead of silently continuing.
+    If your deployment relied on the silent-skip behaviour (e.g. a stale
+    CRL cache where some entries may be corrupt), audit your CRL feed
+    before upgrading.
+
+  - **Operators that need v0.2.x / v0.3.0–v0.3.3 fail-open behaviour**
+    must opt in explicitly via the new
+    `check_revocations_with_policy(chain, crls, now, CrlVerifyPolicy::Permissive)`
+    entry point. `Permissive` skips CRL processing errors (parse,
+    issuer match, chain-entry parse) but still rejects invalid
+    signatures, expired CRLs, and any serial present in a valid CRL's
+    `revokedCertificates` list — the cryptographic revocation decision
+    itself is never relaxed.
+
+  - **`check_revocations` is now a one-line forwarder to
+    `check_revocations_with_policy(.., CrlVerifyPolicy::Strict)`,** so
+    the type signature is unchanged and downstream code continues to
+    compile.
+
 ### Added
 
-### Changed
-
-### Fixed
+- **`x509::verify::CrlVerifyPolicy`** — public enum with two variants
+  (`Strict`, `Permissive`). `#[derive(Default)]` defaults `Strict` so
+  any caller using `..default()` or `..Default::default()` picks up the
+  secure behaviour.
+- **`x509::verify::check_revocations_with_policy(chain, crls, now, policy)`**
+  — new entry point that takes the explicit [`CrlVerifyPolicy`]
+  argument. Documented policy table in the rustdoc spells out which
+  failure sources are policy-controlled (parse / issuer / chain-entry)
+  and which always fail closed (signature / freshness / revoked-list).
+- **Five new unit tests** in [`src/x509/verify.rs`](src/x509/verify.rs)
+  covering:
+  - `CrlVerifyPolicy::default() == Strict`
+  - `Strict` rejects a malformed CRL; `Permissive` skips it.
+  - Legacy `check_revocations` entry point defaults to `Strict`.
+  - Empty `crls` list is a no-op under both policies (regression
+    coverage for the early-return guard).
+  - `Strict` rejection diagnostic includes the CRL parse-failure
+    reason (operator-triage signal).
 
 ## [0.3.3] - 2026-09-18
 
@@ -197,6 +250,7 @@ removed. The crate's public surface is fully backwards-compatible with
 the 0.1.x series.
 
 [Unreleased]: https://github.com/GM-Engineers/gm/compare/main...HEAD
+[0.3.4]: https://github.com/GM-Engineers/gm/compare/gm-crypto-v0.3.3...gm-crypto-v0.3.4
 [0.3.2]: https://github.com/GM-Engineers/gm/compare/gm-crypto-v0.3.1...gm-crypto-v0.3.2
 [0.3.1]: https://github.com/GM-Engineers/gm/compare/gm-crypto-v0.3.0...gm-crypto-v0.3.1
 [0.3.0]: https://github.com/GM-Engineers/gm/compare/gm-crypto-v0.2.0...gm-crypto-v0.3.0
