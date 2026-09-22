@@ -59,6 +59,7 @@ async fn test_sign_certificate_success() {
     let req = Request::new(SignCertificateRequest {
         csr_pem,
         validity_days: 365,
+        ..Default::default()
     });
 
     let resp = service.sign_certificate(req).await;
@@ -82,6 +83,7 @@ async fn test_sign_certificate_invalid_validity() {
     let req = Request::new(SignCertificateRequest {
         csr_pem,
         validity_days: 0, // Invalid
+        ..Default::default()
     });
 
     let resp = service.sign_certificate(req).await;
@@ -113,6 +115,7 @@ async fn test_sign_and_get_certificate_roundtrip() {
     let sign_req = Request::new(SignCertificateRequest {
         csr_pem,
         validity_days: 365,
+        ..Default::default()
     });
 
     let sign_resp = service
@@ -137,6 +140,7 @@ async fn test_revoke_certificate() {
     let sign_req = Request::new(SignCertificateRequest {
         csr_pem,
         validity_days: 365,
+        ..Default::default()
     });
     let sign_resp = service
         .sign_certificate(sign_req)
@@ -181,6 +185,7 @@ async fn test_renew_revoked_certificate_fails() {
     let req = Request::new(RenewCertificateRequest {
         serial_number: "nonexistent".to_string(),
         validity_days: 365,
+        ..Default::default()
     });
 
     let resp = service.renew_certificate(req).await;

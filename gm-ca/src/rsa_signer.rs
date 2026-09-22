@@ -283,6 +283,24 @@ impl RsaCaSigner {
                 validity_days
             )));
         }
+        self.sign_csr_with_profile_and_seconds(csr_input, validity_days * 86400, profile)
+    }
+
+    /// PR-3.1 (gm-ca 0.3.0, P1-9): sub-day TTL on RSA CSR signing.
+    /// Mirrors `CaSigner::sign_csr_with_profile_and_seconds`. See
+    /// that method's docs for the SPIRE Workload API rationale.
+    pub fn sign_csr_with_profile_and_seconds(
+        &self,
+        csr_input: &[u8],
+        validity_seconds: i64,
+        profile: &CertProfile,
+    ) -> Result<(String, String), CaError> {
+        if !(1..=31_536_000).contains(&validity_seconds) {
+            return Err(CaError::InvalidArgument(format!(
+                "validity_seconds must be 1-31536000 (1s-365d), got {}",
+                validity_seconds
+            )));
+        }
 
         let csr_der = decode_csr(csr_input)?;
         let (_, csr) = X509CertificationRequest::from_der(&csr_der)
@@ -326,9 +344,10 @@ impl RsaCaSigner {
             ))
         })?;
 
-        // Validity period
+        // Validity period (sub-day granularity; P1-9 fix)
         let not_before = time::OffsetDateTime::now_utc();
-        let not_after = not_before + std::time::Duration::from_secs(86400 * validity_days as u64);
+        let not_after =
+            not_before + std::time::Duration::from_secs(validity_seconds as u64);
 
         // Random 20-byte positive serial number.
         let mut serial_bytes = [0u8; 20];

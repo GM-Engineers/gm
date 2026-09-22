@@ -9,7 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`SignCertificateRequest` / `RenewCertificateRequest` (proto v0.3.0,
+  PR-3.1)** gain two additive fields for SPIRE Workload API support:
+  - `validity_seconds` (int64, field 3): sub-day TTL. When > 0,
+    takes precedence over the legacy `validity_days` field. Range
+    `1..=31_536_000` (1s .. 365d). SPIRE SVID rotation typically
+    issues 1h~24h SVIDs — structurally incompatible with the
+    pre-3.0 integer-day granularity.
+  - `profile_json` (string, field 4): JSON-encoded `CertProfile`
+    (see `gm_ca::cert_profile::CertProfile` for the schema). Empty
+    string = fall back to `CertProfile::default()` (v0.1.x /
+    v0.2.x wire format). Used by SPIRE Server to pass URI SANs
+    (`spiffe://trust.domain/ns/.../sa/...`) + the appropriate
+    KU/EKU layout per SVID type.
+- **`CaSigner::sign_csr_with_profile_and_seconds` /
+  `RsaCaSigner::sign_csr_with_profile_and_seconds` /
+  `CaSigner::renew_certificate_with_profile_and_seconds`** — direct
+  signer entry points accepting `validity_seconds: i64`. The pre-3.0
+  `_with_profile` methods are preserved as thin wrappers that
+  convert days to seconds.
+- **`CertProfile` (and nested `KeyUsageBits`, `ExtendedKeyUsage`,
+  `GeneralName`) gains `serde::Serialize` / `Deserialize`** —
+  required for the new `profile_json` gRPC field. JSON
+  representation uses snake_case field names; the SAN enum is
+  internally tagged (`{"type":"uri","value":"..."}`).
+- **`tests/sign_certificate_v3.rs`** (PR-3.1, new file, 11 tests)
+  exercises backward compatibility (pre-v0.3.0 clients using only
+  `validity_days`), sub-day TTL (1h / 5min SVID scenarios),
+  profile_json URI SAN passthrough (verifying the SPIFFE-ID URI
+  appears in the issued cert's SAN extension), precedence
+  (seconds beats days), and validation (invalid JSON / out-of-range
+  seconds).
+
 ### Changed
+
+- **`CertProfile` carries `#[serde(default)]`** at the struct level
+  (and `KeyUsageBits` likewise), so callers can pass partial JSON
+  profiles; missing fields default to `false` / `Default::default()`.
+- **gm-ca bumped to 0.3.0** (from 0.2.2): proto wire-format addition
+  (additive, backward-compatible) + new public API methods
+  (`sign_csr_with_profile_and_seconds` et al.) + new dependencies
+  (`serde`, `serde_json`) constitute a minor-version bump per SemVer.
+  Downstream dev-deps `gm-crypto` (`^0.2` → `^0.3`) and `gm-tlcp`
+  (`^0.2` → `^0.3`) track accordingly.
 
 ### Fixed
 

@@ -2,7 +2,7 @@
 authors = ["Eric Zhang"]
 rust-version = "1.85"
 name = "gm-ca"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "GM/CA — gRPC-based CA service for SM2 + TLCP certificates (RsaCaSigner behind `rsa` feature, TLCP profile presets behind `tlcp-profiles` feature)"
@@ -47,6 +47,16 @@ zeroize = { version = "1", features = ["derive"] }
 rsa  = { version = "0.9", default-features = false, optional = true, features = ["std", "pem", "sha2"] }
 sha2 = { version = "0.10", optional = true }
 sha1 = { version = "0.10", optional = true }
+# PR-3.1 (P1-8 + P1-9): runtime serde for `CertProfile` JSON
+# passthrough on `SignCertificateRequest.profile_json`. The Rust
+# `CertProfile` enum has 4 variants + 9-bit KeyUsage + bool flags,
+# which is much more compact as JSON than a protobuf oneof with one
+# branch per variant. Adding `serde` is a small new dep; we do NOT
+# add it to the production (non-dev) path — only the gRPC handler
+# uses it, gated on `serde_json::from_str` for an empty string
+# fallback to `CertProfile::default()`.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [features]
 # The `rsa` feature enables `RsaCaSigner` for issuing X.509 certs with

@@ -56,9 +56,9 @@ path = "../gm-ca"
 # form a chicken-and-egg cycle. Relaxing to `^0.2` lets
 # gm-crypto 0.3.2 publish first (against the existing gm-ca
 # 0.2.0); gm-ca 0.2.1 follows; gm-tlcp 0.6.5 follows last.
-# Tighten back to `^0.2.1` in the next release cycle, once
-# 0.2.1 is on crates.io.
-version = "0.2"
+# PR-3.1 bumped gm-ca to 0.3.0 (P1-8 + P1-9 proto v0.3.0 + serde);
+# widen to `^0.3` to follow.
+version = "0.3"
 default-features = false
 features = ["tlcp-profiles"]
 

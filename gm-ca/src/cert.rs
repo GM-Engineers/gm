@@ -278,21 +278,47 @@ impl CaSigner {
                 validity_days
             )));
         }
-
+        self.sign_csr_with_profile_and_seconds(csr_input, validity_days * 86400, profile)
+    }
+    
+    /// PR-3.1 (gm-ca 0.3.0, P1-9): sub-day TTL on CSR signing.
+    ///
+    /// SPIRE Workload API SVID rotation requires hour-granularity (typical
+    /// SVID lifetime is 1h~24h); the pre-3.0 integer-day granularity of
+    /// `sign_csr_with_profile` is structurally incompatible with the SPIRE
+    /// rotation model. `validity_seconds` accepts 1..=31_536_000 (1s
+    /// through 365d inclusive).
+    ///
+    /// Backward compat: `sign_csr_with_profile(days, profile)` is preserved
+    /// as a thin wrapper that converts days to seconds. New callers
+    /// (SPIRE Server, gm-kms workload API) should use this method.
+    pub fn sign_csr_with_profile_and_seconds(
+        &self,
+        csr_input: &[u8],
+        validity_seconds: i64,
+        profile: &CertProfile,
+    ) -> Result<(String, String), CaError> {
+        if !(1..=31_536_000).contains(&validity_seconds) {
+            return Err(CaError::InvalidArgument(format!(
+                "validity_seconds must be 1-31536000 (1s-365d), got {}",
+                validity_seconds
+            )));
+        }
+    
         let csr_der = decode_csr(csr_input)?;
         let (_, csr) = X509CertificationRequest::from_der(&csr_der)
             .map_err(|e| CaError::InvalidCsr(format!("CSR parse failed: {}", e)))?;
-
+    
         let csr_info: &X509CertificationRequestInfo = &csr.certification_request_info;
-
+    
         // Subject DN raw DER bytes from CSR (for embedding in certificate)
         let subject_der = csr_info.subject.as_raw();
-
+    
         // Extract public key from CSR's SubjectPublicKeyInfo (already DER encoded)
         // BitString.data contains the raw public key bytes
         let spki_bytes = &csr_info.subject_pki.subject_public_key.data;
         let pk_algorithm_oid = csr_info.subject_pki.algorithm.algorithm.as_bytes();
-
+    
         // Validate CSR public key is SM2 (only accept SM2_PK_OID, not generic EC OID)
         // RFC 3279 specifies that EC OID (1.2.840.10045.2.1) with brainpoolP256r1
         // or other curves is NOT SM2. Only SM2 OID (1.2.156.10197.1.301) is valid.
@@ -301,7 +327,7 @@ impl CaSigner {
                 "CSR public key must use SM2 algorithm OID (1.2.156.10197.1.301)".to_string(),
             ));
         }
-
+    
         // Verify CSR signature to prove the requester owns the corresponding private key
         let sig_bytes = csr.signature_value.data.as_ref();
         let decompressed_pk = decompress_sm2_pubkey(spki_bytes)
@@ -312,10 +338,11 @@ impl CaSigner {
         verifier.verify(csr_info_bytes, sig_bytes).map_err(|e| {
             CaError::InvalidCsr(format!("CSR signature verification failed: {}", e))
         })?;
-
-        // Validity period
+    
+        // Validity period (sub-day granularity; P1-9 fix)
         let not_before = now_utc_for_x509();
-        let not_after = not_before + std::time::Duration::from_secs(86400 * validity_days as u64);
+        let not_after =
+            not_before + std::time::Duration::from_secs(validity_seconds as u64);
 
         // Random 20-byte positive serial number
         let mut serial_bytes = [0u8; 20];
@@ -399,6 +426,31 @@ impl CaSigner {
                 validity_days
             )));
         }
+        self.renew_certificate_with_profile_and_seconds(
+            existing_cert_pem,
+            validity_days * 86400,
+            profile,
+        )
+    }
+
+    /// PR-3.1 (gm-ca 0.3.0, P1-9): sub-day TTL on certificate renewal.
+    ///
+    /// Mirrors [`sign_csr_with_profile_and_seconds`](Self::sign_csr_with_profile_and_seconds)
+    /// but for renewal: the existing cert's SAN/identity is carried
+    /// over, only the validity window and the profile change. SPIRE
+    /// SVID rotation uses this path to issue fresh SVIDs every 1h~24h.
+    pub fn renew_certificate_with_profile_and_seconds(
+        &self,
+        existing_cert_pem: &str,
+        validity_seconds: i64,
+        profile: &CertProfile,
+    ) -> Result<String, CaError> {
+        if !(1..=31_536_000).contains(&validity_seconds) {
+            return Err(CaError::InvalidArgument(format!(
+                "validity_seconds must be 1-31536000 (1s-365d), got {}",
+                validity_seconds
+            )));
+        }
         use gm_crypto::x509::parse_cert_pem;
 
         let cert_info = parse_cert_pem(existing_cert_pem)
@@ -412,7 +464,8 @@ impl CaSigner {
         }
 
         let not_before = now_utc_for_x509();
-        let not_after = not_before + std::time::Duration::from_secs(86400 * validity_days as u64);
+        let not_after =
+            not_before + std::time::Duration::from_secs(validity_seconds as u64);
 
         let mut serial_bytes = [0u8; 20];
         rand::rng().fill_bytes(&mut serial_bytes);

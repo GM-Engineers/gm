@@ -42,6 +42,7 @@
 //! (RFC 5280 §4.2.1.9 allows omitting it; emitting it is safer and
 //! gm-tls does not reject it).
 
+use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
 // =============================================================================
@@ -54,7 +55,10 @@ use std::net::IpAddr;
 /// (LSB-first encoding per DER). Defaults to all-false so callers can
 /// use struct-update syntax (`Self { digital_signature: true, .. }`)
 /// to opt in bit-by-bit.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize,
+)]
+#[serde(default)]
 pub struct KeyUsageBits {
     pub digital_signature: bool, // bit 0
     pub non_repudiation: bool,   // bit 1
@@ -199,7 +203,8 @@ impl KeyUsageBits {
 /// ClientAuth). CodeSigning / EmailProtection / TimeStamping / OCSP
 /// are exposed for completeness; gm-ca does not check any of these
 /// against an actual TLS peer so including them is purely declarative.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ExtendedKeyUsage {
     ServerAuth,
     ClientAuth,
@@ -249,7 +254,8 @@ impl ExtendedKeyUsage {
 /// - `iPAddress` = OCTET STRING, tag `[7]` (context, primitive, IMPLICIT)
 /// - `uniformResourceIdentifier` = IA5String, tag `[6]`
 /// - `rfc822Name` = IA5String, tag `[1]`
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type", content = "value")]
 pub enum GeneralName {
     DnsName(String),
     IpAddress(IpAddr),
@@ -323,6 +329,12 @@ impl GeneralName {
 /// The struct is plain data — no hidden defaults — so callers can
 /// `..Default::default()` and override only the fields they care about.
 ///
+/// `Serialize`/`Deserialize` (PR-3.1, gm-ca 0.3.0): the gRPC
+/// `SignCertificateRequest` carries a JSON-encoded `profile_json`
+/// field; clients (notably SPIRE Server) emit profiles without
+/// writing Rust. The snake_case JSON representation mirrors the
+/// Rust field names (sans are tagged-enum: `{"type":"uri","value":"..."}`).
+///
 /// ## Example
 ///
 /// ```ignore
@@ -336,7 +348,8 @@ impl GeneralName {
 ///     ..Default::default()
 /// };
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CertProfile {
     /// KeyUsage bitset (RFC 5280 §4.2.1.3).
     pub key_usage: KeyUsageBits,

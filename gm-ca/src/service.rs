@@ -90,13 +90,47 @@ impl CaService for CaServiceImpl {
         let req = request.into_inner();
         let csr_bytes = req.csr_pem.as_bytes();
 
-        // Sign CSR and get serial + PEM. The default profile reproduces
-        // the v0.1.x wire-format extension set (digitalSignature +
-        // keyEncipherment, serverAuth + clientAuth, SKI, SAN) plus an
-        // explicit BasicConstraints CA:FALSE.
+        // PR-3.1 (gm-ca 0.3.0, P1-8 + P1-9): the proto v0.3.0
+        // `SignCertificateRequest` carries two new fields:
+        //   - `profile_json`: caller-supplied `CertProfile` serialized
+        //     as JSON. Empty string = fall back to default profile
+        //     (v0.1.x / v0.2.x wire format). Used by SPIRE Server to
+        //     pass URI SANs + the appropriate KU/EKU layout for SVIDs.
+        //   - `validity_seconds`: sub-day TTL (P1-9 SPIRE SVID
+        //     rotation). When > 0, takes precedence over
+        //     `validity_days`. Range 1..=31_536_000 (1s..365d).
+        //
+        // Backward compat: pre-v0.3.0 clients leave both fields at
+        // their defaults (empty string / 0), and we transparently
+        // fall back to the legacy `validity_days` + `CertProfile::default()`
+        // code path.
+        let profile: CertProfile = if req.profile_json.is_empty() {
+            CertProfile::default()
+        } else {
+            serde_json::from_str(&req.profile_json).map_err(|e| {
+                metrics::record_error("invalid_profile_json");
+                Status::invalid_argument(format!("invalid profile_json: {}", e))
+            })?
+        };
+        let validity_seconds: i64 = if req.validity_seconds > 0 {
+            req.validity_seconds
+        } else {
+            // Legacy pre-v0.3.0 path: validity_days * 86400.
+            // Range-checked upstream by sign_csr_with_profile; we
+            // re-check here to avoid passing `0` to the seconds API
+            // (which would error out — minimum is 1).
+            if req.validity_days <= 0 || req.validity_days > 3650 {
+                return Err(Status::invalid_argument(format!(
+                    "validity_days must be 1-3650, got {}",
+                    req.validity_days
+                )));
+            }
+            req.validity_days * 86400
+        };
+
         let (serial_hex, cert_pem) = self
             .signer
-            .sign_csr_with_profile(csr_bytes, req.validity_days, &CertProfile::default())
+            .sign_csr_with_profile_and_seconds(csr_bytes, validity_seconds, &profile)
             .map_err(|e| {
                 metrics::record_error("sign_failed");
                 Status::invalid_argument(e.to_string())
@@ -108,10 +142,10 @@ impl CaService for CaServiceImpl {
             Status::invalid_argument(e.to_string())
         })?;
 
-        // Calculate validity period for DB storage
+        // Calculate validity period for DB storage (sub-day granularity).
         let not_before = time::OffsetDateTime::now_utc();
         let not_after =
-            not_before + std::time::Duration::from_secs(86400 * req.validity_days as u64);
+            not_before + std::time::Duration::from_secs(validity_seconds as u64);
         let not_before_dt =
             sqlx::types::chrono::DateTime::<Utc>::from_timestamp(not_before.unix_timestamp(), 0)
                 .unwrap_or_else(Utc::now);
@@ -182,15 +216,39 @@ impl CaService for CaServiceImpl {
             }));
         }
 
+        // PR-3.1 (gm-ca 0.3.0): renew now supports sub-day TTL
+        // (P1-9) and an optional profile override (P1-8). Empty
+        // `profile_json` = keep the legacy `CertProfile::default()`
+        // behavior (extension set matches v0.1.x); non-empty =
+        // parse and use the supplied profile (e.g. SPIRE SVID
+        // rotation that wants a fresh URI SAN + new KU/EKU).
+        let profile: CertProfile = if req.profile_json.is_empty() {
+            CertProfile::default()
+        } else {
+            serde_json::from_str(&req.profile_json).map_err(|e| {
+                metrics::record_error("invalid_profile_json");
+                Status::invalid_argument(format!("invalid profile_json: {}", e))
+            })?
+        };
+        let validity_seconds: i64 = if req.validity_seconds > 0 {
+            req.validity_seconds
+        } else {
+            if req.validity_days <= 0 || req.validity_days > 3650 {
+                return Err(Status::invalid_argument(format!(
+                    "validity_days must be 1-3650, got {}",
+                    req.validity_days
+                )));
+            }
+            req.validity_days * 86400
+        };
+
         // Issue new certificate with same subject/public key, new validity.
-        // Default profile preserves v0.1.x wire-format (matches the prior
-        // behavior of `renew_certificate`).
         let new_cert_pem = self
             .signer
-            .renew_certificate_with_profile(
+            .renew_certificate_with_profile_and_seconds(
                 &existing.certificate_pem,
-                req.validity_days,
-                &CertProfile::default(),
+                validity_seconds,
+                &profile,
             )
             .map_err(|e| {
                 metrics::record_error("renew_failed");

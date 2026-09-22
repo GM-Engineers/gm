@@ -13,6 +13,16 @@ service CaService {
 message SignCertificateRequest {
     string csr_pem = 1;
     int64 validity_days = 2;
+    // PR-3.1 (gm-ca 0.3.0): sub-day TTL (SPIRE SVID rotation).
+    // When > 0, takes precedence over `validity_days`. Range:
+    // 1..=31536000 (1s .. 365d). Pre-v0.3.0 clients leave this 0.
+    int64 validity_seconds = 3;
+    // PR-3.1 (gm-ca 0.3.0): caller-supplied CertProfile serialized as
+    // JSON (see `gm_ca::cert_profile::CertProfile` for the schema).
+    // Empty string = fall back to `CertProfile::default()` (legacy
+    // v0.1.x / v0.2.x wire format). Used by SPIRE Server to pass
+    // SPIFFE-ID URI SANs + the appropriate KU/EKU layout.
+    string profile_json = 4;
 }
 
 message SignCertificateResponse {
@@ -24,6 +34,13 @@ message SignCertificateResponse {
 message RenewCertificateRequest {
     string serial_number = 1;
     int64 validity_days = 2;
+    // PR-3.1 (gm-ca 0.3.0): sub-day TTL on renewal (SPIRE SVID rotation).
+    // See SignCertificateRequest.validity_seconds for precedence.
+    int64 validity_seconds = 3;
+    // PR-3.1 (gm-ca 0.3.0): optional profile override on renewal.
+    // Empty string = keep the original cert's profile (legacy
+    // behavior). JSON-encoded per `CertProfile`.
+    string profile_json = 4;
 }
 
 message RenewCertificateResponse {
