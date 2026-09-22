@@ -227,6 +227,291 @@ pub fn validate_hostname_only(
     validate_cert_parsed(&cert, now, Some(expected_domain))
 }
 
+// ============== URI SAN matching (SPIFFE) ==============
+
+/// Maximum SPIFFE ID length per [SPIFFE-ID §2.1](https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE-ID.md).
+pub const SPIFFE_ID_MAX_LEN: usize = 2048;
+
+/// SPIFFE ID — the verifiable identity document used by SPIFFE /
+/// workload identity.
+///
+/// Format per SPIFFE-ID §2.1:
+///
+/// ```text
+/// spiffe://<trust-domain>/<workload-path>
+/// ```
+///
+/// - `<trust-domain>` — a DNS subdomain (RFC 1035), case-sensitive,
+///   must be lowercase (SPIFFE-ID §2.1.2). Example: `example.org`,
+///   `prod.us-east-1.cluster.local`.
+/// - `<workload-path>` — `/`-prefixed, must be normalised (no `//`,
+///   no `?` / `#`, no `%xx-encoded` — SPIFFE-ID §2.1.3).
+/// - Total length must be ≤ [`SPIFFE_ID_MAX_LEN`] bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpiffeId<'a> {
+    /// The trust-domain substring, e.g. `example.org`.
+    pub trust_domain: &'a str,
+    /// The workload-path substring, e.g. `/ns/foo/sa/bar`.
+    pub path: &'a str,
+}
+
+impl<'a> SpiffeId<'a> {
+    /// Parse a SPIFFE ID from a string. Returns [`CryptoError::CertificateVerificationFailed`]
+    /// (with a descriptive message) on any structural violation of
+    /// SPIFFE-ID §2.1:
+    ///
+    /// - missing `spiffe://` scheme
+    /// - empty trust domain
+    /// - uppercase letters in trust domain (must be lowercase per §2.1.2)
+    /// - empty path
+    /// - path not starting with `/`
+    /// - path contains `?`, `#`, `%xx`, or `//` (§2.1.3)
+    /// - total length > [`SPIFFE_ID_MAX_LEN`]
+    pub fn parse(uri: &'a str) -> Result<Self, CryptoError> {
+        if uri.len() > SPIFFE_ID_MAX_LEN {
+            return Err(CryptoError::CertificateVerificationFailed(format!(
+                "SPIFFE ID exceeds max length {} (got {})",
+                SPIFFE_ID_MAX_LEN,
+                uri.len()
+            )));
+        }
+        const SCHEME: &str = "spiffe://";
+        let rest = uri.strip_prefix(SCHEME).ok_or_else(|| {
+            CryptoError::CertificateVerificationFailed(format!(
+                "URI is not a SPIFFE ID: missing '{SCHEME}' scheme (got {uri:?})"
+            ))
+        })?;
+        // SPIFFE-ID §2.1.2: trust domain is everything up to the first
+        // `/`. The path then must begin with `/`.
+        let (trust_domain, path_with_slash) = match rest.find('/') {
+            Some(idx) => (&rest[..idx], &rest[idx..]),
+            None => {
+                return Err(CryptoError::CertificateVerificationFailed(format!(
+                    "SPIFFE ID has no '/'-prefixed path: {uri:?}"
+                )));
+            }
+        };
+        if trust_domain.is_empty() {
+            return Err(CryptoError::CertificateVerificationFailed(format!(
+                "SPIFFE ID has empty trust domain: {uri:?}"
+            )));
+        }
+        // SPIFFE-ID §2.1.2: trust domain is a lowercase DNS subdomain
+        // — uppercase letters are forbidden (case-sensitive
+        // comparison per the spec).
+        if trust_domain.bytes().any(|b| b.is_ascii_uppercase()) {
+            return Err(CryptoError::CertificateVerificationFailed(format!(
+                "SPIFFE ID trust domain must be lowercase per SPIFFE \u{00a7}2.1.2 (got {trust_domain:?})"
+            )));
+        }
+        // Trust-domain characters: SPIFFE-ID §2.1.2 says "DNS subdomain",
+        // which RFC 1035 limits to lowercase letters, digits, and `-`.
+        // We additionally reject `.` as a leading/trailing char and
+        // empty labels (`..`) per RFC 1035 §2.3.4.
+        for label in trust_domain.split('.') {
+            if label.is_empty()
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            {
+                return Err(CryptoError::CertificateVerificationFailed(format!(
+                    "SPIFFE ID trust domain contains non-DNS characters: {trust_domain:?}"
+                )));
+            }
+        }
+        if path_with_slash.is_empty() || !path_with_slash.starts_with('/') {
+            return Err(CryptoError::CertificateVerificationFailed(format!(
+                "SPIFFE ID path must be '/'-prefixed and non-empty: {uri:?}"
+            )));
+        }
+        // SPIFFE-ID §2.1.3: path must be normalised — no `//`, no
+        // `?` / `#` / `%xx` sequences.
+        if path_with_slash.contains("//")
+            || path_with_slash.contains('?')
+            || path_with_slash.contains('#')
+            || path_with_slash.contains('%')
+        {
+            return Err(CryptoError::CertificateVerificationFailed(format!(
+                "SPIFFE ID path must be normalised per SPIFFE \u{00a7}2.1.3 (no '//' / '?' / '#' / '%xx'): {uri:?}"
+            )));
+        }
+        Ok(Self {
+            trust_domain,
+            path: path_with_slash,
+        })
+    }
+
+    /// Trust-domain substring (case-sensitive exact match per SPIFFE-ID §2.1.2).
+    pub fn trust_domain(&self) -> &str {
+        self.trust_domain
+    }
+
+    /// Workload-path substring (e.g. `/ns/foo/sa/bar`).
+    pub fn path(&self) -> &str {
+        self.path
+    }
+}
+
+/// SPIFFE path matching policy within [`UriMatchPolicy::Spiffe`].
+///
+/// Per SPIFFE Federation §4.1, the workload path is a logical
+/// identifier that may be hierarchical (e.g.
+/// `/ns/production/sa/web-server`). Different deployments want
+/// different matching rules:
+///
+/// - [`Prefix`](Self::Prefix) (default): the cert's SPIFFE path must
+///   START WITH the expected path. This is the SPIFFE §4.1
+///   recommendation and supports workload hierarchies (e.g. an
+///   operator expecting `/ns/foo/sa` accepts both
+///   `/ns/foo/sa/web` and `/ns/foo/sa/db`).
+/// - [`Exact`](Self::Exact): the cert's SPIFFE path must equal the
+///   expected path exactly. Use for high-assurance deployments
+///   that require strict identity binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SpiffePathPolicy {
+    /// Cert SPIFFE path must be a prefix of expected path's
+    /// children (i.e. cert path starts with expected path). Default.
+    #[default]
+    Prefix,
+    /// Cert SPIFFE path must equal expected path exactly.
+    Exact,
+}
+
+/// URI SAN matching policy for [`validate_uri_only`].
+///
+/// `Spiffe` is the secure default (SPIFFE Federation §4.1):
+/// parse both the cert's URI SAN and the expected URI as SPIFFE
+/// IDs, require exact trust-domain match, then apply the configured
+/// path policy. `Literal` is provided for non-SPIFFE deployments
+/// that need raw string equality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UriMatchPolicy {
+    /// SPIFFE-aware matching: parse both sides as SPIFFE IDs,
+    /// trust-domain exact match, then [`SpiffePathPolicy`]
+    /// (default [`Prefix`](SpiffePathPolicy::Prefix)).
+    Spiffe { path: SpiffePathPolicy },
+    /// Raw string equality (case-sensitive, no SPIFFE parsing).
+    /// Provided for non-SPIFFE deployments; new code should
+    /// prefer `Spiffe`.
+    Literal,
+}
+
+impl Default for UriMatchPolicy {
+    fn default() -> Self {
+        UriMatchPolicy::Spiffe {
+            path: SpiffePathPolicy::default(),
+        }
+    }
+}
+
+/// Validate the leaf certificate's URI SAN against an expected
+/// URI.
+///
+/// The leaf certificate is parsed, checked for validity against
+/// `now`, and its `uniformResourceIdentifier` SAN entries (RFC 5280
+/// §4.2.1.6) are matched against `expected_uri` per the chosen
+/// [`UriMatchPolicy`].
+///
+/// Use this function when an operator wants to pin a workload to
+/// a SPIFFE ID (e.g. `spiffe://prod.example.com/ns/foo/sa/web`)
+/// instead of (or in addition to) a DNS hostname. The SPIRE /
+/// zero-trust deployments rely on this entry point for
+/// non-DNS-based identity verification.
+///
+/// # Errors
+///
+/// - `leaf_der` is not parseable as X.509
+/// - `notBefore > now` or `notAfter < now`
+/// - `expected_uri` is not a valid SPIFFE ID (when policy is
+///   [`UriMatchPolicy::Spiffe`])
+/// - The cert has no `URI` SAN entry matching `expected_uri`
+///   per the chosen policy
+///
+/// # Security
+///
+/// - The matching is case-sensitive (SPIFFE-ID §2.1.2 requires
+///   case-sensitive trust-domain matching).
+/// - URI SAN entries are IA5String per RFC 5280 §4.2.1.6
+///   (ASCII-only); we do not perform any IDN normalisation here.
+/// - When the cert carries multiple URI SAN entries, ANY of them
+///   may match (per SPIFFE Federation §4.1; we accept the
+///   union of accepted identities).
+pub fn validate_uri_only(
+    leaf_der: &[u8],
+    expected_uri: &str,
+    now: OffsetDateTime,
+    policy: UriMatchPolicy,
+) -> Result<(), CryptoError> {
+    let (_, cert) = X509Certificate::from_der(leaf_der).map_err(|e| {
+        CryptoError::CertificateVerificationFailed(format!("X509 parse failed: {}", e))
+    })?;
+
+    let not_before = cert.validity().not_before.to_datetime();
+    let not_after = cert.validity().not_after.to_datetime();
+    if now < not_before || now > not_after {
+        return Err(CryptoError::CertificateVerificationFailed(
+            "certificate has expired or is not yet valid".into(),
+        ));
+    }
+
+    // Collect every URI SAN entry the cert carries.
+    let mut uri_sans: Vec<&str> = Vec::new();
+    if let Ok(Some(san)) = cert.subject_alternative_name() {
+        for name in san.value.general_names.iter() {
+            if let x509_parser::extensions::GeneralName::URI(uri) = name {
+                uri_sans.push(uri);
+            }
+        }
+    }
+    if uri_sans.is_empty() {
+        return Err(CryptoError::CertificateVerificationFailed(
+            "no URI SAN entry in certificate".into(),
+        ));
+    }
+
+    match policy {
+        UriMatchPolicy::Spiffe { path: path_policy } => {
+            // Parse the expected URI once; it MUST be a valid SPIFFE ID.
+            let expected = SpiffeId::parse(expected_uri)?;
+            for uri in &uri_sans {
+                let candidate = match SpiffeId::parse(uri) {
+                    Ok(c) => c,
+                    // If a cert URI SAN isn't a SPIFFE ID, skip it
+                    // (the operator is matching against SPIFFE, not
+                    // arbitrary URIs). Continue looking for another
+                    // URI SAN that IS a SPIFFE ID.
+                    Err(_) => continue,
+                };
+                if candidate.trust_domain != expected.trust_domain {
+                    continue;
+                }
+                let path_matches = match path_policy {
+                    SpiffePathPolicy::Prefix => candidate.path.starts_with(expected.path),
+                    SpiffePathPolicy::Exact => candidate.path == expected.path,
+                };
+                if path_matches {
+                    return Ok(());
+                }
+            }
+            Err(CryptoError::CertificateVerificationFailed(format!(
+                "no URI SAN matched expected SPIFFE ID {expected_uri:?} (policy = {path_policy:?})"
+            )))
+        }
+        UriMatchPolicy::Literal => {
+            for uri in &uri_sans {
+                if *uri == expected_uri {
+                    return Ok(());
+                }
+            }
+            Err(CryptoError::CertificateVerificationFailed(format!(
+                "no URI SAN matched expected URI {expected_uri:?} (literal equality)"
+            )))
+        }
+    }
+}
+
 /// RFC 5280 §4.2.1.12 role context for end-entity cert KU/EKU enforcement.
 ///
 /// `TlcServer` / `TlcClient` mirror the TLCP ECC sign-cert vs enc-cert

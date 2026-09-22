@@ -50,6 +50,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-09-22
+
+### Added
+
+- **`x509::verify::validate_uri_only(leaf_der, expected_uri, now, policy)`**
+  — new leaf-only entry point that matches an X.509 cert's
+  `uniformResourceIdentifier` SAN (RFC 5280 §4.2.1.6) against an
+  expected URI per a caller-selected policy. Closes the SPIFFE /
+  SPIRE SVID verification gap: gm-ca could already issue URI SANs
+  (`gm-ca/src/cert_profile.rs:256` `UniformResourceIdentifier`
+  variant) but gm-crypto's verifier silently ignored every
+  `GeneralName::URI` entry — SPIFFE deployments could not be
+  validated end-to-end through `verify_against_anchors`.
+
+  Migration: callers wanting SPIFFE validation route the leaf
+  cert's DER through `validate_uri_only` with a
+  `UriMatchPolicy::Spiffe { path }` argument. The default path
+  policy is `Prefix` per SPIFFE Federation §4.1.
+
+- **`x509::verify::SpiffeId<'a>`** — borrowed-string parser for
+  `spiffe://<trust-domain>/<workload-path>` (SPIFFE-ID §2.1):
+  - rejects missing `spiffe://` scheme, empty / uppercase /
+    non-DNS trust domain, empty / non-`/`-prefixed / non-normalised
+    path, and total length > 2048 bytes (SPIFFE-ID §2.1.3);
+  - trust-domain matching is case-sensitive (per spec);
+  - exposes `trust_domain()` / `path()` accessors.
+
+- **`x509::verify::UriMatchPolicy`** — public enum:
+  - `Spiffe { path: SpiffePathPolicy }` (default — SPIFFE-aware);
+  - `Literal` (raw string equality, no SPIFFE parsing).
+- **`x509::verify::SpiffePathPolicy`** — `Prefix` (default, per
+  SPIFFE Federation §4.1) / `Exact` (high-assurance).
+
+- **20 new tests** in `tests/x509_uri_san.rs` exercising the full
+  URI-matching surface (well-formed / malformed SPIFFE ID
+  parsing, exact / prefix / exact-only path policies, mismatched
+  trust domain, no URI SAN, non-SPIFFE URI SAN skipped under
+  Spiffe policy, literal policy exact match / substring rejection,
+  end-to-end cert issuance via gm-ca with a real URI SAN).
+
+### Out of Scope
+
+- The gm-tls / gm-tlcp `with_expected_uri(String)` builder that
+  wires `validate_uri_only` into the handshake flow (PR-2.4+).
+  The new function is fully usable from any caller today via the
+  DER byte slice returned by `TlcpStream::peer_certificates()` etc.
+
 ## [0.3.5] - 2026-09-22
 
 ### Security
@@ -309,6 +356,7 @@ removed. The crate's public surface is fully backwards-compatible with
 the 0.1.x series.
 
 [Unreleased]: https://github.com/GM-Engineers/gm/compare/main...HEAD
+[0.3.6]: https://github.com/GM-Engineers/gm/compare/gm-crypto-v0.3.5...gm-crypto-v0.3.6
 [0.3.5]: https://github.com/GM-Engineers/gm/compare/gm-crypto-v0.3.4...gm-crypto-v0.3.5
 [0.3.4]: https://github.com/GM-Engineers/gm/compare/gm-crypto-v0.3.3...gm-crypto-v0.3.4
 [0.3.2]: https://github.com/GM-Engineers/gm/compare/gm-crypto-v0.3.1...gm-crypto-v0.3.2
