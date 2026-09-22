@@ -67,6 +67,15 @@ impl OwnedCert {
         ))
     }
 
+    /// Borrow the raw DER bytes backing this cert.
+    ///
+    /// Returned for callers that need to re-feed the cert into a
+    /// verification helper (e.g. `validate_uri_only` for SPIFFE
+    /// ID matching after the chain walk succeeds).
+    pub fn der_bytes(&self) -> &[u8] {
+        &self.der
+    }
+
     /// Accept a single DER certificate (raw bytes that are NOT a PEM
     /// envelope). Used by callers like gm-tlcp that receive certs
     /// from the TLCP wire-format (which is DER) and need to feed them

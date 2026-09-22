@@ -9,13 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`TlcpConnector::with_expected_uri(String)`** (PR-2.4): pins the
+  server's sign-leaf URI SAN (SPIFFE ID) per
+  `gm_crypto::x509::verify::validate_uri_only`. Runs after the chain
+  verification step (gm-crypto 0.3.6+); orthogonal to the existing
+  DNS-hostname `with_server_name` builder.
+- **`TlcpConnector::with_distid_policy(DistidPolicy)`** +
+  **`TlcpAcceptor::with_distid_policy(DistidPolicy)`** (PR-2.4):
+  overrides the SM2 signature distid policy for chain verification
+  (gm-crypto 0.3.5+). Default `None` retains `Strict` (only the
+  GM/T standard distid `"1234567812345678"` is accepted). Pass
+  `DistidPolicy::Permissive { fallback_distids: vec![""] }` for
+  OpenSSL 3.x interop.
+
 ### Changed
 
-### Fixed
-
-### Documented
+- All three internal `verify_against_anchors` call sites (sign-leaf,
+  enc-leaf server-side; client-side accept) now route through the
+  policy-aware `verify_against_anchors_with_distid_policy` entry
+  point, defaulting to `DistidPolicy::Strict` when the operator
+  doesn't configure an override.
+- **gm-tlcp bumped to 0.7.0** (from 0.6.6); the new builder methods
+  on `TlcpConnector` / `TlcpAcceptor` are observable on the public
+  type surface. gm-crypto dependency floor is now `^0.3.6` (the new
+  builders depend on `DistidPolicy` and `validate_uri_only` /
+  `UriMatchPolicy` introduced in 0.3.5 / 0.3.6).
 
 ### Security
+
+- The connector's sign-leaf verification now additionally enforces
+  SPIFFE ID matching when `with_expected_uri` is configured. A forged
+  leaf with a valid SPIFFE ID but invalid signature still fails
+  closed at the chain step (URI check runs *after* chain verification).
 
 ## [0.6.6] - 2026-09-18
 

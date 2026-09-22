@@ -1,7 +1,7 @@
 [package]
 authors = ["Eric Zhang"]
 name = "gm-tlcp"
-version = "0.6.6"
+version = "0.7.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "TLCP (Transport Layer Cryptographic Protocol, GB/T 38636-2020) core library in pure Rust with SM2/SM3/SM4 support"
@@ -45,7 +45,7 @@ exclude = [
 
 [dependencies]
 # 国密算法原语（SM2/SM3/SM4/SM9）
-gm-crypto = { path = "../gm-crypto", version = "0.3.3" }
+gm-crypto = { path = "../gm-crypto", version = "0.3.6" }
 gm-sm9-rs = { path = "../gm-sm9-rs", version = "0.1", default-features = false, features = ["pure-rust"] }
 
 # Phase E: `time` is required by `gm_crypto::x509::verify::verify_against_anchors`

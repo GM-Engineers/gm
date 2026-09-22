@@ -42,7 +42,8 @@ subtle = "2"
 zeroize = { version = "1", features = ["derive"] }
 # Optional: RSA CA signer for the TLCP RSA suites (E019/E01C/E059/E05A).
 # Gated behind the `rsa` feature flag so the default GM/CA build stays
-# strictly SM2 + 国密. Versions synced with gm-tlcp 0.6.x.
+# strictly SM2 + 国密. Versions synced with gm-tlcp 0.7.x (PR-2.4
+# bumped minor version for the new TlcpConnector / TlcpAcceptor builders).
 rsa  = { version = "0.9", default-features = false, optional = true, features = ["std", "pem", "sha2"] }
 sha2 = { version = "0.10", optional = true }
 sha1 = { version = "0.10", optional = true }
@@ -71,7 +72,7 @@ tempfile = "3"
 # certs issued by `RsaCaSigner`. `default-features = false` skips the
 # optional `tlcp-gmssl-compat` flag (we only need the default GB/T 38636
 # spec-compliant wire format).
-gm-tlcp = { path = "../gm-tlcp", version = "0.6", default-features = false }
+gm-tlcp = { path = "../gm-tlcp", version = "0.7", default-features = false }
 
 [build-dependencies]
 tonic-build = { version = "0.14", features = ["transport"] }

@@ -50,6 +50,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`OwnedCert::der_bytes(&self) -> &[u8]`** (PR-2.4): borrow the raw
+  DER bytes backing an `OwnedCert`. Returned for callers that need
+  to re-feed the cert into a verification helper (e.g.
+  `validate_uri_only` for SPIFFE ID matching after the chain walk
+  succeeds). Closes the loop on the URI-SAN path — the PR-2.3
+  `validate_uri_only` entry point needs the leaf DER, which was
+  previously only available via the private `der` field.
+
 ## [0.3.6] - 2026-09-22
 
 ### Added

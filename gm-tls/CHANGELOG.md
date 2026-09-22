@@ -9,9 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`TlsConfig::with_expected_uri(String)`** (PR-2.4): pins the peer
+  cert's URI SAN (SPIFFE ID) per [`gm_crypto::x509::verify::validate_uri_only`].
+  The check runs after the chain verification step and is orthogonal to
+  the existing DNS-hostname `with_domain` builder — operators can pin
+  both a hostname and a SPIFFE ID on the same peer (mTLS-to-SPIRE-SVID
+  deployments).
+- **`TlsConfig::with_distid_policy(DistidPolicy)`** (PR-2.4): overrides
+  the SM2 signature distid policy (gm-crypto 0.3.5+). Default
+  `None` retains `Strict` (only the GM/T standard distid
+  `"1234567812345678"` is accepted). Pass
+  `DistidPolicy::Permissive { fallback_distids: vec![""] }` for
+  OpenSSL 3.x interop (which defaults to the empty SM2 distid).
+- **`tests/spiffe_uri.rs`** (PR-2.4): end-to-end loopback handshake
+  tests for the new builders — 4 tests covering exact-match,
+  prefix-match, mismatch rejection, and policy-type surface.
+
 ### Changed
 
+- **gm-tls now depends on `gm-crypto 0.3.6`** (was 0.3.3); this picks
+  up the URI/SPIFFE ID parsing surface (`SpiffeId`, `UriMatchPolicy`,
+  `validate_uri_only`) and the `DistidPolicy` enum used by the new
+  builder. `gm-crypto` remains a path dep, so the workspace stays
+  buildable offline.
+
 ### Fixed
+
+- **Loopback tests re-enabled** (`tests/gmssl_interop_tests.rs`): the
+  three `#[ignore]`'d PR-2.2 follow-ups (`test_loopback_handshake`,
+  `test_loopback_echo_large_data`, `test_loopback_mutual_auth`) now
+  run by default, opting into `DistidPolicy::Permissive{..}` for the
+  OpenSSL-issued fixture (empty distid).
 
 ## [0.2.2] - 2026-09-18
 

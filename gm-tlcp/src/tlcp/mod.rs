@@ -183,7 +183,7 @@ use crate::metrics;
 use crate::record::next_nonce;
 use gm_crypto::sm3::Sm3Hmac;
 use gm_crypto::sm4::{SM4_BLOCK_SIZE, SM4_GCM_NONCE_LENGTH, Sm4Cipher};
-use gm_crypto::x509::verify::OwnedCert;
+use gm_crypto::x509::verify::{DistidPolicy, OwnedCert};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -1521,6 +1521,18 @@ pub struct TlcpConnector {
     /// Points extension URL); we do not perform HTTP fetches
     /// internally.
     server_crls: Vec<Vec<u8>>,
+    /// PR-2.3 SPIFFE ID verification (gm-crypto 0.3.6+). When `Some`,
+    /// the connector additionally calls
+    /// `gm_crypto::x509::verify::validate_uri_only` on the server's
+    /// sign-leaf cert's DER to verify a `uniformResourceIdentifier`
+    /// SAN per SPIFFE Federation §4.1. Set via
+    /// [`TlcpConnector::with_expected_uri`].
+    expected_uri: Option<String>,
+    /// PR-2.2 distid policy override (gm-crypto 0.3.5+). `None`
+    /// (the default) uses `DistidPolicy::Strict` (fail-closed).
+    /// Set via [`TlcpConnector::with_distid_policy`] for OpenSSL 3.x
+    /// interop or other non-GM/T-standard signers.
+    distid_policy: Option<DistidPolicy>,
 }
 impl Default for TlcpConnector {
     fn default() -> Self {
@@ -1564,6 +1576,8 @@ impl TlcpConnector {
             server_ca_anchors: None,
             server_name: None,
             server_crls: Vec::new(),
+            expected_uri: None,
+            distid_policy: None,
         }
     }
     /// Create a connector with a shared session cache for resumption.
@@ -1889,6 +1903,42 @@ impl TlcpConnector {
         self
     }
 
+    /// Configure the expected server SPIFFE ID (URI SAN match).
+    ///
+    /// PR-2.3 (gm-crypto 0.3.6+): when `Some(uri)`, the connector
+    /// additionally requires the server's sign leaf cert to carry a
+    /// matching `uniformResourceIdentifier` SAN per
+    /// [`gm_crypto::x509::verify::validate_uri_only`] (SPIFFE
+    /// Federation §4.1). The check is orthogonal to
+    /// [`with_server_name`](Self::with_server_name) — both can be
+    /// active on the same peer (operator pins both DNS hostname
+    /// and SPIFFE ID).
+    ///
+    /// Example (SPIFFE workload identity pinning):
+    /// ```ignore
+    /// TlcpConnector::new()
+    ///     .with_server_ca_chain(vec![ca_der])
+    ///     .with_server_name("api.example.com")
+    ///     .with_expected_uri("spiffe://prod.example.com/ns/foo/sa/web");
+    /// ```
+    pub fn with_expected_uri(mut self, uri: impl Into<String>) -> Self {
+        self.expected_uri = Some(uri.into());
+        self
+    }
+
+    /// Override the SM2 signature distid policy for chain verification.
+    ///
+    /// PR-2.2 (gm-crypto 0.3.5+): `None` (the default) uses
+    /// [`gm_crypto::x509::verify::DistidPolicy::Strict`] (only the
+    /// GM/T standard distid `"1234567812345678"` is accepted).
+    /// Pass
+    /// [`gm_crypto::x509::verify::DistidPolicy::Permissive`] for
+    /// OpenSSL 3.x interop (which defaults to the empty distid).
+    pub fn with_distid_policy(mut self, policy: DistidPolicy) -> Self {
+        self.distid_policy = Some(policy);
+        self
+    }
+
     /// Read-only access to the configured server trust anchors.
     /// Returns `None` when no anchor set is configured.
     pub fn server_ca_anchors(&self) -> Option<&[Vec<u8>]> {
@@ -2050,12 +2100,13 @@ impl TlcpConnector {
             // Sign leaf: hostname check applied (re-runs; the
             // helper is idempotent and the check is cheap).
             let sign_chain = vec![cert_pair.sign_cert.clone()];
-            gm_crypto::x509::verify::verify_against_anchors(
+            gm_crypto::x509::verify::verify_against_anchors_with_distid_policy(
                 &sign_chain,
                 anchors,
                 now,
                 expected_domain,
                 Some(gm_crypto::x509::verify::CertRole::TlcServer),
+                self.distid_policy.clone().unwrap_or(DistidPolicy::Strict),
             )
             .map_err(|e| {
                 TlcpError::HandshakeFailed(format!(
@@ -2091,6 +2142,24 @@ impl TlcpConnector {
                     ))
                 })?;
             }
+            // PR-2.3 SPIFFE ID matching: when the operator configured
+            // `with_expected_uri`, the sign leaf must additionally
+            // carry a matching URI SAN. We run this AFTER the chain
+            // verification so a forged leaf with a valid SPIFFE ID
+            // but invalid signature still fails closed at the chain
+            // step. The URI check is sign-only (the enc cert
+            // typically carries no URI SAN).
+            if let Some(ref expected_uri) = self.expected_uri {
+                gm_crypto::x509::verify::validate_uri_only(
+                    &cert_pair.sign_cert,
+                    expected_uri,
+                    now,
+                    gm_crypto::x509::verify::UriMatchPolicy::default(),
+                )
+                .map_err(|e| {
+                    TlcpError::HandshakeFailed(format!("server SPIFFE ID check failed: {}", e))
+                })?;
+            }
             // Enc leaf (only for dual-cert layouts; RSA suites leave
             // `enc_cert` empty per `TlcpCertPair::is_single_cert`).
             // We pass role=None for the enc cert because the
@@ -2103,9 +2172,13 @@ impl TlcpConnector {
             // release once we see real-world operator feedback.
             if !cert_pair.enc_cert.is_empty() {
                 let enc_chain = vec![cert_pair.enc_cert.clone()];
-                gm_crypto::x509::verify::verify_against_anchors(
-                    &enc_chain, anchors, now, None, // hostname check is sign-only
+                gm_crypto::x509::verify::verify_against_anchors_with_distid_policy(
+                    &enc_chain,
+                    anchors,
+                    now,
+                    None, // hostname check is sign-only
                     None, // role=None: enc cert KU/EKU is permissive
+                    self.distid_policy.clone().unwrap_or(DistidPolicy::Strict),
                 )
                 .map_err(|e| {
                     TlcpError::HandshakeFailed(format!(
@@ -3303,6 +3376,11 @@ pub struct TlcpAcceptor {
     /// Matched against certs in the chain by issuer DN; CRL signature
     /// verified against the matching issuer cert in the chain.
     client_crls: Vec<Vec<u8>>,
+    /// PR-2.2 distid policy override (gm-crypto 0.3.5+). `None`
+    /// (the default) uses `DistidPolicy::Strict` (fail-closed).
+    /// Set via [`TlcpAcceptor::with_distid_policy`] for OpenSSL 3.x
+    /// interop or other non-GM/T-standard signers.
+    distid_policy: Option<DistidPolicy>,
 }
 impl Default for TlcpAcceptor {
     fn default() -> Self {
@@ -3331,6 +3409,7 @@ impl TlcpAcceptor {
             rsa_single_cert_mode: false,
             client_ca_anchors: None,
             client_crls: Vec::new(),
+            distid_policy: None,
         }
     }
     /// Create an acceptor with a shared session cache for resumption.
@@ -3538,6 +3617,25 @@ impl TlcpAcceptor {
     /// Read-only access to the configured client-side CRLs.
     pub fn client_crls(&self) -> &[Vec<u8>] {
         &self.client_crls
+    }
+
+    /// Override the SM2 signature distid policy for client-cert chain
+    /// verification.
+    ///
+    /// PR-2.2 (gm-crypto 0.3.5+): `None` (the default) uses
+    /// [`gm_crypto::x509::verify::DistidPolicy::Strict`] (only the
+    /// GM/T standard distid `"1234567812345678"` is accepted).
+    /// Pass
+    /// [`gm_crypto::x509::verify::DistidPolicy::Permissive`] for
+    /// OpenSSL 3.x interop (which defaults to the empty distid).
+    ///
+    /// (PR-2.3 URI/SPIFFE matching is not exposed here because URI
+    /// SANs are a client-side identity assertion — the server's role
+    /// is to validate the cert chain, not to require the client's
+    /// SPIFFE ID to match a specific URI.)
+    pub fn with_distid_policy(mut self, policy: DistidPolicy) -> Self {
+        self.distid_policy = Some(policy);
+        self
     }
 
     /// Accept a TLCP client connection over the given transport.
@@ -4079,10 +4177,13 @@ impl TlcpAcceptor {
                     } else {
                         None
                     };
-                    gm_crypto::x509::verify::verify_against_anchors(
-                        &chain, anchors, now,
+                    gm_crypto::x509::verify::verify_against_anchors_with_distid_policy(
+                        &chain,
+                        anchors,
+                        now,
                         None, // hostnames are a client-side concern (SNI/SAN)
                         role,
+                        self.distid_policy.clone().unwrap_or(DistidPolicy::Strict),
                     )
                     .map_err(|e| {
                         TlcpError::HandshakeFailed(format!(

@@ -38,7 +38,8 @@ pub use crate::handshake::{
 
 // Certificate and CRL verification
 pub use crate::cert_verify::{
-    CrlInfo, OwnedCert, validate_cert_pem, verify_cert_chain_sm2_chain, verify_cert_crl, verify_crl,
+    CrlInfo, OwnedCert, validate_cert_pem, verify_cert_chain_sm2_chain,
+    verify_cert_chain_sm2_chain_with_distid_policy, verify_cert_crl, verify_crl,
 };
 // Key derivation
 pub use crate::kdf::{derive_session_keys_sm2, hkdf_sm3};
@@ -352,13 +353,34 @@ where
         }
         let leaf_chain = OwnedCert::chain_from_pem_concat(&srv_cert.cert_chain_pem)?;
         let trust = OwnedCert::chain_from_pem_concat(ca_pem)?;
-        verify_cert_chain_sm2_chain(
+        let distid_policy = opts
+            .distid_policy
+            .clone()
+            .unwrap_or(gm_crypto::x509::verify::DistidPolicy::Strict);
+        verify_cert_chain_sm2_chain_with_distid_policy(
             &leaf_chain,
             &trust,
             OffsetDateTime::now_utc(),
             domain,
             Some(gm_crypto::x509::verify::CertRole::TlcServer),
+            distid_policy,
         )?;
+
+        // PR-2.3 SPIFFE ID matching (gm-crypto 0.3.6+): when the
+        // operator configured `TlsConfig::with_expected_uri`, the
+        // leaf cert must additionally carry a matching URI SAN. We
+        // run this AFTER the chain verification so a forged leaf
+        // cert with a valid SPIFFE ID but invalid signature still
+        // fails closed at the chain step.
+        if let Some(ref expected_uri) = opts.expected_uri {
+            let leaf_der = leaf_chain.first().map(|c| c.der_bytes()).unwrap_or(&[]);
+            gm_crypto::x509::verify::validate_uri_only(
+                leaf_der,
+                expected_uri,
+                OffsetDateTime::now_utc(),
+                gm_crypto::x509::verify::UriMatchPolicy::default(),
+            )?;
+        }
 
         // Check CRL if provided
         if let Some(ref crl) = opts.crl_info {
@@ -603,12 +625,17 @@ where
         }
         let leaf_chain = OwnedCert::chain_from_pem_concat(&cli_cert.cert_chain_pem)?;
         let trust = OwnedCert::chain_from_pem_concat(ca_pem)?;
-        verify_cert_chain_sm2_chain(
+        let distid_policy = opts
+            .distid_policy
+            .clone()
+            .unwrap_or(gm_crypto::x509::verify::DistidPolicy::Strict);
+        verify_cert_chain_sm2_chain_with_distid_policy(
             &leaf_chain,
             &trust,
             OffsetDateTime::now_utc(),
             None,
             Some(gm_crypto::x509::verify::CertRole::TlcClient),
+            distid_policy,
         )?;
 
         // Check CRL if provided

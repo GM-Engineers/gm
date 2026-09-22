@@ -67,3 +67,30 @@ pub fn verify_cert_chain_sm2_chain(
     inner::verify_cert_chain_sm2_chain(leaf_chain, trust_anchors, now, expected_domain, role)?;
     Ok(())
 }
+
+/// Policy-aware wrapper around
+/// [`gm_crypto::x509::verify::verify_cert_chain_sm2_chain_with_distid_policy`]
+/// (gm-crypto 0.3.5+). Allows the operator to relax the SM2
+/// signature distid to `Permissive` (e.g. for OpenSSL 3.x interop,
+/// which defaults to the empty distid). The default `DistidPolicy::Strict`
+/// is what `verify_cert_chain_sm2_chain` already uses; the two
+/// functions therefore behave identically when the caller passes
+/// `DistidPolicy::Strict`.
+pub fn verify_cert_chain_sm2_chain_with_distid_policy(
+    leaf_chain: &[OwnedCert],
+    trust_anchors: &[OwnedCert],
+    now: OffsetDateTime,
+    expected_domain: Option<&str>,
+    role: Option<gm_crypto::x509::verify::CertRole>,
+    distid_policy: gm_crypto::x509::verify::DistidPolicy,
+) -> Result<(), TlsError> {
+    inner::verify_cert_chain_sm2_chain_with_distid_policy(
+        leaf_chain,
+        trust_anchors,
+        now,
+        expected_domain,
+        role,
+        distid_policy,
+    )?;
+    Ok(())
+}

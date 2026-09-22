@@ -278,6 +278,54 @@ impl TlsConfig {
         self
     }
 
+    /// Set expected URI SAN (SPIFFE ID) for the peer cert.
+    ///
+    /// When `Some(uri)`, the verifier additionally requires a matching
+    /// `uniformResourceIdentifier` SAN in the leaf cert per
+    /// [`gm_crypto::x509::verify::validate_uri_only`]
+    /// (gm-crypto 0.3.6+, SPIFFE Federation §4.1). The check is
+    /// orthogonal to [`with_domain`](Self::with_domain) — both can
+    /// be active on the same peer (operator pins both DNS hostname
+    /// and SPIFFE ID, common in mTLS-to-SPIRE-SVID deployments).
+    ///
+    /// Example (SPIFFE workload identity pinning):
+    /// ```ignore
+    /// TlsConfig::from_bytes(cert, key, ca)?
+    ///     .with_domain("api.example.com".to_string())
+    ///     .with_expected_uri("spiffe://prod.example.com/ns/foo/sa/web");
+    /// ```
+    ///
+    /// Delegates into [`HandshakeOptions::expected_uri`] (the field
+    /// that the inner handshake code actually reads).
+    pub fn with_expected_uri(mut self, uri: impl Into<String>) -> Self {
+        self.handshake_opts
+            .get_or_insert_with(HandshakeOptions::default);
+        if let Some(opts) = &mut self.handshake_opts {
+            opts.expected_uri = Some(uri.into());
+        }
+        self
+    }
+
+    /// Override the SM2 signature distid policy.
+    ///
+    /// Delegates into [`HandshakeOptions::distid_policy`] — see
+    /// that field for the contract. `None` (the default) routes
+    /// through `gm_crypto::x509::verify::DistidPolicy::Strict`
+    /// (gm-crypto 0.3.5+ fail-closed).
+    ///
+    /// Pass
+    /// [`DistidPolicy::Permissive`](gm_crypto::x509::verify::DistidPolicy::Permissive)
+    /// `{ fallback_distids: vec![""], audit_on_fallback: .. }` for
+    /// OpenSSL 3.x interop (which defaults to the empty SM2 distid).
+    pub fn with_distid_policy(mut self, policy: gm_crypto::x509::verify::DistidPolicy) -> Self {
+        self.handshake_opts
+            .get_or_insert_with(HandshakeOptions::default);
+        if let Some(opts) = &mut self.handshake_opts {
+            opts.distid_policy = Some(policy);
+        }
+        self
+    }
+
     /// Set ALPN protocol list
     pub fn with_alpn(mut self, alpn: Vec<String>) -> Self {
         self.alpn = alpn;

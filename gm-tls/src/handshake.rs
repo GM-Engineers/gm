@@ -1051,6 +1051,21 @@ pub struct HandshakeOptions {
     /// CRL (Certificate Revocation List) for checking certificate revocation during handshake.
     /// When provided, each certificate in the chain is checked against the CRL.
     pub crl_info: Option<CrlInfo>,
+    /// SM2 signature distid policy override (gm-crypto 0.3.5+).
+    /// `None` (the default) routes through
+    /// [`gm_crypto::x509::verify::DistidPolicy::Strict`] (only the
+    /// GM/T standard distid `"1234567812345678"` is accepted —
+    /// RFC 5280 §6.3-style fail-closed). Set via
+    /// [`TlsConfig::with_distid_policy`](crate::TlsConfig::with_distid_policy)
+    /// for OpenSSL 3.x interop (`DistidPolicy::Permissive { fallback_distids: vec![""], .. }`).
+    pub distid_policy: Option<gm_crypto::x509::verify::DistidPolicy>,
+    /// Expected URI SAN (SPIFFE ID) for the peer cert. Set via
+    /// [`TlsConfig::with_expected_uri`](crate::TlsConfig::with_expected_uri).
+    /// When `Some`, the verifier additionally calls
+    /// [`gm_crypto::x509::verify::validate_uri_only`] on the leaf
+    /// cert's DER after chain verification succeeds. SPIFFE SVID
+    /// workloads typically set this on the connector side.
+    pub expected_uri: Option<String>,
 }
 
 // ============================================================================
