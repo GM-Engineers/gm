@@ -5,6 +5,68 @@ All notable changes to the `gm-crypto` crate will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.7] - 2026-09-23
+
+### Added
+
+- **Explicit deterministic / randomized SM2 signature APIs (PR-4.3 / P1-2)**.
+  Audit found that `Sm2Signer::sign` already uses RFC 6979-style
+  deterministic k derivation (via the sm2 crate's
+  `sign_prehash_rfc6979`, which combines HMAC-SM3 DRBG with the
+  private key + e), but the determinism was undocumented and the
+  API didn't expose an opt-in randomized path.
+
+  New methods (both wire-format compatible with `sign()`):
+
+  - `Sm2Signer::deterministic_sign(data)` — explicit RFC 6979
+    deterministic signature. Byte-identical to `sign()` output
+    (they share the same internal path). For CA / KMS / long-term
+    archival signing where reproducibility matters.
+  - `Sm2Signer::randomized_sign(data, &mut rng)` — caller-supplied
+    RNG drives the `additional_data` slot of the RFC 6979
+    HMAC-SM3 DRBG; two invocations over the same (key, data)
+    produce different signatures. Use when the caller wants
+    explicit control over the randomness source (HSM RNG,
+    deterministic test RNG, etc.).
+
+  The pre-existing `Sm2Signer::sign(data)` continues to use the
+  deterministic RFC 6979 path (default behavior preserved for
+  backward compatibility; reproducibility-by-default for CA/KMS).
+
+### Removed
+
+- **Heuristic dummy scalar multiplication in `Sm2Signer::sign`**.
+  The pre-PR-4.3 implementation had a `Scalar::random` + dummy
+  `r*G` computation claiming to provide timing-side-channel
+  noise. The actual signature path already used RFC 6979 (so the
+  dummy had no security effect on k, only on CPU noise that was
+  already dominated by the real signing operation). Removed to
+  avoid misleading future readers into thinking the dummy was
+  doing useful work.
+
+### Added (regression test surface)
+
+- **9 new PR-4.3 unit tests** (`gm-crypto/src/sm2.rs::pr43_deterministic_sign_tests`):
+  - `pr43_kat_deterministic_sm3_standard_distid`: same (key, msg)
+    → byte-identical signature.
+  - `pr43_kat_deterministic_custom_distid`: same with non-default
+    distid.
+  - `pr43_kat_deterministic_empty_message`: empty input edge case.
+  - `pr43_kat_deterministic_long_message`: 1 MiB input still
+    RFC 6979-deterministic.
+  - `pr43_kat_cross_process_invariant`: two independent signers
+    over the same key produce identical signatures.
+  - `pr43_kat_different_message_different_signature`: changing
+    one byte of input flips the signature (k-reuse impossible).
+  - `pr43_sign_equals_deterministic_sign`: `sign()` and
+    `deterministic_sign()` output is byte-identical (locked
+    invariant).
+  - `pr43_deterministic_sign_then_verify_round_trip`: end-to-end
+    sign + verifier round trip.
+  - `pr43_randomized_sign_differs_across_calls`: with OsRng,
+    randomized_sign produces three distinct signatures over the
+    same input, all verifying.
+
 ## [0.3.1] - 2026-09-11
 
 ### Added

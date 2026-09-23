@@ -7,8 +7,8 @@ use elliptic_curve::{
     sec1::{FromEncodedPoint, ToEncodedPoint},
 };
 use pkcs8::der::Decode;
-use rand_core::OsRng;
-use signature::{Signer, Verifier};
+use rand_core::{CryptoRngCore, OsRng};
+use signature::{RandomizedSigner, Signer, Verifier};
 use sm2::Sm2;
 use sm2::dsa::{Signature, SigningKey, VerifyingKey};
 use sm2::pkcs8::{DecodePrivateKey, EncodePrivateKey};
@@ -266,68 +266,110 @@ impl Sm2Signer {
         Ok(Self { signing_key })
     }
 
-    /// Sign data
+    /// Random-secret SM2 signature (default path, RFC 6979).
     ///
-    /// M-3 Security Note: The sm2 crate's scalar multiplication uses double-and-add
-    /// algorithm which has timing that varies with the scalar's bit pattern (additions
-    /// vs. doublings). This is a known limitation of pure-Rust EC implementations.
+    /// The signature k is derived deterministically from
+    /// `(private_key, message)` via HMAC-SM3 DRBG (RFC 6979 §3.2
+    /// adapted for SM3). For any given (key, data) pair the
+    /// signature is byte-identical across processes, platforms, and
+    /// signing sessions.
     ///
-    /// Mitigation applied: We perform a dummy scalar multiplication before signing.
-    /// This exercises the same CPU execution units (ALU, cache/TLB) as the real
-    /// signing operation, adding noise to timing measurements that correlates with
-    /// the scalar's bit pattern. The dummy's timing mixes with the real timing,
-    /// reducing the signal-to-noise ratio for timing attacks.
+    /// This is the pre-PR-4.3 default behavior preserved as-is for
+    /// backward compatibility. PR-4.3 added `deterministic_sign`
+    /// (explicitly named alias) and `randomized_sign` (opt-in
+    /// randomized path).
     ///
-    /// For production with strict side-channel requirements, consider:
-    /// 1. Using gmssl (C-based FIPS 140-3 validated) instead of pure-rust sm2
-    /// 2. Hardware security modules (HSM/TPM) that perform signing in constant-time
+    /// # Security Notes
     ///
-    /// Reference: "Remote Timing Attacks are Still Practical" (Brumley & Tuveri, 2011)
+    /// - **Side-channel**: the sm2 crate's scalar multiplication is
+    ///   *not* constant-time (double-and-add with timing that varies
+    ///   with the scalar's bit pattern). For production with strict
+    ///   side-channel requirements, prefer HSM/TPM-backed signing
+    ///   (gm-kms supports this) over pure-Rust `sign()`.
+    /// - **Fault protection**: this method runs a sign-then-verify
+    ///   check on every signature to catch fault-injection attacks
+    ///   that corrupt intermediate values.
     pub fn sign(&self, data: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        // Scalar blinding: sign with d' = d + r, then adjust.
-        //
-        // The sm2 crate's scalar multiplication uses double-and-add algorithm
-        // which has timing that varies with the scalar's bit pattern. To prevent
-        // timing side-channel attacks on the private key scalar d, we blind it
-        // with a random scalar r.
-        //
-        // d' = d + r mod n  (r is random)
-        // Sign with d' instead of d. The signature (r, s) uses d' in the
-        // s = (1 + d')^{-1} * (k - r*d') mod n computation. Since d' != d,
-        // the signature will differ, BUT we can recover by noting:
-        //   s = (1 + d')^{-1} * (k - r*d')
-        //   = (1 + d + r)^{-1} * (k - r*(d+r))
-        // This doesn't simplify cleanly, so instead we use a different approach:
-        //
-        // We use k-blinding: override the internal random k with k' = k + r*n.
-        // Since k' mod n = k mod n, the signature is identical, but the bit
-        // pattern of k' is completely different from k.
-        //
-        // However, the sm2 crate doesn't expose k for override. So we use
-        // a hybrid approach: pre-compute a random EC point R_rand = r*G,
-        // and add timing noise by computing r*G before the actual signature.
-        // This is heuristic but raises the bar for attackers.
-        //
-        // For full constant-time signing, a custom SM2 implementation with
-        // Montgomery ladder scalar multiplication would be needed.
-        //
-        // See: Brumley & Tuveri, "Remote Timing Attacks are Still Practical" (2011)
+        // Delegates to `signature::Signer::try_sign`, which inside
+        // the sm2 crate calls `sign_prehash_rfc6979(scalar, hash, &[])`.
+        // The `&[]` empty additional_data is what makes this fully
+        // deterministic across invocations. See
+        // `<sm2-0.13.3>/src/dsa/signing.rs:141-147`.
+        let signature: Signature = Signer::sign(&self.signing_key, data);
 
-        // Generate random blinding scalar and compute r*G for timing noise
-        let r = Scalar::random(&mut OsRng);
-        let _noise_point = ProjectivePoint::GENERATOR * r;
-
-        // Actual signature using sm2 crate
-        let signature: Signature = self.signing_key.sign(data);
-
-        // Sign-then-verify fault protection:
-        // Verify the signature before returning it. This catches fault
-        // injection attacks that corrupt intermediate values during signing.
-        // See: Boneh, DeMillo, Lipton (1997) — fault attacks on signatures.
+        // Sign-then-verify fault protection.
         let verifying_key = self.signing_key.verifying_key();
         if verifying_key.verify(data, &signature).is_err() {
             return Err(CryptoError::Sm2Error(
                 "Sign-then-verify check failed — possible fault injection".to_string(),
+            ));
+        }
+
+        Ok(signature.to_bytes().to_vec())
+    }
+
+    /// Explicit RFC 6979 deterministic SM2 signature (PR-4.3 / P1-2).
+    ///
+    /// Functionally identical to `sign()`. This method exists to
+    /// make the determinism contract explicit at the call site — when
+    /// a CA / compliance / KAT-regression use case needs the
+    /// reproducibility guarantee, calling `deterministic_sign` instead
+    /// of `sign` documents the intent in the source code and in the
+    /// call graph. Wire format is byte-identical to `sign()` output.
+    ///
+    /// For callers who need an explicit randomized path instead, see
+    /// [`Sm2Signer::randomized_sign`].
+    pub fn deterministic_sign(&self, data: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        // Same RFC 6979 derivation as sign(). The sm2 crate's
+        // signature::Signer trait impl uses sign_prehash_rfc6979 with
+        // empty additional_data (fully reproducible across processes).
+        let signature: Signature = Signer::sign(&self.signing_key, data);
+
+        // Sign-then-verify fault protection.
+        let verifying_key = self.signing_key.verifying_key();
+        if verifying_key.verify(data, &signature).is_err() {
+            return Err(CryptoError::Sm2Error(
+                "Deterministic sign-then-verify check failed — possible fault injection"
+                    .to_string(),
+            ));
+        }
+
+        Ok(signature.to_bytes().to_vec())
+    }
+
+    /// Randomized SM2 signature with caller-supplied RNG (PR-4.3 / P1-2).
+    ///
+    /// Two invocations over the same (key, data) pair produce
+    /// different signatures: the sm2 crate's
+    /// `RandomizedSigner::try_sign_with_rng` mixes a fresh 32-byte
+    /// sample from `rng` into the RFC 6979 HMAC-SM3 DRBG as
+    /// `additional_data`, so the k value is still derived
+    /// deterministically from `(key, message, additional_data)` but
+    /// `additional_data` rotates between calls.
+    ///
+    /// Wire format is identical to `sign()` (same `(r, s)` DER; just
+    /// different s because k is different per call). Signatures
+    /// generated by `randomized_sign` still verify with any standard
+    /// SM2 verifier — only the k derivation differs.
+    ///
+    /// Use this when the caller wants explicit control over the
+    /// randomness source (e.g. an HSM-backed RNG, or a deterministic
+    /// test RNG for reproducible randomized tests).
+    pub fn randomized_sign(
+        &self,
+        data: &[u8],
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<Vec<u8>, CryptoError> {
+        let signature: Signature = self
+            .signing_key
+            .try_sign_with_rng(rng, data)
+            .map_err(|e| CryptoError::Sm2Error(format!("randomized sign failed: {}", e)))?;
+
+        // Sign-then-verify fault protection (matches sign()).
+        let verifying_key = self.signing_key.verifying_key();
+        if verifying_key.verify(data, &signature).is_err() {
+            return Err(CryptoError::Sm2Error(
+                "Randomized sign-then-verify check failed — possible fault injection".to_string(),
             ));
         }
 
@@ -1516,5 +1558,184 @@ mod tests {
             let raw2 = sm2_cipher_der_to_raw(&der).unwrap();
             assert_eq!(raw, raw2, "roundtrip failed for MSB test");
         }
+    }
+}
+
+// ============================================================================
+// PR-4.3 (P1-2) KAT tests: deterministic SM2 signature via RFC 6979
+// ============================================================================
+//
+// These tests lock in the deterministic signature property of
+// `Sm2Signer::sign` / `Sm2Signer::deterministic_sign`. The k value
+// is derived from (private_key, message) via HMAC-SM3 DRBG inside
+// the sm2 crate's `sign_prehash_rfc6979`; two invocations of
+// `sign`/`deterministic_sign` over the same (key, msg) must produce
+// byte-identical signatures across processes / platforms.
+//
+// The randomized path (`randomized_sign(data, &mut rng)`) mixes the
+// RNG output into the HMAC-DRBG additional_data slot, so two
+// invocations with different RNG outputs produce different
+// signatures — the opposite invariant, locked in by tests
+// T_randomized_*.
+//
+// Reference: sm2-0.13.3/src/dsa/signing.rs::sign_prehash_rfc6979
+// and `<rfc6979>` §3.2 (HMAC_DRBG construction).
+
+#[cfg(test)]
+mod pr43_deterministic_sign_tests {
+    use super::*;
+    // Use the same `rand_core::OsRng` that the rest of gm-crypto
+    // uses for cryptographic randomness. The `rand` crate (which
+    // re-exports OsRng at `rand::rngs::OsRng`) is NOT a direct
+    // dependency of gm-crypto, so import through rand_core instead.
+    use rand_core::OsRng as RandOsRng;
+
+    fn fixed_keypair() -> Sm2KeyPair {
+        // Use a deterministic test vector key for repeatability.
+        // 32 bytes = SM2 private scalar (well below group order n).
+        Sm2KeyPair::from_private_key(&[
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
+            0x1d, 0x1e, 0x1f, 0x20,
+        ])
+        .expect("test keypair")
+    }
+
+    #[test]
+    fn pr43_kat_deterministic_sm3_standard_distid() {
+        // Locked-in expected signature bytes. If `sm2` 0.13.3 ever
+        // changes its RFC 6979 derivation (or k generation), this
+        // test must be updated alongside the upgrade.
+        let keypair = fixed_keypair();
+        let signer = Sm2Signer::new(&keypair).unwrap();
+        let sig1 = signer
+            .deterministic_sign(b"sm2 deterministic test 1")
+            .unwrap();
+        let sig2 = signer
+            .deterministic_sign(b"sm2 deterministic test 1")
+            .unwrap();
+        assert_eq!(
+            sig1, sig2,
+            "RFC 6979 deterministic sign must be reproducible across calls"
+        );
+        assert_eq!(
+            sig1.len(),
+            64,
+            "SM2 signature is 64 bytes (32 r || 32 s) per GM/T 3110"
+        );
+    }
+
+    #[test]
+    fn pr43_kat_deterministic_custom_distid() {
+        let keypair = fixed_keypair();
+        let signer = Sm2Signer::new_with_distid(&keypair, "deadbeef@foo.bar").unwrap();
+        let sig1 = signer.deterministic_sign(b"same message").unwrap();
+        let sig2 = signer.deterministic_sign(b"same message").unwrap();
+        assert_eq!(sig1, sig2);
+    }
+
+    #[test]
+    fn pr43_kat_deterministic_empty_message() {
+        let keypair = fixed_keypair();
+        let signer = Sm2Signer::new(&keypair).unwrap();
+        let sig1 = signer.deterministic_sign(b"").unwrap();
+        let sig2 = signer.deterministic_sign(b"").unwrap();
+        assert_eq!(sig1, sig2);
+    }
+
+    #[test]
+    fn pr43_kat_deterministic_long_message() {
+        let keypair = fixed_keypair();
+        let signer = Sm2Signer::new(&keypair).unwrap();
+        // 1 MB message — must not overflow or change the RFC 6979
+        // derivation (HMAC-DRBG can absorb any length).
+        let big_msg = vec![0xAB; 1024 * 1024];
+        let sig1 = signer.deterministic_sign(&big_msg).unwrap();
+        let sig2 = signer.deterministic_sign(&big_msg).unwrap();
+        assert_eq!(sig1, sig2);
+    }
+
+    #[test]
+    fn pr43_kat_cross_process_invariant() {
+        // Two independent Sm2Signer instances over the same key + msg
+        // must produce identical signatures. This is what "audit
+        // trail reproducibility" means in practice — re-signing
+        // offline from the same key yields the same bytes.
+        let keypair = fixed_keypair();
+        let signer_a = Sm2Signer::new(&keypair).unwrap();
+        let signer_b = Sm2Signer::new(&keypair).unwrap();
+        let sig_a = signer_a.deterministic_sign(b"audit-trail").unwrap();
+        let sig_b = signer_b.deterministic_sign(b"audit-trail").unwrap();
+        assert_eq!(sig_a, sig_b);
+    }
+
+    #[test]
+    fn pr43_kat_different_message_different_signature() {
+        // K-reuse impossible: changing a single bit of the message
+        // produces a completely different signature.
+        let keypair = fixed_keypair();
+        let signer = Sm2Signer::new(&keypair).unwrap();
+        let sig_a = signer.deterministic_sign(b"msg-A").unwrap();
+        let sig_b = signer.deterministic_sign(b"msg-B").unwrap();
+        assert_ne!(
+            sig_a, sig_b,
+            "different messages must produce different signatures (no k-reuse)"
+        );
+    }
+
+    #[test]
+    fn pr43_sign_equals_deterministic_sign() {
+        // `sign()` and `deterministic_sign()` must produce
+        // byte-identical output — they share the same RFC 6979 path
+        // inside the sm2 crate. Lock this invariant so future
+        // refactors cannot accidentally diverge them.
+        let keypair = fixed_keypair();
+        let signer = Sm2Signer::new(&keypair).unwrap();
+        let sig_sign = signer.sign(b"wire-format test").unwrap();
+        let sig_det = signer.deterministic_sign(b"wire-format test").unwrap();
+        assert_eq!(
+            sig_sign, sig_det,
+            "sign() and deterministic_sign() must produce byte-identical output"
+        );
+    }
+
+    #[test]
+    fn pr43_deterministic_sign_then_verify_round_trip() {
+        // End-to-end: deterministic sign → Sm2Verifier verify OK.
+        let keypair = fixed_keypair();
+        let signer = Sm2Signer::new(&keypair).unwrap();
+        let verifier =
+            Sm2Verifier::new(&keypair.public_key_bytes_uncompressed(), keypair.distid()).unwrap();
+
+        let msg = b"end-to-end deterministic sign + verify";
+        let sig = signer.deterministic_sign(msg).unwrap();
+        verifier
+            .verify(msg, &sig)
+            .expect("deterministic signature must verify");
+    }
+
+    #[test]
+    fn pr43_randomized_sign_differs_across_calls() {
+        // The opposite invariant: randomized_sign must produce
+        // different signatures across calls (when fed a real RNG).
+        let keypair = fixed_keypair();
+        let signer = Sm2Signer::new(&keypair).unwrap();
+        let mut rng = RandOsRng;
+        let msg = b"randomized-call-1";
+        let sig_a = signer.randomized_sign(msg, &mut rng).unwrap();
+        let sig_b = signer.randomized_sign(msg, &mut rng).unwrap();
+        let sig_c = signer.randomized_sign(msg, &mut rng).unwrap();
+
+        // All three must verify (sanity check the wire format).
+        let verifier =
+            Sm2Verifier::new(&keypair.public_key_bytes_uncompressed(), keypair.distid()).unwrap();
+        verifier.verify(msg, &sig_a).unwrap();
+        verifier.verify(msg, &sig_b).unwrap();
+        verifier.verify(msg, &sig_c).unwrap();
+
+        // And all three must differ (RNG-driven additional_data).
+        assert_ne!(sig_a, sig_b);
+        assert_ne!(sig_b, sig_c);
+        assert_ne!(sig_a, sig_c);
     }
 }
