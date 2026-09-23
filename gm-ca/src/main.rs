@@ -182,22 +182,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // TLS 1.3 + SM transport: supports three modes
     // 1. TLS 1.3 + SM (preferred): set GRPC_TLS_CERT, GRPC_TLS_KEY, GRPC_TLS_CA
-    //    -> uses gm_tls::TlsAcceptor (TLS 1.3 / RFC 8446 + SM cipher suites, NOT TLCP)
+    //    -> uses gm_tls::TlsAcceptor (TLS 1.3 / RFC 8446 + SM cipher suites, NOT TLCP).
+    //    Optionally set GRPC_TLS_REQUIRE_CLIENT_AUTH=1 to enable mTLS (client cert
+    //    verification in addition to the Bearer Token interceptor).
     // 2. Plain TCP: no TLS env vars set -> no encryption (development only)
     let grpc_tls_cert = std::env::var("GRPC_TLS_CERT").ok();
     let grpc_tls_key = std::env::var("GRPC_TLS_KEY").ok();
     let grpc_tls_ca = std::env::var("GRPC_TLS_CA").ok();
+    // PR-4.2 (P1-1): opt-in mTLS gate. Default false preserves the
+    // pre-PR-4.2 behavior of "TLS 1.3 + SM but no client cert" —
+    // the gRPC Bearer Token interceptor remains the sole auth factor
+    // unless the operator opts in to mTLS via this env var.
+    let require_client_auth = parse_bool_env("GRPC_TLS_REQUIRE_CLIENT_AUTH");
 
     match (&grpc_tls_cert, &grpc_tls_key, &grpc_tls_ca) {
         (Some(cert_path), Some(key_path), Some(ca_path)) => {
-            // Mode 1: TLS 1.3 + SM — full SM2/SM3/SM4 encryption for gRPC
+            // Mode 1: TLS 1.3 + SM — full SM2/SM3/SM4 encryption for gRPC.
+            // When require_client_auth is set, client cert chain
+            // validation is delegated to gm_tls::TlsAcceptor via
+            // TlsConfig::with_require_client_auth(true), which
+            // internally calls verify_cert_chain_sm2_chain.
             info!(
-                "gRPC TLS 1.3 + SM enabled with cert={}, key={}, ca={}",
-                cert_path, key_path, ca_path
+                "gRPC TLS 1.3 + SM enabled: cert={}, key={}, ca={}, require_client_auth={}",
+                cert_path, key_path, ca_path, require_client_auth
             );
             let tls_config = gm_tls::TlsConfig::load(cert_path, key_path, ca_path)?
                 .with_alpn(vec!["h2".to_string()])
-                .with_require_client_auth(false);
+                .with_require_client_auth(require_client_auth);
             let acceptor = gm_tls::TlsAcceptor::new(tls_config)?;
             let listener = tokio::net::TcpListener::bind(addr).await?;
             let incoming = GmTlsIncoming::new(listener, acceptor);
@@ -285,4 +296,117 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Server shutdown complete");
     Ok(())
+}
+
+// ============================================================================
+// PR-4.2 (P1-1) helper
+// ============================================================================
+//
+// Parse a bool from an env var with strict semantics: only the
+// literal values "1", "true", "yes", "on" (case-insensitive) are
+// accepted as `true`; everything else (including empty string,
+// unset, garbage) is `false`. Centralized so the policy is auditable
+// in one place rather than spread across per-env-var ad-hoc reads.
+
+fn parse_bool_env(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|s| matches!(s.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+// ============================================================================
+// PR-4.2 (P1-1) unit tests
+// ============================================================================
+
+#[cfg(test)]
+mod pr42_parse_bool_env_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // Serializes env-var mutations across the parallel test runner.
+    // Same pattern as PR-4.1's production_safety tests.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_env<T>(key: &str, value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prev = std::env::var(key).ok();
+        // SAFETY: `ENV_LOCK` serializes access. We restore the
+        // previous value before returning.
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+            let result = f();
+            match prev {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+            result
+        }
+    }
+
+    #[test]
+    fn pr42_parse_bool_env_unset() {
+        with_env("GRPC_TLS_REQUIRE_CLIENT_AUTH", None, || {
+            assert!(!parse_bool_env("GRPC_TLS_REQUIRE_CLIENT_AUTH"));
+        });
+    }
+
+    #[test]
+    fn pr42_parse_bool_env_one() {
+        with_env("GRPC_TLS_REQUIRE_CLIENT_AUTH", Some("1"), || {
+            assert!(parse_bool_env("GRPC_TLS_REQUIRE_CLIENT_AUTH"));
+        });
+    }
+
+    #[test]
+    fn pr42_parse_bool_env_true_lowercase() {
+        with_env("GRPC_TLS_REQUIRE_CLIENT_AUTH", Some("true"), || {
+            assert!(parse_bool_env("GRPC_TLS_REQUIRE_CLIENT_AUTH"));
+        });
+    }
+
+    #[test]
+    fn pr42_parse_bool_env_yes() {
+        with_env("GRPC_TLS_REQUIRE_CLIENT_AUTH", Some("yes"), || {
+            assert!(parse_bool_env("GRPC_TLS_REQUIRE_CLIENT_AUTH"));
+        });
+    }
+
+    #[test]
+    fn pr42_parse_bool_env_on() {
+        with_env("GRPC_TLS_REQUIRE_CLIENT_AUTH", Some("on"), || {
+            assert!(parse_bool_env("GRPC_TLS_REQUIRE_CLIENT_AUTH"));
+        });
+    }
+
+    #[test]
+    fn pr42_parse_bool_env_true_uppercase() {
+        with_env("GRPC_TLS_REQUIRE_CLIENT_AUTH", Some("TRUE"), || {
+            assert!(parse_bool_env("GRPC_TLS_REQUIRE_CLIENT_AUTH"));
+        });
+    }
+
+    #[test]
+    fn pr42_parse_bool_env_empty_string() {
+        with_env("GRPC_TLS_REQUIRE_CLIENT_AUTH", Some(""), || {
+            assert!(!parse_bool_env("GRPC_TLS_REQUIRE_CLIENT_AUTH"));
+        });
+    }
+
+    #[test]
+    fn pr42_parse_bool_env_garbage() {
+        with_env("GRPC_TLS_REQUIRE_CLIENT_AUTH", Some("garbage"), || {
+            assert!(!parse_bool_env("GRPC_TLS_REQUIRE_CLIENT_AUTH"));
+        });
+    }
+
+    #[test]
+    fn pr42_parse_bool_env_zero() {
+        with_env("GRPC_TLS_REQUIRE_CLIENT_AUTH", Some("0"), || {
+            assert!(!parse_bool_env("GRPC_TLS_REQUIRE_CLIENT_AUTH"));
+        });
+    }
 }

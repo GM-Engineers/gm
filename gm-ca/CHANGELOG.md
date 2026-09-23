@@ -9,8 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`SignCertificateRequest` / `RenewCertificateRequest` (proto v0.3.0,
-  PR-3.1)** gain two additive fields for SPIRE Workload API support:
+- **Configurable mTLS (PR-4.2 / P1-1)**. New env var
+  `GRPC_TLS_REQUIRE_CLIENT_AUTH` enables client-certificate
+  authentication on the gRPC listener (mTLS + Bearer Token
+  dual-factor). Accepted values: `1` / `true` / `yes` / `on`
+  (case-insensitive) enable mTLS; everything else (including
+  unset, empty string, `0`, `garbage`) disables it. Default
+  `false` preserves pre-PR-4.2 behavior. Client cert chain
+  validation reuses `gm_tls::TlsConfig::with_require_client_auth`,
+  which internally calls `verify_cert_chain_sm2_chain`.
+
+- **`gm-ca-server` binary**: new `parse_bool_env` helper (file
+  scope) for the above. 9 new unit tests cover the env-var
+  parsing semantics exhaustively.
+
+- **gm-ca 0.4.0**: version bump (minor; new opt-in public env var).
+
+- **`gm-crypto` / `gm-tlcp` dev-deps**: cascade-bump gm-ca
+  constraint from `^0.3` to `^0.4` to follow the workspace.
+
+### Added (PR-3.1)
+
+- **`SignCertificateRequest` / `RenewCertificateRequest` (proto v0.3.0, PR-3.1)** gain two additive fields for SPIRE Workload API support:
   - `validity_seconds` (int64, field 3): sub-day TTL. When > 0,
     takes precedence over the legacy `validity_days` field. Range
     `1..=31_536_000` (1s .. 365d). SPIRE SVID rotation typically

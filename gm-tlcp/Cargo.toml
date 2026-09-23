@@ -196,7 +196,8 @@ hex = "0.4"
 # `RsaKeyPair::generate(2048)` (no cert issuance needed).
 # PR-3.1 bumped gm-ca to 0.3.0 (P1-8 + P1-9 proto v0.3.0 + serde);
 # widen to ^0.3 to follow.
-gm-ca = { path = "../gm-ca", version = "0.3", default-features = false, features = ["tlcp-profiles"] }
+# PR-4.2 bumps gm-ca to 0.4.0 (P1-1 configurable mTLS); follow.
+gm-ca = { path = "../gm-ca", version = "0.4", default-features = false, features = ["tlcp-profiles"] }
 
 # Phase 12: `pem::parse` is used by `gmca_cert_setup` to extract DER
 # from PEM-encoded certs returned by `gm_ca::CaSigner`. It's a
