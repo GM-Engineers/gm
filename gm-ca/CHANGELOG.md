@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Rate limiter is now per-caller (peer IP) instead of global**
+  (PR-4.12 / P2-7): pre-PR-4.12 the CA service used a single
+  `Arc<Mutex<TokenBucket>>` shared across all callers, meaning
+  one misbehaving client could exhaust tokens and lock out
+  every legitimate client. PR-4.12 replaces it with a
+  `PerCallerLimiter` (`HashMap<IpAddr, TokenBucket>`):
+  each distinct client IP gets its own bucket; one client's
+  exhaustion no longer blocks other clients. Idle entries
+  are reaped after 10 minutes (configurable via
+  `CaServiceImpl::with_rate_limit_idle_ttl`). New counter
+  `gmca_rate_limited_total{caller_ip}` enables per-caller
+  alerts. The `Request<T>` shim falls back to a placeholder
+  IP (`0.0.0.0`) when `remote_addr()` is `None` (unix
+  sockets, in-process tests). Five new unit tests in
+  `pr412_per_caller_rate_limit_tests` cover the limiter
+  contract. Bumps gm-ca to 0.4.1 (patch; public API
+  signatures unchanged — `with_rate_limit(capacity,
+  refill_period)` now applies per-caller instead of
+  globally).
+
 ### Added
 
 - **Configurable mTLS (PR-4.2 / P1-1)**. New env var

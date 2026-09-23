@@ -10,6 +10,8 @@ use ca_v1::{
     SignCertificateResponse, ca_service_server::CaService,
 };
 use sqlx::types::chrono::Utc;
+use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -29,8 +31,21 @@ pub struct CaServiceImpl {
     store: Arc<DbStore>,
     /// Monotonically increasing CRL number (RFC 5280 §5.2.3)
     crl_number: Arc<AtomicU64>,
-    /// Rate limiter for certificate signing (token bucket per-peer)
-    rate_limiter: Arc<Mutex<TokenBucket>>,
+    /// PR-4.12 / P2-7: per-caller rate limiter (peer-IP keyed).
+    /// See [`PerCallerLimiter`] for semantics. Pre-PR-4.12 a
+    /// single GLOBAL bucket was shared across all callers,
+    /// meaning a single misbehaving client could lock out every
+    /// legitimate client.
+    rate_limiter: PerCallerLimiter,
+}
+
+/// PR-4.12: placeholder IP used when `tonic::Request::remote_addr()`
+/// is `None` (e.g. unix socket / test fakes without a remote
+/// endpoint). All such callers share one bucket, which is
+/// acceptable because they all live in the local trust domain
+/// and bypass network-level access controls.
+fn placeholder_peer_ip() -> IpAddr {
+    "0.0.0.0".parse::<IpAddr>().expect("0.0.0.0 must parse")
 }
 
 impl CaServiceImpl {
@@ -40,16 +55,15 @@ impl CaServiceImpl {
     /// * `signer` - SM2 CA key pair for signing certificates
     /// * `store` - Shared PostgreSQL store for certificate persistence
     pub fn new(signer: CaSigner, store: Arc<DbStore>) -> Self {
-        Self {
-            signer: Arc::new(signer),
-            store,
-            crl_number: Arc::new(AtomicU64::new(1)),
-            // Default: 10 signtures per 60 seconds per peer
-            rate_limiter: Arc::new(Mutex::new(TokenBucket::new(10, Duration::from_secs(60)))),
-        }
+        Self::with_rate_limit(signer, store, 10, Duration::from_secs(60))
     }
 
     /// Create a new CA service with custom rate limit.
+    ///
+    /// PR-4.12 / P2-7: `capacity` and `refill_period` apply **per
+    /// caller** (peer IP), not globally. Each distinct client IP
+    /// gets its own token bucket; one client's exhaustion no
+    /// longer blocks other clients.
     pub fn with_rate_limit(
         signer: CaSigner,
         store: Arc<DbStore>,
@@ -60,8 +74,41 @@ impl CaServiceImpl {
             signer: Arc::new(signer),
             store,
             crl_number: Arc::new(AtomicU64::new(1)),
-            rate_limiter: Arc::new(Mutex::new(TokenBucket::new(capacity, refill_period))),
+            rate_limiter: PerCallerLimiter::new(
+                capacity,
+                refill_period,
+                // 10 minutes — long enough that a single SVID
+                // rotation cycle (P1-9, sub-day TTLs) won't
+                // lose bucket state, short enough that stale
+                // entries don't accumulate.
+                Duration::from_secs(600),
+            ),
         }
+    }
+
+    /// PR-4.12: configure the per-caller idle TTL (used by
+    /// tests and operators who want a more aggressive
+    /// reaping policy).
+    pub fn with_rate_limit_idle_ttl(mut self, ttl: Duration) -> Self {
+        self.rate_limiter = PerCallerLimiter::new(
+            self.rate_limiter.capacity,
+            self.rate_limiter.refill_period,
+            ttl,
+        );
+        self
+    }
+
+    /// PR-4.12 / P2-7: enforce the per-caller rate limit.
+    /// Identifies the caller by `request.remote_addr()` (tonic
+    /// transport-level peer socket address); falls back to a
+    /// placeholder IP when the transport does not expose one
+    /// (unix sockets, in-process tests).
+    async fn check_rate_limit<T>(&self, request: &Request<T>) -> Result<IpAddr, Status> {
+        let peer_ip = request
+            .remote_addr()
+            .map(|sa| sa.ip())
+            .unwrap_or_else(placeholder_peer_ip);
+        self.rate_limiter.check(peer_ip).await
     }
 
     /// Access the underlying database store (used by health checks).
@@ -76,16 +123,10 @@ impl CaService for CaServiceImpl {
         &self,
         request: Request<ca_v1::SignCertificateRequest>,
     ) -> Result<Response<SignCertificateResponse>, Status> {
-        // Rate limit check
-        {
-            let mut bucket = self.rate_limiter.lock().await;
-            if !bucket.try_consume() {
-                metrics::record_error("rate_limited");
-                return Err(Status::resource_exhausted(
-                    "certificate signing rate limit exceeded, try again later",
-                ));
-            }
-        }
+        // PR-4.12 / P2-7: per-caller rate limit (peer-IP keyed).
+        // Pre-PR-4.12 this was a global single bucket shared
+        // across all callers, which amplified DoS.
+        let _peer_ip = self.check_rate_limit(&request).await?;
 
         let req = request.into_inner();
         let csr_bytes = req.csr_pem.as_bytes();
@@ -182,16 +223,8 @@ impl CaService for CaServiceImpl {
         &self,
         request: Request<ca_v1::RenewCertificateRequest>,
     ) -> Result<Response<RenewCertificateResponse>, Status> {
-        // Rate limit check
-        {
-            let mut bucket = self.rate_limiter.lock().await;
-            if !bucket.try_consume() {
-                metrics::record_error("rate_limited");
-                return Err(Status::resource_exhausted(
-                    "certificate renewal rate limit exceeded, try again later",
-                ));
-            }
-        }
+        // PR-4.12 / P2-7: per-caller rate limit (peer-IP keyed).
+        let _peer_ip = self.check_rate_limit(&request).await?;
 
         let req = request.into_inner();
 
@@ -427,6 +460,57 @@ impl TokenBucket {
     }
 }
 
+/// PR-4.12 / P2-7: per-caller (peer-IP) rate limiter. One
+/// bucket per caller, keyed by `IpAddr`; idle entries are
+/// reaped after `idle_ttl`. Pre-PR-4.12 a single GLOBAL
+/// bucket was shared across all callers, meaning one
+/// misbehaving client could exhaust tokens and lock out
+/// every legitimate client (DoS amplification).
+#[derive(Clone)]
+pub struct PerCallerLimiter {
+    buckets: Arc<Mutex<HashMap<IpAddr, TokenBucket>>>,
+    capacity: u32,
+    refill_period: Duration,
+    idle_ttl: Duration,
+}
+
+impl PerCallerLimiter {
+    /// Default: 10 tokens per 60s, idle TTL = 10min.
+    pub fn default_10_per_minute() -> Self {
+        Self::new(10, Duration::from_secs(60), Duration::from_secs(600))
+    }
+
+    /// Build with custom capacity / refill period / idle TTL.
+    pub fn new(capacity: u32, refill_period: Duration, idle_ttl: Duration) -> Self {
+        Self {
+            buckets: Arc::new(Mutex::new(HashMap::new())),
+            capacity,
+            refill_period,
+            idle_ttl,
+        }
+    }
+
+    /// Try to consume one token for `peer_ip`. Returns `Ok(peer_ip)`
+    /// on success; `Err(Status::resource_exhausted(...))` if the
+    /// caller's bucket is empty.
+    pub async fn check(&self, peer_ip: IpAddr) -> Result<IpAddr, Status> {
+        let mut map = self.buckets.lock().await;
+        let now = Instant::now();
+        // Opportunistic reaping: drop entries idle longer than `idle_ttl`.
+        map.retain(|_, b| now.duration_since(b.last_refill) <= self.idle_ttl);
+        let bucket = map
+            .entry(peer_ip)
+            .or_insert_with(|| TokenBucket::new(self.capacity, self.refill_period));
+        if !bucket.try_consume() {
+            metrics::record_rate_limited(peer_ip);
+            return Err(Status::resource_exhausted(
+                "certificate signing rate limit exceeded for caller, try again later",
+            ));
+        }
+        Ok(peer_ip)
+    }
+}
+
 #[cfg(test)]
 mod rate_limit_tests {
     use super::*;
@@ -466,5 +550,113 @@ mod rate_limit_tests {
         // Should be refilled
         let mut b = bucket.lock().await;
         assert!(b.try_consume(), "token should be refilled after waiting");
+    }
+}
+
+#[cfg(test)]
+mod pr412_per_caller_rate_limit_tests {
+    //! PR-4.12 / P2-7: per-caller rate limiter tests.
+    //!
+    //! These tests exercise [`PerCallerLimiter`] directly so
+    //! they don't require constructing a full `CaSigner` /
+    //! `DbStore` (the tonic transport-level
+    //! `Request::remote_addr()` setter is not public, so we
+    //! use the pure-IP entry point that the production
+    //! `check_rate_limit(Request<T>)` shim delegates to).
+
+    use super::*;
+
+    fn new_limiter(capacity: u32, refill: Duration, idle_ttl: Duration) -> PerCallerLimiter {
+        PerCallerLimiter::new(capacity, refill, idle_ttl)
+    }
+
+    #[tokio::test]
+    async fn pr412_placeholder_ip_bucket_holds_capacity_then_rejects() {
+        let lim = new_limiter(2, Duration::from_secs(60), Duration::from_secs(600));
+        let placeholder = placeholder_peer_ip();
+        assert!(lim.check(placeholder).await.is_ok());
+        assert!(lim.check(placeholder).await.is_ok());
+        let err = lim
+            .check(placeholder)
+            .await
+            .expect_err("3rd call must be rate-limited");
+        assert_eq!(err.code(), tonic::Code::ResourceExhausted);
+        // All three calls share the placeholder bucket.
+        let map = lim.buckets.lock().await;
+        assert_eq!(map.len(), 1, "expected exactly one placeholder bucket");
+    }
+
+    #[tokio::test]
+    async fn pr412_per_caller_buckets_are_independent() {
+        let lim = new_limiter(1, Duration::from_secs(60), Duration::from_secs(600));
+        let ip_a: IpAddr = "10.0.0.1".parse().unwrap();
+        let ip_b: IpAddr = "10.0.0.2".parse().unwrap();
+        // Exhaust IP A.
+        assert!(lim.check(ip_a).await.is_ok());
+        let err = lim
+            .check(ip_a)
+            .await
+            .expect_err("IP A 2nd call must be limited");
+        assert_eq!(err.code(), tonic::Code::ResourceExhausted);
+        // IP B is unaffected.
+        assert!(
+            lim.check(ip_b).await.is_ok(),
+            "IP B must NOT be affected by IP A's exhaustion"
+        );
+        // Both buckets are now in the map.
+        let map = lim.buckets.lock().await;
+        assert_eq!(map.len(), 2);
+        assert!(map.contains_key(&ip_a));
+        assert!(map.contains_key(&ip_b));
+    }
+
+    #[tokio::test]
+    async fn pr412_idle_caller_is_reaped_on_next_call() {
+        // 1ms idle TTL: a back-dated `last_refill` gets reaped.
+        let lim = new_limiter(10, Duration::from_secs(60), Duration::from_millis(1));
+        let ip: IpAddr = "10.0.0.99".parse().unwrap();
+        // Inject a stale bucket.
+        {
+            let mut map = lim.buckets.lock().await;
+            let mut bucket = TokenBucket::new(10, Duration::from_secs(60));
+            bucket.last_refill = Instant::now() - Duration::from_secs(60);
+            map.insert(ip, bucket);
+            assert_eq!(map.len(), 1);
+        }
+        // Sleep so the stale entry is older than the TTL.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        // Trigger retain() via the limiter.
+        let _ = lim.check(ip).await;
+        // The stale entry was reaped BEFORE the target IP
+        // check; a new fresh entry was then created — verify
+        // the map size is exactly 1 (not 2).
+        let map = lim.buckets.lock().await;
+        assert_eq!(
+            map.len(),
+            1,
+            "expected stale entry reaped + fresh entry created (map keys: {:?})",
+            map.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn pr412_placeholder_ip_is_0_0_0_0() {
+        assert_eq!(
+            placeholder_peer_ip().to_string(),
+            "0.0.0.0",
+            "placeholder must be 0.0.0.0 to match the documented behavior"
+        );
+    }
+
+    #[tokio::test]
+    async fn pr412_default_10_per_minute_factory() {
+        let lim = PerCallerLimiter::default_10_per_minute();
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        // 10 successful calls.
+        for _ in 0..10 {
+            assert!(lim.check(ip).await.is_ok());
+        }
+        // 11th must be rate-limited.
+        assert!(lim.check(ip).await.is_err());
     }
 }

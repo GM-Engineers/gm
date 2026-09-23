@@ -1,5 +1,7 @@
 //! Metrics instrumentation for gm-ca service.
 
+use std::net::IpAddr;
+
 use metrics::{Unit, counter, describe_counter};
 
 /// Describes all metrics exported by gm-ca.
@@ -25,6 +27,11 @@ pub fn describe_ca_metrics() {
         Unit::Count,
         "Total number of CA service errors"
     );
+    describe_counter!(
+        "gmca_rate_limited_total",
+        Unit::Count,
+        "Total number of per-caller rate-limit rejections (PR-4.12)"
+    );
 }
 
 /// Records a successful certificate signature.
@@ -45,4 +52,17 @@ pub fn record_revocation() {
 /// Records a CA service error.
 pub fn record_error(error_type: &str) {
     counter!("gmca_errors_total", "type" => error_type.to_string()).increment(1);
+}
+
+/// PR-4.12 / P2-7: records a per-caller rate-limit rejection.
+/// The `caller_ip` label allows operators to alert on specific
+/// abusive clients without scraping logs. Pre-PR-4.12 a single
+/// global bucket produced only `gmca_errors_total{type="rate_limited"}`
+/// with no caller attribution.
+pub fn record_rate_limited(caller_ip: IpAddr) {
+    counter!(
+        "gmca_rate_limited_total",
+        "caller_ip" => caller_ip.to_string()
+    )
+    .increment(1);
 }
