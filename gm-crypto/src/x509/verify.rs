@@ -33,10 +33,83 @@ use crate::error::CryptoError;
 use crate::sm2::{Sm2Verifier, decompress_sm2_pubkey};
 use std::sync::Arc;
 use time::OffsetDateTime;
+use x509_parser::oid_registry::{
+    OID_X509_EXT_AUTHORITY_KEY_IDENTIFIER, OID_X509_EXT_BASIC_CONSTRAINTS,
+    OID_X509_EXT_CERTIFICATE_POLICIES, OID_X509_EXT_CRL_DISTRIBUTION_POINTS,
+    OID_X509_EXT_CRL_NUMBER, OID_X509_EXT_DELTA_CRL_INDICATOR, OID_X509_EXT_EXTENDED_KEY_USAGE,
+    OID_X509_EXT_FRESHEST_CRL, OID_X509_EXT_INHIBITANT_ANY_POLICY, OID_X509_EXT_ISSUER_ALT_NAME,
+    OID_X509_EXT_ISSUER_DISTRIBUTION_POINT, OID_X509_EXT_KEY_USAGE, OID_X509_EXT_NAME_CONSTRAINTS,
+    OID_X509_EXT_POLICY_CONSTRAINTS, OID_X509_EXT_POLICY_MAPPINGS, OID_X509_EXT_SUBJECT_ALT_NAME,
+    OID_X509_EXT_SUBJECT_KEY_IDENTIFIER,
+};
 use x509_parser::pem::Pem;
 use x509_parser::prelude::FromDer;
 use x509_parser::prelude::X509Certificate;
 use x509_parser::revocation_list::CertificateRevocationList;
+
+/// RFC 5280 §4.2 — extensions that gm-crypto **recognizes** when
+/// verifying a certificate.
+///
+/// `check_unknown_critical_extensions` rejects any certificate that
+/// carries a `critical = TRUE` extension whose OID is **not** in this
+/// set, per RFC 5280 §4.2:
+///
+/// > "Certificate-using applications processing certificates that
+/// > contain extensions that they do not recognize SHOULD reject the
+/// > certificate if the extension is critical."
+///
+/// Note: `nameConstraints` (2.5.29.30) and `policyConstraints`
+/// (2.5.29.36) are listed here (so a cert with one of these
+/// critical extensions does NOT trigger the unknown-rejection) but
+/// gm-crypto does **not** yet enforce their semantic content (name
+/// subtree filtering, require-explicit-policy, etc.). Enforcing those
+/// semantics is a follow-up PR per master plan §四 P2-1 路线图项.
+///
+/// PR-4.8 / P2-1.
+pub const KNOWN_X509_EXTENSIONS: &[x509_parser::oid_registry::Oid<'static>] = &[
+    OID_X509_EXT_BASIC_CONSTRAINTS,         // 2.5.29.19
+    OID_X509_EXT_KEY_USAGE,                 // 2.5.29.15
+    OID_X509_EXT_EXTENDED_KEY_USAGE,        // 2.5.29.37
+    OID_X509_EXT_SUBJECT_ALT_NAME,          // 2.5.29.17
+    OID_X509_EXT_ISSUER_ALT_NAME,           // 2.5.29.18
+    OID_X509_EXT_SUBJECT_KEY_IDENTIFIER,    // 2.5.29.14
+    OID_X509_EXT_AUTHORITY_KEY_IDENTIFIER,  // 2.5.29.35
+    OID_X509_EXT_CRL_DISTRIBUTION_POINTS,   // 2.5.29.31
+    OID_X509_EXT_CRL_NUMBER,                // 2.5.29.20
+    OID_X509_EXT_DELTA_CRL_INDICATOR,       // 2.5.29.27
+    OID_X509_EXT_ISSUER_DISTRIBUTION_POINT, // 2.5.29.28
+    OID_X509_EXT_FRESHEST_CRL,              // 2.5.29.46
+    OID_X509_EXT_INHIBITANT_ANY_POLICY,     // 2.5.29.54
+    OID_X509_EXT_NAME_CONSTRAINTS,          // 2.5.29.30 — accepted, semantics deferred
+    OID_X509_EXT_CERTIFICATE_POLICIES,      // 2.5.29.32
+    OID_X509_EXT_POLICY_CONSTRAINTS,        // 2.5.29.36 — accepted, semantics deferred
+    OID_X509_EXT_POLICY_MAPPINGS,           // 2.5.29.33
+];
+
+/// RFC 5280 §4.2: reject certificates that carry `critical = TRUE`
+/// extensions gm-crypto does not recognize.
+///
+/// Returns `Ok(())` when every critical extension on `cert` is in
+/// [`KNOWN_X509_EXTENSIONS`] (or the cert has no critical
+/// extensions). Returns `Err(CertificateVerificationFailed)` with a
+/// diagnostic that lists the offending OID otherwise.
+///
+/// PR-4.8 / P2-1.
+pub fn check_unknown_critical_extensions(cert: &X509Certificate<'_>) -> Result<(), CryptoError> {
+    for ext in cert.extensions() {
+        if !ext.critical {
+            continue;
+        }
+        if !KNOWN_X509_EXTENSIONS.contains(&ext.oid) {
+            return Err(CryptoError::CertificateVerificationFailed(format!(
+                "certificate carries unrecognized critical extension OID {} \
+                 (RFC 5280 §4.2: applications MUST reject)",
+                ext.oid
+            )));
+        }
+    }
+    Ok(())
+}
 
 /// Audit callback invoked when [`DistidPolicy::Permissive`] accepts
 /// a non-standard SM2 signature distid. Receives the accepted
@@ -204,6 +277,11 @@ pub fn validate_cert_pem(
         CryptoError::CertificateVerificationFailed(format!("X509 parse failed: {}", e))
     })?;
 
+    // PR-4.8 / P2-1: RFC 5280 §4.2 — reject unknown critical extensions
+    // before any other checks so the operator sees the most specific
+    // diagnostic when both errors apply.
+    check_unknown_critical_extensions(&cert)?;
+
     validate_cert_parsed(&cert, now, expected_domain)
 }
 
@@ -233,6 +311,8 @@ pub fn validate_hostname_only(
     let (_, cert) = X509Certificate::from_der(leaf_der).map_err(|e| {
         CryptoError::CertificateVerificationFailed(format!("X509 parse failed: {}", e))
     })?;
+    // PR-4.8 / P2-1: RFC 5280 §4.2 critical-extension check.
+    check_unknown_critical_extensions(&cert)?;
     validate_cert_parsed(&cert, now, Some(expected_domain))
 }
 
@@ -456,6 +536,9 @@ pub fn validate_uri_only(
     let (_, cert) = X509Certificate::from_der(leaf_der).map_err(|e| {
         CryptoError::CertificateVerificationFailed(format!("X509 parse failed: {}", e))
     })?;
+
+    // PR-4.8 / P2-1: RFC 5280 §4.2 critical-extension check.
+    check_unknown_critical_extensions(&cert)?;
 
     let not_before = cert.validity().not_before.to_datetime();
     let not_after = cert.validity().not_after.to_datetime();
@@ -925,6 +1008,14 @@ pub fn verify_cert_chain_sm2_chain_with_distid_policy(
     for idx in 0..leaf_chain.len() {
         let child_owned = &leaf_chain[idx];
         let domain = if idx == 0 { expected_domain } else { None };
+
+        // PR-4.8 / P2-1: RFC 5280 §4.2 — reject unknown critical
+        // extensions on EVERY cert in the chain (leaf,
+        // intermediates, root). Run BEFORE signature verification
+        // so an attacker can't probe signature paths on a cert
+        // that should already be rejected for an unknown critical
+        // extension.
+        check_unknown_critical_extensions(&child_owned.as_x509()?)?;
 
         if idx + 1 < leaf_chain.len() {
             // Intermediate CA: issuer is the next cert in the chain
