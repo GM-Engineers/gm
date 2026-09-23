@@ -43,6 +43,13 @@ pub enum ErrorCode {
     InvalidMessage,
     /// Invalid state for operation
     InvalidState,
+    /// PR-4.16: session-ticket-related failure (any of
+    /// `TlsError::SessionTicketInvalid`, `SessionTicketExpired`,
+    /// `SessionTicketReplay`). Pre-PR-4.16 these were all
+    /// collapsed into `HandshakeFailed` with string-only
+    /// differentiation; `classify_ticket_error` had to
+    /// substring-match `Display` output.
+    SessionTicket,
 }
 
 #[derive(Error, Debug)]
@@ -102,6 +109,30 @@ pub enum TlsError {
 
     #[error("invalid state: {0}")]
     InvalidState(String),
+
+    /// PR-4.16 / PR-4.13 follow-up: session ticket failed
+    /// validation that indicates tampering or wrong key.
+    /// Distinguished from `HandshakeFailed` so callers can
+    /// pattern-match without string parsing. Covers: bad
+    /// length, unknown key ID, SM4-GCM decryption failure,
+    /// deserialize failure, client-auth-required mismatch,
+    /// ticket-too-large.
+    #[error("session ticket invalid: {0}")]
+    SessionTicketInvalid(String),
+
+    /// PR-4.16 / PR-4.13 follow-up: legitimate ticket expiry.
+    /// Distinct from `SessionTicketInvalid` because the
+    /// right operator response is "fall back to full
+    /// handshake" (always), not "abort if fail-closed" (the
+    /// latter is the fail-closed mode for tampered tickets).
+    #[error("session ticket has expired")]
+    SessionTicketExpired,
+
+    /// PR-4.16 / PR-4.13 follow-up: replay protection
+    /// triggered. Always abort (regardless of fail-closed
+    /// mode).
+    #[error("session ticket replay detected")]
+    SessionTicketReplay,
 }
 
 impl TlsError {
@@ -125,6 +156,17 @@ impl TlsError {
             TlsError::InvalidHandshakeType(_) => ErrorCode::InvalidHandshakeType,
             TlsError::InvalidMessage(_) => ErrorCode::InvalidMessage,
             TlsError::InvalidState(_) => ErrorCode::InvalidState,
+            // PR-4.16: ticket-related variants all map to a
+            // single `ErrorCode::SessionTicket`. Callers that
+            // need to distinguish Replay / Expired / Invalid
+            // should match on the `TlsError` variant directly
+            // (the whole point of PR-4.16's typed variants) or
+            // use `classify_ticket_error` for the higher-level
+            // `ReplayDetected` / `Expired` / `TamperedOrForged`
+            // three-way split.
+            TlsError::SessionTicketInvalid(_)
+            | TlsError::SessionTicketExpired
+            | TlsError::SessionTicketReplay => ErrorCode::SessionTicket,
         }
     }
 

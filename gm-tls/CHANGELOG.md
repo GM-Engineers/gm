@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Typed session-ticket error variants** (PR-4.16 /
+  PR-4.13 follow-up): new `TlsError::SessionTicketInvalid`,
+  `SessionTicketExpired`, `SessionTicketReplay` variants
+  replace the string-format dispatch that PR-4.13 had to
+  use via `classify_ticket_error` substring-matching.
+  `decrypt_session_ticket` now returns the typed variants
+  directly, the classifier uses exhaustive `match`, and a
+  new `ErrorCode::SessionTicket` distinguishes ticket
+  errors from generic `HandshakeFailed` in metrics /
+  alerts. Eight new unit tests in
+  `pr416_typed_ticket_errors_tests`. The PR-4.13
+  string-based tests were reworked to use the typed
+  variants (same assertions, no string parsing). Bumps
+  gm-tls to 0.2.8 (patch; `#[non_exhaustive]` protects
+  downstream callers).
+
 - **`TlsConfig::with_session_ticket_fail_closed(bool)` opt-in
   fail-closed mode** (PR-4.13 / P2-4): pre-PR-4.13, a
   session-ticket decryption failure silently fell back to a
