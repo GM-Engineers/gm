@@ -20,8 +20,8 @@ pub(crate) mod serialization {
 
 // Session ticket management
 pub use crate::session_ticket::{
-    SessionKeys, SessionTicket, TicketKey, TicketKeySet, create_session_state,
-    decrypt_session_ticket, encrypt_session_ticket,
+    SessionKeys, SessionTicket, TicketErrorClass, TicketKey, TicketKeySet, classify_ticket_error,
+    create_session_state, decrypt_session_ticket, encrypt_session_ticket,
 };
 
 // Record layer
@@ -53,7 +53,7 @@ use crate::handshake::{
     parse_sm2_pubkey, read_handshake_record, select_client_pubkey_for_finished,
     select_pubkey_for_finished, signer_from_pem_key, signer_from_scalar, write_handshake_record,
 };
-use crate::metrics::{HandshakeTimer, record_session_resumption};
+use crate::metrics::{HandshakeTimer, record_cert_error, record_session_resumption};
 use crate::session_store::{InMemorySessionStore, SessionStore};
 use gm_crypto::sm2::{GM_TLS_DEFAULT_ID, Scalar, Sm2Verifier};
 use std::sync::Arc;
@@ -311,9 +311,41 @@ where
                         return Ok(tls_stream);
                     }
                     Err(e) => {
-                        info!("Session ticket decryption failed ({})", e);
-                        let (ch, sk_client) = build_client_hello(alpn, domain)?;
-                        (ch, sk_client, None)
+                        // PR-4.13 / P2-4: classify the error and
+                        // consult `session_ticket_fail_closed`.
+                        // - ReplayDetected always aborts (handled
+                        //   inside `decrypt_session_ticket`).
+                        // - Expired always falls back to a full
+                        //   handshake (legitimate, not forged).
+                        // - TamperedOrForged falls back only when
+                        //   the operator has not opted into
+                        //   fail-closed; otherwise the handshake
+                        //   terminates immediately. This protects
+                        //   against forged-ticket DoS amplification
+                        //   (attacker forces repeated full
+                        //   handshakes without owning the ticket
+                        //   key).
+                        match classify_ticket_error(&e) {
+                            TicketErrorClass::TamperedOrForged
+                                if opts.session_ticket_fail_closed =>
+                            {
+                                timer.finish("error");
+                                record_cert_error("session_ticket_tampered");
+                                return Err(TlsError::HandshakeFailed(format!(
+                                    "session ticket rejected (fail-closed): {}",
+                                    e
+                                )));
+                            }
+                            _ => {
+                                info!(
+                                    "Session ticket decryption failed ({}) — falling back to full \
+                                     handshake",
+                                    e
+                                );
+                                let (ch, sk_client) = build_client_hello(alpn, domain)?;
+                                (ch, sk_client, None)
+                            }
+                        }
                     }
                 }
             } else {

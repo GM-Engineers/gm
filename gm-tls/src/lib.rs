@@ -367,6 +367,23 @@ impl TlsConfig {
         self
     }
 
+    /// PR-4.13 / P2-4: enable fail-closed behavior for
+    /// session-ticket decryption failures. When enabled, any
+    /// tampered/forged ticket terminates the handshake with
+    /// an error instead of silently falling back to a full
+    /// handshake. The `false` (fail-open) default preserves
+    /// pre-PR-4.13 behavior; see
+    /// [`HandshakeOptions::session_ticket_fail_closed`] for
+    /// the full threat model.
+    pub fn with_session_ticket_fail_closed(mut self, fail_closed: bool) -> Self {
+        self.handshake_opts
+            .get_or_insert_with(HandshakeOptions::default);
+        if let Some(opts) = &mut self.handshake_opts {
+            opts.session_ticket_fail_closed = fail_closed;
+        }
+        self
+    }
+
     /// Set CRL info for certificate revocation checking
     pub fn with_crl_info(mut self, crl_info: CrlInfo) -> Self {
         self.handshake_opts

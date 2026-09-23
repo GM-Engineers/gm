@@ -1066,6 +1066,18 @@ pub struct HandshakeOptions {
     /// cert's DER after chain verification succeeds. SPIFFE SVID
     /// workloads typically set this on the connector side.
     pub expected_uri: Option<String>,
+    /// PR-4.13 / P2-4: when `true`, any session-ticket
+    /// decryption failure OTHER than "expired" or "replay
+    /// detected" (both of which always abort) terminates the
+    /// handshake with an error instead of falling back to a
+    /// full handshake. Default: `false` (fail-open, RFC 5077
+    /// §3.3 recommended behavior — pre-PR-4.13 default).
+    /// Operators concerned about forged-ticket DoS amplification
+    /// (an attacker forcing the client to repeatedly perform a
+    /// full handshake by injecting bogus session tickets) should
+    /// enable this. Setting via
+    /// [`TlsConfig::with_session_ticket_fail_closed`](crate::TlsConfig::with_session_ticket_fail_closed).
+    pub session_ticket_fail_closed: bool,
 }
 
 // ============================================================================

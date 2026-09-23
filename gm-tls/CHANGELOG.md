@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`TlsConfig::with_session_ticket_fail_closed(bool)` opt-in
+  fail-closed mode** (PR-4.13 / P2-4): pre-PR-4.13, a
+  session-ticket decryption failure silently fell back to a
+  full handshake (fail-open, RFC 5077 §3.3 behavior). This
+  allowed an attacker controlling bogus session tickets to
+  force repeated full handshakes — a CPU DoS amplification
+  vector. PR-4.13 introduces:
+  - `HandshakeOptions::session_ticket_fail_closed: bool`
+    field (default `false` — pre-PR-4.13 behavior preserved).
+  - `TlsConfig::with_session_ticket_fail_closed(bool)` builder.
+  - `TicketErrorClass` enum + `classify_ticket_error()`
+    helper in `session_ticket.rs` that distinguishes
+    `ReplayDetected` (always abort), `Expired` (always
+    fall back — legitimate), `TamperedOrForged`
+    (fall back unless fail-closed), `Other`.
+  - 11 new unit tests in `pr413_fail_closed_tests`.
+  Bumps gm-tls to 0.2.7 (patch; default fail-open
+  preserved, opt-in hardening).
+
+### Changed
+
 - **`gmtls_handshakes_total{result="error"}` now wired through the
   tonic layer** (PR-4.10 / P2-3): the gRPC integration layer
   (`GmTlsIncoming` accept loop + `GmTlsConnector::call`) now

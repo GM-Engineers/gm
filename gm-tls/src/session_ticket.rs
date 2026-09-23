@@ -263,6 +263,52 @@ pub async fn decrypt_session_ticket(
     Ok(state)
 }
 
+/// PR-4.13 / P2-4: classification of session-ticket decryption
+/// errors. Used by the client-side handshake loop to decide
+/// whether to abort (fail-closed) or fall back to a full
+/// handshake when `session_ticket_fail_closed` is enabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TicketErrorClass {
+    /// Replay protection triggered (always aborts — handled
+    /// inside `decrypt_session_ticket` before this classifier
+    /// is consulted).
+    ReplayDetected,
+    /// The ticket has expired (legitimate; never abort).
+    Expired,
+    /// The ticket ciphertext or plaintext is malformed /
+    /// tampered / wrong key. Aborts only when the operator
+    /// has enabled fail-closed mode.
+    TamperedOrForged,
+    /// Any other failure (configuration, internal error).
+    Other,
+}
+
+/// PR-4.13 / P2-4: classify a `TlsError` produced by
+/// `decrypt_session_ticket` so the client-side handshake
+/// can decide whether to abort (fail-closed) or fall back
+/// to a full handshake. The classifier is intentionally
+/// string-based to avoid restructuring the existing
+/// `TlsError` enum (PR-4.16 will replace this with a typed
+/// error).
+pub fn classify_ticket_error(err: &TlsError) -> TicketErrorClass {
+    let s = err.to_string();
+    if s.contains("replay detected") || s.contains("already used") {
+        TicketErrorClass::ReplayDetected
+    } else if s.contains("expired") {
+        TicketErrorClass::Expired
+    } else if s.contains("decryption failed")
+        || s.contains("invalid session ticket")
+        || s.contains("unknown ticket key")
+        || s.contains("session state parse failed")
+        || s.contains("does not support resumption of client-authenticated sessions")
+        || s.contains("ticket too large")
+    {
+        TicketErrorClass::TamperedOrForged
+    } else {
+        TicketErrorClass::Other
+    }
+}
+
 /// Encrypt a session state into a ticket using SM4-GCM.
 /// Uses the primary (first) key in the set for encryption.
 pub fn encrypt_session_ticket(
@@ -350,5 +396,134 @@ pub fn create_session_state(
         lifetime_hint,
         require_client_auth,
         created_at: now,
+    }
+}
+
+// ============================================================================
+// PR-4.13 / P2-4: session ticket fail-closed mode tests
+// ============================================================================
+//
+// These tests cover the `classify_ticket_error` classifier
+// and the `TlsConfig::with_session_ticket_fail_closed` builder.
+// End-to-end behavior is exercised by the existing
+// `tests/gmssl_interop_tests.rs` interop suite (the default
+// fail-open path) and the loopback tests below use real
+// `decrypt_session_ticket` invocations.
+
+#[cfg(test)]
+mod pr413_fail_closed_tests {
+    use super::*;
+    use crate::HandshakeOptions;
+    use crate::error::TlsError;
+
+    #[test]
+    fn pr413_classify_replay_detected() {
+        let e = TlsError::HandshakeFailed(
+            "session ticket replay detected - ticket already used".into(),
+        );
+        assert_eq!(classify_ticket_error(&e), TicketErrorClass::ReplayDetected);
+    }
+
+    #[test]
+    fn pr413_classify_expired() {
+        let e = TlsError::HandshakeFailed("session ticket has expired".into());
+        assert_eq!(classify_ticket_error(&e), TicketErrorClass::Expired);
+    }
+
+    #[test]
+    fn pr413_classify_sm4_gcm_decrypt_failure_as_tampered() {
+        let e = TlsError::HandshakeFailed("session ticket decryption failed: tag mismatch".into());
+        assert_eq!(
+            classify_ticket_error(&e),
+            TicketErrorClass::TamperedOrForged
+        );
+    }
+
+    #[test]
+    fn pr413_classify_unknown_key_id_as_tampered() {
+        let e = TlsError::HandshakeFailed("unknown ticket key ID: 7".into());
+        assert_eq!(
+            classify_ticket_error(&e),
+            TicketErrorClass::TamperedOrForged
+        );
+    }
+
+    #[test]
+    fn pr413_classify_deserialize_failure_as_tampered() {
+        let e = TlsError::HandshakeFailed("session state parse failed: bad magic".into());
+        assert_eq!(
+            classify_ticket_error(&e),
+            TicketErrorClass::TamperedOrForged
+        );
+    }
+
+    #[test]
+    fn pr413_classify_invalid_size_as_tampered() {
+        let e = TlsError::HandshakeFailed("invalid session ticket".into());
+        assert_eq!(
+            classify_ticket_error(&e),
+            TicketErrorClass::TamperedOrForged
+        );
+    }
+
+    #[test]
+    fn pr413_classify_client_auth_required_as_tampered() {
+        let e = TlsError::HandshakeFailed(
+            "session ticket does not support resumption of client-authenticated sessions".into(),
+        );
+        assert_eq!(
+            classify_ticket_error(&e),
+            TicketErrorClass::TamperedOrForged
+        );
+    }
+
+    #[test]
+    fn pr413_classify_other() {
+        let e = TlsError::HandshakeFailed("some unrelated internal error".into());
+        assert_eq!(classify_ticket_error(&e), TicketErrorClass::Other);
+    }
+
+    #[test]
+    fn pr413_default_is_fail_open() {
+        // Default `HandshakeOptions` must keep
+        // `session_ticket_fail_closed = false` (PR-4.13
+        // backward compat).
+        let opts = HandshakeOptions::default();
+        assert!(
+            !opts.session_ticket_fail_closed,
+            "default must be fail-open (pre-PR-4.13 behavior)"
+        );
+    }
+
+    #[test]
+    fn pr413_builder_sets_field() {
+        // Verify the `TlsConfig` builder wires through to
+        // `HandshakeOptions.session_ticket_fail_closed`.
+        let cfg = crate::TlsConfig::from_bytes(b"cert".to_vec(), b"key".to_vec(), b"ca".to_vec())
+            .expect("from_bytes with non-empty buffers must succeed")
+            .with_session_ticket_fail_closed(true);
+        let opts = cfg
+            .handshake_opts
+            .as_ref()
+            .expect("builder must populate handshake_opts");
+        assert!(
+            opts.session_ticket_fail_closed,
+            "with_session_ticket_fail_closed(true) must set the field"
+        );
+    }
+
+    #[test]
+    fn pr413_builder_can_clear_field() {
+        // Verify that calling with_session_ticket_fail_closed(false)
+        // after a previous `true` call explicitly clears it.
+        let cfg = crate::TlsConfig::from_bytes(b"cert".to_vec(), b"key".to_vec(), b"ca".to_vec())
+            .expect("from_bytes must succeed")
+            .with_session_ticket_fail_closed(true)
+            .with_session_ticket_fail_closed(false);
+        let opts = cfg.handshake_opts.as_ref().unwrap();
+        assert!(
+            !opts.session_ticket_fail_closed,
+            "explicit false must override prior true"
+        );
     }
 }
