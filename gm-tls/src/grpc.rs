@@ -125,6 +125,12 @@ pub struct GmTlsIncoming {
     // but keeping it in the struct ensures the semaphore lives as long as the struct.
     #[allow(dead_code)]
     semaphore: Arc<Semaphore>,
+    /// Local address this listener is bound to. Captured at
+    /// construction time (before the listener is moved into the
+    /// inner stream). `None` only if `TcpListener::local_addr()`
+    /// itself failed at construction (e.g. the listener was
+    /// already closed). PR-4.6 / P1-6.
+    local_addr: Option<SocketAddr>,
 }
 
 impl GmTlsIncoming {
@@ -143,6 +149,14 @@ impl GmTlsIncoming {
         acceptor: TlsAcceptor,
         max_concurrent: usize,
     ) -> Self {
+        // PR-4.6 (P1-6): capture local_addr before moving the
+        // listener into the stream (the listener is consumed
+        // by `TcpListenerStream::new(listener)` below and is
+        // not accessible afterwards). `TcpListener::local_addr`
+        // does not consume `&self` so this works whether the
+        // listener is bound (returns the bound addr) or unbound
+        // (returns an Err which we capture as None).
+        let local_addr = listener.local_addr().ok();
         let semaphore = Arc::new(Semaphore::new(max_concurrent));
         let semaphore_for_stream = Arc::clone(&semaphore);
         let incoming =
@@ -186,16 +200,30 @@ impl GmTlsIncoming {
         Self {
             inner: Box::pin(incoming),
             semaphore,
+            local_addr,
         }
     }
 
     /// Returns the local address this listener is bound to.
+    ///
+    /// PR-4.6 (P1-6): the address is captured at construction
+    /// time (see [`Self::with_max_concurrent`]) before the listener
+    /// is moved into the inner stream. This method never re-queries
+    /// the listener — it just returns the cached value. Returns
+    /// `Err(AddrNotAvailable)` only in the rare case where
+    /// `TcpListener::local_addr()` itself failed at construction
+    /// (e.g. listener was already closed).
+    ///
+    /// tonic middleware that needs `ConnectInfo.local_addr` (rate
+    /// limiting by local port, audit logging, Prometheus labels
+    /// keyed on listener address) now has a usable API.
     pub async fn local_addr(&self) -> std::io::Result<SocketAddr> {
-        // We need to reconstruct this - just return error for now
-        Err(std::io::Error::new(
-            std::io::ErrorKind::AddrNotAvailable,
-            "local_addr not available after construction",
-        ))
+        self.local_addr.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::AddrNotAvailable,
+                "local_addr unavailable (TcpListener::local_addr failed at construction)",
+            )
+        })
     }
 }
 
@@ -270,5 +298,41 @@ impl tower::Service<http::Uri> for GmTlsConnector {
 
             Ok(hyper_util::rt::TokioIo::new(tls_stream))
         })
+    }
+}
+
+// ============================================================================
+// PR-4.6 (P1-6) tests: GmTlsIncoming::local_addr returns bound address
+// ============================================================================
+//
+// The end-to-end coverage (bind 127.0.0.1:0, build GmTlsIncoming,
+// call local_addr) lives in `tests/gmssl_interop_tests.rs` because
+// it requires loading a real TlsConfig from the test fixtures.
+//
+// Pre-PR-4.6 the implementation was a stub returning
+// Err(AddrNotAvailable) — the comment "We need to
+// reconstruct this - just return error for now" was the TODO
+// marker. PR-4.6 closes that TODO and the new behavior is locked
+// in by the integration tests in tests/gmssl_interop_tests.rs.
+//
+// The local_addr caching invariant is purely a function of
+// `TcpListener::local_addr()` — independent of TlsConfig validity —
+// so there is no clean way to unit-test it without dragging in
+// disk fixtures. The integration tests are the canonical coverage.
+
+#[cfg(test)]
+mod pr46_local_addr_tests {
+    /// Marker that PR-4.6 unit-test scaffolding stays in this
+    /// file when the integration tests in `tests/gmssl_interop_tests.rs`
+    /// are edited. The integration tests must always cover:
+    /// - local_addr() returns the bound address (Ok(addr))
+    /// - local_addr() is stable across multiple calls
+    #[test]
+    fn pr46_local_addr_coverage_lives_in_integration_tests() {
+        // Sanity: the GmTlsIncoming type still exists and is non-zero-size.
+        assert!(
+            std::mem::size_of::<crate::grpc::GmTlsIncoming>() > 0,
+            "GmTlsIncoming must remain a non-zero-size type"
+        );
     }
 }

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`GmTlsIncoming::local_addr()` no longer returns
+  `Err(AddrNotAvailable)`** (PR-4.6 / P1-6): the implementation
+  previously was a stub ("We need to reconstruct this - just return
+  error for now"). tonic middleware depending on
+  `ConnectInfo.local_addr` (rate limiting by local port, audit
+  logging, Prometheus labels keyed on listener address) had no
+  usable API. PR-4.6 captures the bound address at construction
+  time (before the listener is moved into the inner stream) and
+  returns it from `local_addr()`. Returns
+  `Err(AddrNotAvailable)` only in the rare case where
+  `TcpListener::local_addr()` itself failed at construction.
+  Added `tests/gmssl_interop_tests.rs::pr46_local_addr_returns_bound_address`
+  and `pr46_local_addr_consistent_across_calls` integration tests
+  (bind 127.0.0.1:0, build `GmTlsIncoming`, verify
+  `local_addr()` returns the bound address and is stable across
+  multiple calls).
+
 ### Added
 
 - **`TlsConfig::with_expected_uri(String)`** (PR-2.4): pins the peer

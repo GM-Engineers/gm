@@ -516,3 +516,99 @@ async fn test_gmssl_tlcp_handshake() {
     // let tls = connector.connect(stream).await.expect("TLCP handshake");
     println!("TLCP TCP connectivity verified; handshake pending implementation");
 }
+
+// ============================================================================
+// PR-4.6 (P1-6): GmTlsIncoming::local_addr() returns the bound address
+// ============================================================================
+//
+// Pre-PR-4.6: GmTlsIncoming::local_addr() returned
+// Err(AddrNotAvailable) ("We need to reconstruct this - just return
+// error for now"). tonic middleware depending on
+// ConnectInfo.local_addr had no usable API.
+//
+// PR-4.6 captures the address at construction time (before the
+// listener is moved into the inner stream) and returns it from
+// local_addr(). These tests bind a real TcpListener (port 0 lets
+// the OS assign), build a GmTlsIncoming from a valid TlsConfig,
+// and verify local_addr() returns the bound address.
+
+#[tokio::test]
+async fn pr46_local_addr_returns_bound_address() {
+    use gm_crypto::x509::verify::DistidPolicy;
+    use gm_tls::grpc::GmTlsIncoming;
+    use gm_tls::{TlsAcceptor, TlsConfig};
+    use tokio::net::TcpListener;
+
+    ensure_test_certs();
+    let (cert, key, ca) = load_loopback_certs();
+
+    let openssl_distid_policy = DistidPolicy::Permissive {
+        fallback_distids: vec!["".to_string()],
+        audit_on_fallback: None,
+    };
+    let server_config = TlsConfig::from_bytes(cert, key, ca)
+        .expect("server config")
+        .with_domain("localhost".to_string())
+        .with_distid_policy(openssl_distid_policy);
+    let acceptor = TlsAcceptor::new(server_config).expect("acceptor");
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind 127.0.0.1:0");
+    let expected_local_addr = listener
+        .local_addr()
+        .expect("listener.local_addr after construction");
+    assert_eq!(
+        expected_local_addr.ip().to_string(),
+        "127.0.0.1",
+        "loopback listener must bind to 127.0.0.1; got: {}",
+        expected_local_addr.ip()
+    );
+    assert_ne!(
+        expected_local_addr.port(),
+        0,
+        "OS-assigned port must be non-zero"
+    );
+
+    let incoming = GmTlsIncoming::new(listener, acceptor);
+    let actual_local_addr = incoming
+        .local_addr()
+        .await
+        .expect("GmTlsIncoming::local_addr must succeed (PR-4.6)");
+    assert_eq!(
+        actual_local_addr, expected_local_addr,
+        "GmTlsIncoming::local_addr must return the address bound on construction"
+    );
+}
+
+#[tokio::test]
+async fn pr46_local_addr_consistent_across_calls() {
+    use gm_crypto::x509::verify::DistidPolicy;
+    use gm_tls::grpc::GmTlsIncoming;
+    use gm_tls::{TlsAcceptor, TlsConfig};
+    use tokio::net::TcpListener;
+
+    ensure_test_certs();
+    let (cert, key, ca) = load_loopback_certs();
+
+    let openssl_distid_policy = DistidPolicy::Permissive {
+        fallback_distids: vec!["".to_string()],
+        audit_on_fallback: None,
+    };
+    let server_config = TlsConfig::from_bytes(cert, key, ca)
+        .expect("server config")
+        .with_domain("localhost".to_string())
+        .with_distid_policy(openssl_distid_policy);
+    let acceptor = TlsAcceptor::new(server_config).expect("acceptor");
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind 127.0.0.1:0");
+    let incoming = GmTlsIncoming::new(listener, acceptor);
+
+    let first = incoming.local_addr().await.expect("first call");
+    let second = incoming.local_addr().await.expect("second call");
+    let third = incoming.local_addr().await.expect("third call");
+    assert_eq!(first, second, "local_addr must be stable across calls");
+    assert_eq!(second, third, "local_addr must be stable across calls");
+}
