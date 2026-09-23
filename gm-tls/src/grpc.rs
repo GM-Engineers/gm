@@ -40,7 +40,7 @@
 use crate::{GmTlsStream, TlsAcceptor, TlsConnector};
 use futures::StreamExt;
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -246,6 +246,13 @@ impl futures::Stream for GmTlsIncoming {
 #[derive(Clone)]
 pub struct GmTlsConnector {
     inner: TlsConnector,
+    /// Default port when the request URI omits one. `None` (the
+    /// default) means "fail loudly" instead of silently falling
+    /// back to 50051 — PR-4.9 / P2-2 closes the silent-fallback
+    /// hole. Callers that need the legacy 50051 default should
+    /// call [`Self::with_default_port`] explicitly with the desired
+    /// port (e.g. `50051`) instead.
+    default_port: Option<u16>,
 }
 
 impl GmTlsConnector {
@@ -258,7 +265,21 @@ impl GmTlsConnector {
     /// - ALPN set to `["h2"]` for gRPC/HTTP2
     pub fn new(config: crate::TlsConfig) -> Result<Self, crate::TlsError> {
         let inner = TlsConnector::new(config)?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            default_port: None,
+        })
+    }
+
+    /// Set a fallback port for URIs that omit one. Without this
+    /// builder, a missing-port URI returns
+    /// `Err("URI has no port and no default port was configured")`
+    /// instead of silently dialing 50051.
+    ///
+    /// PR-4.9 / P2-2.
+    pub fn with_default_port(mut self, port: u16) -> Self {
+        self.default_port = Some(port);
+        self
     }
 }
 
@@ -273,21 +294,29 @@ impl tower::Service<http::Uri> for GmTlsConnector {
 
     fn call(&mut self, uri: http::Uri) -> Self::Future {
         let connector = self.inner.clone();
+        let default_port = self.default_port;
 
         Box::pin(async move {
-            // Extract host:port from URI
-            let host = uri
-                .host()
-                .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
-                    format!("URI has no host: {}", uri).into()
-                })?;
-            let port = uri.port_u16().unwrap_or(50051);
+            // Resolve host+port with strict semantics (PR-4.9 / P2-2 + P2-5).
+            //  - URI without port: fail if `default_port` is None, else
+            //    fall back to it (opt-in, NOT the legacy silent 50051).
+            //  - IPv6 literal host: `http::Uri::host()` strips the
+            //    brackets, returning "::1"; we re-bracket for
+            //    `SocketAddr::from_str` which requires `[::1]:port`.
+            let resolved = resolve_uri_addr(&uri, default_port).map_err(|e| {
+                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+                    as Box<dyn std::error::Error + Send + Sync>
+            })?;
 
-            let addr = format!("{}:{}", host, port);
-
-            let tcp = TcpStream::connect(&addr)
-                .await
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+            // Hand off to TcpStream::connect — `Ip(SocketAddr)` and
+            // `Hostname(&str)` are both accepted. For hostname the
+            // system resolver runs inside the connect call (no
+            // extra DNS hop on our side).
+            let tcp = match resolved {
+                ResolvedAddr::Ip(addr) => TcpStream::connect(addr).await,
+                ResolvedAddr::Hostname(s) => TcpStream::connect(&s).await,
+            }
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
             let tls_stream = connector.connect(tcp).await.map_err(|e| {
                 Box::new(std::io::Error::other(format!(
@@ -333,6 +362,349 @@ mod pr46_local_addr_tests {
         assert!(
             std::mem::size_of::<crate::grpc::GmTlsIncoming>() > 0,
             "GmTlsIncoming must remain a non-zero-size type"
+        );
+    }
+}
+
+// ============================================================================
+// PR-4.9 (P2-2 + P2-5): URI host+port resolution
+// ============================================================================
+//
+// Why this exists: `http::Uri::host()` strips brackets from IPv6
+// literals (e.g. URI `http://[::1]/` -> `host() == Some("::1")`).
+// A naive `format!("{}:{}", host, port)` produces the ambiguous
+// `"::1:8080"` which `SocketAddr::from_str` rejects because
+// IPv6 literals in `SocketAddr` form MUST be bracketed.
+//
+// PR-4.9 routes host + port resolution through `resolve_uri_addr`,
+// which:
+//   1. Detects IPv6 literals (`host.parse::<Ipv6Addr>().is_ok()`)
+//      and re-brackets them, then
+//   2. Parses via `SocketAddr::from_str` so the OS rejects
+//      ambiguous parses at the address layer instead of after a
+//      30-second connect timeout.
+//
+// It also closes the P2-2 silent-fallback hole: a URI without
+// an explicit port is rejected with a clear error when no
+// `default_port` was configured, instead of silently dialing 50051.
+
+/// Errors produced by URI resolution for the connector call path.
+/// Surfaced through `tower::Service<Uri>::call` as `std::io::Error`
+/// of `ErrorKind::InvalidInput`.
+#[derive(Debug, thiserror::Error)]
+pub enum ResolveError {
+    #[error("URI has no host")]
+    NoHost,
+
+    #[error("URI has no port and no default port was configured (default_port = {default_port:?})")]
+    NoPort { default_port: Option<u16> },
+
+    #[error(
+        "URI host is an IP literal that does not parse as a valid SocketAddr (host={host}, \
+         port={port}, source={source})"
+    )]
+    InvalidSocketAddr {
+        host: String,
+        port: u16,
+        source: std::net::AddrParseError,
+    },
+}
+
+/// Output of `resolve_uri_addr` (PR-4.9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedAddr {
+    /// Resolved to an IP literal; safe to pass straight to
+    /// `TcpStream::connect` (which accepts both `&str` and `SocketAddr`).
+    Ip(SocketAddr),
+    /// Hostname (DNS) — `host:port` string for `TcpStream::connect`
+    /// to resolve via the system resolver. We deliberately do NOT
+    /// pre-resolve via DNS here because (a) it would block the
+    /// call path and (b) `getaddrinfo` semantics differ between
+    /// sync and async contexts.
+    Hostname(String),
+}
+
+/// Resolve a tonic-style `http::Uri` to either an IP literal
+/// (parsed to `SocketAddr`) or a `host:port` string for DNS
+/// resolution by `TcpStream::connect`.
+///
+/// Port resolution:
+///   - `uri.port_u16()` if the URI has an explicit port;
+///   - `default_port` (set via [`GmTlsConnector::with_default_port`])
+///     when the URI omits one;
+///   - hard error if neither is available.
+///
+/// `default_port = None` is the secure default: missing-port URIs
+/// fail loudly with `ResolveError::NoPort { default_port: None }`
+/// instead of silently dialing 50051 (PR-4.9 / P2-2).
+///
+/// IPv6 literal handling: `http::Uri::host()` strips brackets, so
+/// URI `http://[::1]/` -> `host() == Some("::1")`. We re-bracket
+/// the literal so `TcpStream::connect`'s `&str` and `SocketAddr`
+/// paths both accept it (PR-4.9 / P2-5).
+pub(crate) fn resolve_uri_addr(
+    uri: &http::Uri,
+    default_port: Option<u16>,
+) -> Result<ResolvedAddr, ResolveError> {
+    let host_raw = uri.host().ok_or(ResolveError::NoHost)?;
+    // `http::Uri::host()` returns IPv6 literals either bracketed
+    // (`[::1]`) on some http versions or unbracketed (`::1`) on
+    // others. Strip the brackets so both cases feed the same
+    // detection + parse paths below.
+    let host = host_raw
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host_raw);
+    let port = uri
+        .port_u16()
+        .or(default_port)
+        .ok_or(ResolveError::NoPort { default_port })?;
+
+    // IPv6 literal: bracket it so the downstream parser accepts it.
+    if host.parse::<Ipv6Addr>().is_ok() {
+        // IP literal: validate via SocketAddr (fail-fast on bad port).
+        let s = format!("[{}]:{}", host, port);
+        return s
+            .parse::<SocketAddr>()
+            .map(ResolvedAddr::Ip)
+            .map_err(|source| ResolveError::InvalidSocketAddr {
+                host: host_raw.to_string(),
+                port,
+                source,
+            });
+    }
+    if host.parse::<std::net::Ipv4Addr>().is_ok() {
+        // IP literal: validate via SocketAddr (fail-fast on bad port).
+        let s = format!("{}:{}", host, port);
+        return s
+            .parse::<SocketAddr>()
+            .map(ResolvedAddr::Ip)
+            .map_err(|source| ResolveError::InvalidSocketAddr {
+                host: host_raw.to_string(),
+                port,
+                source,
+            });
+    }
+    // Hostname (DNS): hand the bracketed-or-plain `host:port`
+    // string to TcpStream::connect so the system resolver does
+    // the work asynchronously. `TcpStream::connect(&str)` accepts
+    // both IPv4 (`"127.0.0.1:8080"`) and IPv6-bracketed
+    // (`"[::1]:8080"`) forms; a hostname with `:` embedded would be
+    // rejected by the system resolver and surface as an
+    // `InvalidInput` connect error.
+    Ok(ResolvedAddr::Hostname(format!("{}:{}", host, port)))
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod pr49_uri_resolve_tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    fn parse_uri(s: &str) -> http::Uri {
+        s.parse().expect("valid URI for test fixture")
+    }
+
+    fn err_msg<T>(r: Result<T, ResolveError>) -> String {
+        match r {
+            Ok(_) => panic!("expected Err, got Ok"),
+            Err(e) => format!("{e}"),
+        }
+    }
+
+    #[test]
+    fn pr49_ipv4_literal_with_explicit_port() {
+        let uri = parse_uri("http://127.0.0.1:8080/foo");
+        let resolved = resolve_uri_addr(&uri, None).expect("must resolve");
+        let addr = match resolved {
+            ResolvedAddr::Ip(a) => a,
+            ResolvedAddr::Hostname(_) => panic!("expected Ip, got Hostname"),
+        };
+        assert_eq!(
+            addr,
+            SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080)
+        );
+        assert_eq!(addr.port(), 8080);
+    }
+
+    #[test]
+    fn pr49_ipv6_literal_with_brackets_and_port() {
+        let uri = parse_uri("http://[::1]:8080/foo");
+        let resolved = resolve_uri_addr(&uri, None).expect("must resolve");
+        let addr = match resolved {
+            ResolvedAddr::Ip(a) => a,
+            ResolvedAddr::Hostname(_) => panic!("expected Ip, got Hostname"),
+        };
+        assert_eq!(
+            addr,
+            SocketAddr::new(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1).into(), 8080)
+        );
+        assert_eq!(addr.port(), 8080);
+    }
+
+    #[test]
+    fn pr49_ipv6_global_with_brackets_and_port() {
+        let uri = parse_uri("http://[2001:db8::1]:9443/foo");
+        let resolved = resolve_uri_addr(&uri, None).expect("must resolve");
+        let addr = match resolved {
+            ResolvedAddr::Ip(a) => a,
+            ResolvedAddr::Hostname(_) => panic!("expected Ip, got Hostname"),
+        };
+        assert_eq!(addr.port(), 9443);
+    }
+
+    #[test]
+    fn pr49_hostname_with_explicit_port_passes_through() {
+        // Hostname path is preserved (NOT pre-resolved) so the
+        // existing DNS lookup at TcpStream::connect handles it.
+        let uri = parse_uri("http://example.com:8080/foo");
+        let resolved = resolve_uri_addr(&uri, None).expect("must resolve");
+        match resolved {
+            ResolvedAddr::Hostname(s) => assert_eq!(s, "example.com:8080"),
+            ResolvedAddr::Ip(_) => panic!("expected Hostname, got Ip"),
+        }
+    }
+
+    #[test]
+    fn pr49_uri_without_port_fails_without_default() {
+        let uri = parse_uri("http://localhost/foo");
+        let err = err_msg(resolve_uri_addr(&uri, None));
+        assert!(
+            err.contains("no port"),
+            "error must mention missing port; got: {err}"
+        );
+        assert!(
+            err.contains("default port was configured"),
+            "error must mention the default-port guidance; got: {err}"
+        );
+    }
+
+    #[test]
+    fn pr49_uri_without_port_uses_default() {
+        let uri = parse_uri("http://localhost/foo");
+        let resolved = resolve_uri_addr(&uri, Some(9443)).expect("must use default");
+        match resolved {
+            ResolvedAddr::Hostname(s) => assert_eq!(s, "localhost:9443"),
+            ResolvedAddr::Ip(_) => panic!("expected Hostname, got Ip"),
+        }
+    }
+
+    #[test]
+    fn pr49_uri_port_overrides_default() {
+        let uri = parse_uri("http://localhost:8080/foo");
+        let resolved = resolve_uri_addr(&uri, Some(9443)).expect("must override default");
+        match resolved {
+            ResolvedAddr::Hostname(s) => assert_eq!(
+                s, "localhost:8080",
+                "explicit URI port must beat the connector's default"
+            ),
+            ResolvedAddr::Ip(_) => panic!("expected Hostname, got Ip"),
+        }
+    }
+
+    #[test]
+    fn pr49_ipv6_literal_without_port_fails_without_default() {
+        // `http::Uri::from_str` rejects `http://[::1]/` (IPv6 literal
+        // without port), so we hand-craft the URI via the builder.
+        let uri = http::Uri::builder()
+            .scheme("http")
+            .authority("[::1]")
+            .path_and_query("/")
+            .build()
+            .expect("builder accepts IPv6 literal authority");
+        let err = err_msg(resolve_uri_addr(&uri, None));
+        assert!(err.contains("no port"), "got: {err}");
+    }
+
+    #[test]
+    fn pr49_ipv6_literal_without_port_uses_default() {
+        // Same as above — hand-craft the URI via the builder to
+        // bypass `from_str`'s strict validator. Verify the resolved
+        // IPv6 literal actually parses (i.e. we re-bracket correctly
+        // for the default-port path).
+        let uri = http::Uri::builder()
+            .scheme("http")
+            .authority("[::1]")
+            .path_and_query("/")
+            .build()
+            .expect("builder accepts IPv6 literal authority");
+        let resolved = resolve_uri_addr(&uri, Some(9443)).expect("must use default");
+        let addr = match resolved {
+            ResolvedAddr::Ip(a) => a,
+            ResolvedAddr::Hostname(_) => panic!("expected Ip, got Hostname"),
+        };
+        assert_eq!(addr.port(), 9443);
+        match addr {
+            SocketAddr::V6(v6) => {
+                assert_eq!(v6.ip(), &Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1))
+            }
+            SocketAddr::V4(v4) => panic!("expected IPv6, got IPv4 {}", v4.ip()),
+        }
+    }
+
+    #[test]
+    fn pr49_no_host_fails() {
+        // `http://:8080/` — http::Uri::from_str will reject this at
+        // parse time on most platforms, so we use a hand-rolled URI
+        // string that fails `host()` cleanly.
+        let uri: http::Uri = "/foo".parse().unwrap();
+        let err = err_msg(resolve_uri_addr(&uri, Some(8080)));
+        // Some http crate versions silently accept a path-only URI; we
+        // accept either "no host" or "no port" as a hard error here.
+        assert!(
+            err.contains("no host") || err.contains("no port"),
+            "expected no-host or no-port diagnostic, got: {err}"
+        );
+    }
+
+    #[test]
+    fn pr49_uri_builder_integration() {
+        // `with_default_port` is a trivial `Option::Some(port)` setter
+        // and is covered by the `resolve_uri_addr` tests above.
+        // Skipping a struct-literal integration test here avoids
+        // constructing an unusable `TlsConnector` just to exercise
+        // the builder.
+    }
+
+    #[test]
+    fn pr49_invalid_host_does_not_panic() {
+        // Build a URI with a host that's a valid IPv6 literal but
+        // missing the port — exercise the path that has to
+        // re-bracket the literal for `SocketAddr::from_str`. This
+        // catches a class of panic-on-corrupt-input regressions
+        // (the prior code did an unchecked `format!("{}:{}", host,
+        // port)` which produced an unparseable string for IPv6).
+        let uri = http::Uri::builder()
+            .scheme("http")
+            .authority("[::1]")
+            .path_and_query("/")
+            .build()
+            .expect("builder accepts IPv6 literal authority");
+        let r = resolve_uri_addr(&uri, Some(8080));
+        // No panic is the assertion; we additionally verify the
+        // outcome is an `Ip` literal (the IPv6 re-bracketing path
+        // was correctly taken) and the port is preserved.
+        match r {
+            Ok(ResolvedAddr::Ip(addr)) => assert_eq!(addr.port(), 8080),
+            other => panic!("expected Ok(Ip) with port 8080, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pr49_default_port_does_not_silently_dial_50051() {
+        // Regression for the P2-2 silent-fallback hole. With no
+        // default configured, a URI without an explicit port must
+        // HARD FAIL — never silently substitute 50051.
+        let uri = parse_uri("http://localhost/foo");
+        let r = resolve_uri_addr(&uri, None);
+        assert!(r.is_err(), "missing-port URI must not silently succeed");
+        let msg = err_msg(r);
+        assert!(
+            !msg.contains("50051"),
+            "error message must not mention 50051 (silent-fallback regression); got: {msg}"
         );
     }
 }

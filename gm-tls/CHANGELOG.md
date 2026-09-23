@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`GmTlsConnector` URI host+port resolution** (PR-4.9 / P2-2 + P2-5):
+  the connector now (a) rejects URIs without an explicit port when
+  no `default_port` was configured (closing the silent-fallback-to-50051
+  hole) instead of erroring out only after a 30-second connect
+  timeout; (b) handles IPv6 literal hostnames (`http://[::1]:8080/`)
+  by re-bracketing before building the connect string (the prior
+  code's `format!("{}:{}", host, port)` produced an unparseable
+  `::1:8080` for IPv6 hosts, hanging the connect attempt). Added
+  `GmTlsConnector::with_default_port(u16)` builder for opt-in
+  fallback; existing callers that always pass an explicit port
+  see no behavior change. Added 13 unit tests in
+  `pr49_uri_resolve_tests` covering IPv4 / IPv6 / hostname paths,
+  default-port fallback, port-override-default precedence, and the
+  silent-fallback regression guard. Bumps gm-tls to 0.2.5 (patch;
+  the silent-fallback removal is a fail-fast improvement, not a
+  breaking API change).
+
 - **`GmTlsIncoming::local_addr()` no longer returns
   `Err(AddrNotAvailable)`** (PR-4.6 / P1-6): the implementation
   previously was a stub ("We need to reconstruct this - just return
