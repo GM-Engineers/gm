@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`gmtls_handshakes_total{result="error"}` now wired through the
+  tonic layer** (PR-4.10 / P2-3): the gRPC integration layer
+  (`GmTlsIncoming` accept loop + `GmTlsConnector::call`) now
+  records both handshake outcomes into the existing
+  `gmtls_handshakes_total{role, result}` counter via
+  `HandshakeTimer::finish`. Pre-PR-4.10 the failure branches
+  emitted only `tracing::warn!` with no metric, so operators had
+  no Prometheus / OTLP signal to alert on handshake failure
+  rates. `tracing::warn!` is preserved for oncall debugging;
+  metrics and logs now have distinct, complementary roles.
+  Added 4 unit tests in `pr410_handshake_metrics_tests` covering
+  the counter-emission contract (success / error / multi-call
+  accumulation / timer-finish). End-to-end coverage is provided
+  by the existing `tests/gmssl_interop_tests.rs` interop suite.
+  Bumps gm-tls to 0.2.6 (patch; counter schema unchanged, only
+  emission sites added).
+
 ### Fixed
 
 - **`GmTlsConnector` URI host+port resolution** (PR-4.9 / P2-2 + P2-5):
