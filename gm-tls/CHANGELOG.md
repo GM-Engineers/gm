@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Typed `TlsError` variants for cipher / handshake / SM2-key / KAT** (PR-4.18 / PR-4.16 follow-up): four new typed variants replace the remaining 27 string-only `HandshakeFailed(format!(...))` call sites:
+  - `TlsError::CipherError(String)` — GM cipher primitive failed (SM3 hash, SM4-GCM encrypt/decrypt, SM2 sign/verify, close_notify). Maps to `ErrorCode::Cipher`.
+  - `TlsError::HandshakeMessageParse(String)` — handshake message parse/validate failed (Finished, Certificate, CertificateVerify). Maps to `ErrorCode::HandshakeMessageParse`.
+  - `TlsError::Sm2KeyError(String)` — SM2 key construction/parse failed (PEM decode, key load). Maps to `ErrorCode::Sm2Key`.
+  - `TlsError::KatFailed(String)` — KAT self-test failed. Maps to `ErrorCode::Kat` (deployment-health indicator).
+
+  Six new unit tests in
+  `pr418_typed_crypto_errors_tests` cover the new typed
+  surface (ErrorCode mapping, Display prefix preservation
+  for log scrapers, distinctness from
+  `ErrorCode::HandshakeFailed`, distinctness from each
+  other). The remaining 15 `HandshakeFailed(format!(...))`
+  sites in `kdf.rs` / `key_update.rs` / `lib.rs` /
+  `session_ticket.rs` stay typed-by-string because they
+  don't carry differentiated metric / alert value (per
+  PR-4.18 SPEC §2.3). Also fixes a pre-existing
+  `uninlined_format_args` lint in `gm-der` so
+  downstream users on stable toolchains see clean
+  clippy output. Bumps gm-tls to 0.2.9 (patch; additive;
+  `#[non_exhaustive]` protects downstream callers).
+
 - **Typed session-ticket error variants** (PR-4.16 /
   PR-4.13 follow-up): new `TlsError::SessionTicketInvalid`,
   `SessionTicketExpired`, `SessionTicketReplay` variants

@@ -204,7 +204,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> GmTlsStream<S> {
     fn get_cipher_enc(&mut self) -> Result<&mut Sm4Cipher, TlsError> {
         if self.cipher_enc.is_none() {
             let cipher = Sm4Cipher::new(&self.write_key)
-                .map_err(|e| TlsError::HandshakeFailed(format!("SM4 key error: {:?}", e)))?;
+                .map_err(|e| TlsError::CipherError(format!("SM4 key: {:?}", e)))?;
             self.cipher_enc = Some(cipher);
         }
         self.cipher_enc
@@ -215,7 +215,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> GmTlsStream<S> {
     fn get_cipher_dec(&mut self) -> Result<&mut Sm4Cipher, TlsError> {
         if self.cipher_dec.is_none() {
             let cipher = Sm4Cipher::new(&self.read_key)
-                .map_err(|e| TlsError::HandshakeFailed(format!("SM4 key error: {:?}", e)))?;
+                .map_err(|e| TlsError::CipherError(format!("SM4 key: {:?}", e)))?;
             self.cipher_dec = Some(cipher);
         }
         self.cipher_dec
@@ -493,9 +493,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> GmTlsStream<S> {
         record.extend_from_slice(&ct_len.to_be_bytes());
         let aad = [&seq_bytes[..], &record[..]].concat();
 
-        let (ciphertext, tag) = cipher.encrypt_gcm(&inner, &nonce, &aad).map_err(|e| {
-            TlsError::HandshakeFailed(format!("KeyUpdate encryption failed: {:?}", e))
-        })?;
+        let (ciphertext, tag) = cipher
+            .encrypt_gcm(&inner, &nonce, &aad)
+            .map_err(|e| TlsError::CipherError(format!("KeyUpdate encrypt: {:?}", e)))?;
 
         self.inner
             .write_u8(RECORD_TYPE_APPLICATION_DATA)
@@ -582,7 +582,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> GmTlsStream<S> {
 
         let (ciphertext, tag) = cipher
             .encrypt_gcm(&inner, &nonce, &aad)
-            .map_err(|e| TlsError::HandshakeFailed(format!("GCM encryption failed: {:?}", e)))?;
+            .map_err(|e| TlsError::CipherError(format!("GCM encrypt: {:?}", e)))?;
 
         // TLS record: [content_type(1)][version(2)][length(2)][ciphertext][tag]
         // Note: ct_len above matches actual ciphertext+tag length since tag is always 16 bytes
@@ -660,7 +660,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> GmTlsStream<S> {
         let cipher = self.get_cipher_dec()?;
         let mut plaintext = cipher
             .decrypt_gcm(ciphertext, &nonce, &aad, tag)
-            .map_err(|e| TlsError::HandshakeFailed(format!("GCM decryption failed: {:?}", e)))?;
+            .map_err(|e| TlsError::CipherError(format!("GCM decrypt: {:?}", e)))?;
 
         // TLS 1.3 inner content type (RFC 8446 §5.4):
         // The last byte of the decrypted plaintext is the content type.
@@ -770,9 +770,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> GmTlsStream<S> {
         let aad = [&seq_bytes[..], &record[..]].concat();
 
         // Encrypt close_notify payload
-        let (ciphertext, tag) = cipher.encrypt_gcm(&inner, &nonce, &aad).map_err(|e| {
-            TlsError::HandshakeFailed(format!("close_notify encryption failed: {:?}", e))
-        })?;
+        let (ciphertext, tag) = cipher
+            .encrypt_gcm(&inner, &nonce, &aad)
+            .map_err(|e| TlsError::CipherError(format!("close_notify encrypt: {:?}", e)))?;
 
         // TLS record: [0x17][version][length][ciphertext][tag]
         self.inner
@@ -858,9 +858,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> GmTlsStream<S> {
         let cipher = self.get_cipher_dec()?;
         let mut plaintext = cipher
             .decrypt_gcm(ciphertext, &nonce, &aad, tag)
-            .map_err(|e| {
-                TlsError::HandshakeFailed(format!("close_notify decryption failed: {:?}", e))
-            })?;
+            .map_err(|e| TlsError::CipherError(format!("close_notify decrypt: {:?}", e)))?;
 
         // TLS 1.3 inner content type: last byte is content type
         if !plaintext.is_empty() {

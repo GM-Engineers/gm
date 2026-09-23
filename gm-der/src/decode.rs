@@ -19,8 +19,7 @@ pub fn parse_der_length(data: &[u8]) -> Result<(&[u8], usize), DerError> {
         let num_bytes = (first & 0x7F) as usize;
         if num_bytes == 0 || num_bytes > 4 {
             return Err(DerError::ParseError(format!(
-                "invalid long form length ({})",
-                num_bytes
+                "invalid long form length ({num_bytes})",
             )));
         }
         if data.len() < 1 + num_bytes {

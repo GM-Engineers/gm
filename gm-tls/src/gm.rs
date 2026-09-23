@@ -251,7 +251,7 @@ where
                         let srv_finished_buf = read_handshake_record(&mut stream).await?;
                         let srv_finished: Finished = Finished::from_bytes(&srv_finished_buf)
                             .map_err(|e| {
-                                TlsError::HandshakeFailed(format!("Finished parse failed: {}", e))
+                                TlsError::HandshakeMessageParse(format!("Finished parse: {}", e))
                             })?;
                         let srv_pubkey = select_pubkey_for_finished(&sh)?;
                         let verifier = Sm2Verifier::new(srv_pubkey.as_slice(), GM_TLS_DEFAULT_ID)
@@ -370,10 +370,8 @@ where
 
     // If server sent a certificate chain, it must send CertificateVerify before Finished
     let srv_cert_buf = read_handshake_record(&mut stream).await?;
-    let srv_cert: ClientCertificate =
-        ClientCertificate::from_bytes(&srv_cert_buf).map_err(|e| {
-            TlsError::HandshakeFailed(format!("Server Certificate parse failed: {}", e))
-        })?;
+    let srv_cert: ClientCertificate = ClientCertificate::from_bytes(&srv_cert_buf)
+        .map_err(|e| TlsError::HandshakeMessageParse(format!("Server Certificate parse: {}", e)))?;
     let transcript = compute_transcript_hash_multi(&[&transcript, &srv_cert_buf])?;
 
     if !ca_pem.is_empty() {
@@ -430,15 +428,15 @@ where
 
     let cv_buf = read_handshake_record(&mut stream).await?;
     let cv: CertificateVerify = CertificateVerify::from_bytes(&cv_buf)
-        .map_err(|e| TlsError::HandshakeFailed(format!("CertificateVerify parse failed: {}", e)))?;
+        .map_err(|e| TlsError::HandshakeMessageParse(format!("CertificateVerify parse: {}", e)))?;
 
     // Verify CertificateVerify using the server's certificate public key (not ephemeral)
     let srv_cert_pubkey = extract_server_pubkey_for_cert_verify(&srv_cert.cert_chain_pem)?;
     let verifier = Sm2Verifier::new(&srv_cert_pubkey, GM_TLS_DEFAULT_ID)
         .map_err(|e| TlsError::HandshakeFailed(format!("SM2 verifier creation failed: {}", e)))?;
-    verifier.verify(&transcript, &cv.signature).map_err(|e| {
-        TlsError::HandshakeFailed(format!("CertificateVerify verification error: {}", e))
-    })?;
+    verifier
+        .verify(&transcript, &cv.signature)
+        .map_err(|e| TlsError::HandshakeMessageParse(format!("CertificateVerify verify: {}", e)))?;
 
     // Update transcript to include CertificateVerify
     let transcript = compute_transcript_hash_multi(&[&transcript, &cv_buf])?;
@@ -449,7 +447,7 @@ where
 
     let srv_finished_buf = read_handshake_record(&mut stream).await?;
     let srv_finished: Finished = Finished::from_bytes(&srv_finished_buf)
-        .map_err(|e| TlsError::HandshakeFailed(format!("Finished parse failed: {}", e)))?;
+        .map_err(|e| TlsError::HandshakeMessageParse(format!("Finished parse: {}", e)))?;
     let srv_pubkey = select_pubkey_for_finished(&sh)?;
     let verifier = Sm2Verifier::new(srv_pubkey.as_slice(), GM_TLS_DEFAULT_ID)
         .map_err(|e| TlsError::HandshakeFailed(format!("SM2 verifier creation failed: {}", e)))?;
@@ -622,9 +620,9 @@ where
     // Send CertificateVerify signed with server's long-term certificate private key
     let cert_verify = {
         let signer = signer_from_pem_key(key_pem)
-            .map_err(|e| TlsError::HandshakeFailed(format!("server key parse failed: {}", e)))?;
+            .map_err(|e| TlsError::Sm2KeyError(format!("server key parse: {}", e)))?;
         let sig = signer.sign(&transcript).map_err(|e| {
-            TlsError::HandshakeFailed(format!("CertificateVerify signing failed: {}", e))
+            TlsError::HandshakeMessageParse(format!("CertificateVerify sign: {}", e))
         })?;
         let cv = CertificateVerify { signature: sig };
         let cv_bytes = cv
@@ -647,7 +645,7 @@ where
         let cli_cert_buf = read_handshake_record(&mut stream).await?;
         let cli_cert: ClientCertificate =
             ClientCertificate::from_bytes(&cli_cert_buf).map_err(|e| {
-                TlsError::HandshakeFailed(format!("ClientCertificate parse failed: {}", e))
+                TlsError::HandshakeMessageParse(format!("ClientCertificate parse: {}", e))
             })?;
 
         if cli_cert.cert_chain_pem.is_empty() || ca_pem.is_empty() {
@@ -687,7 +685,7 @@ where
 
         let cli_finished_buf = read_handshake_record(&mut stream).await?;
         let cli_finished: Finished = Finished::from_bytes(&cli_finished_buf).map_err(|e| {
-            TlsError::HandshakeFailed(format!("Client Finished parse failed: {}", e))
+            TlsError::HandshakeMessageParse(format!("Client Finished parse: {}", e))
         })?;
         let cli_pubkey = select_client_pubkey_for_finished(&ch)?;
         let verifier = Sm2Verifier::new(cli_pubkey.as_slice(), GM_TLS_DEFAULT_ID).map_err(|e| {

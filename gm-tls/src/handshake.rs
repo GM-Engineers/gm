@@ -1109,7 +1109,7 @@ pub fn compute_transcript_hash_multi(slices: &[&[u8]]) -> Result<Vec<u8>, TlsErr
 pub fn sign_finished(signer: &Sm2Signer, transcript_hash: &[u8]) -> Result<Finished, TlsError> {
     let sig = signer
         .sign(transcript_hash)
-        .map_err(|e| TlsError::HandshakeFailed(format!("Finished signing failed: {}", e)))?;
+        .map_err(|e| TlsError::HandshakeMessageParse(format!("Finished sign: {}", e)))?;
     Ok(Finished { verify_data: sig })
 }
 
@@ -1121,7 +1121,7 @@ pub fn verify_finished(
 ) -> Result<(), TlsError> {
     verifier
         .verify(transcript_hash, &finished.verify_data)
-        .map_err(|e| TlsError::HandshakeFailed(format!("Finished verification error: {}", e)))?;
+        .map_err(|e| TlsError::HandshakeMessageParse(format!("Finished verify: {}", e)))?;
     Ok(())
 }
 
@@ -1142,7 +1142,7 @@ pub fn generate_sm2_ephemeral() -> Result<(Scalar, Vec<u8>), TlsError> {
 /// Parse SEC1-encoded public key bytes into a ProjectivePoint.
 pub(crate) fn parse_sm2_pubkey(bytes: &[u8]) -> Result<ProjectivePoint, TlsError> {
     let enc = EncodedPoint::from_bytes(bytes)
-        .map_err(|e| TlsError::HandshakeFailed(format!("public key parse failed: {}", e)))?;
+        .map_err(|e| TlsError::Sm2KeyError(format!("public parse: {}", e)))?;
     ProjectivePoint::from_encoded_point(&enc)
         .into_option()
         .ok_or_else(|| TlsError::HandshakeFailed("invalid public key point".into()))
@@ -1333,19 +1333,17 @@ pub(crate) async fn read_handshake_record<S: tokio::io::AsyncRead + Unpin>(
 pub(crate) fn signer_from_scalar(sk: &Scalar) -> Result<Sm2Signer, TlsError> {
     let raw = sk.to_bytes();
     let kp = Sm2KeyPair::from_private_key_with_distid(raw.as_ref(), GM_TLS_DEFAULT_ID.to_string())
-        .map_err(|e| TlsError::HandshakeFailed(format!("SM2 key construction failed: {}", e)))?;
-    Sm2Signer::new(&kp)
-        .map_err(|e| TlsError::HandshakeFailed(format!("SM2 signer creation failed: {}", e)))
+        .map_err(|e| TlsError::Sm2KeyError(format!("construct: {}", e)))?;
+    Sm2Signer::new(&kp).map_err(|e| TlsError::Sm2KeyError(format!("signer create: {}", e)))
 }
 
 /// Create an Sm2Signer from a PEM-encoded private key.
 pub(crate) fn signer_from_pem_key(key_pem: &[u8]) -> Result<Sm2Signer, TlsError> {
     let pem_str = std::str::from_utf8(key_pem)
-        .map_err(|e| TlsError::HandshakeFailed(format!("invalid key PEM UTF-8: {}", e)))?;
+        .map_err(|e| TlsError::Sm2KeyError(format!("PEM UTF-8: {}", e)))?;
     let kp = Sm2KeyPair::from_private_key_pem(pem_str)
-        .map_err(|e| TlsError::HandshakeFailed(format!("SM2 key parse failed: {}", e)))?;
-    Sm2Signer::new(&kp)
-        .map_err(|e| TlsError::HandshakeFailed(format!("SM2 signer creation failed: {}", e)))
+        .map_err(|e| TlsError::Sm2KeyError(format!("parse: {}", e)))?;
+    Sm2Signer::new(&kp).map_err(|e| TlsError::Sm2KeyError(format!("signer create: {}", e)))
 }
 
 /// Get the server's ephemeral public key for Finished verification.

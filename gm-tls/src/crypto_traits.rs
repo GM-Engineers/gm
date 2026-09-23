@@ -177,8 +177,8 @@ pub mod default {
 
     impl DefaultBlockCipher {
         pub fn new(key: &[u8]) -> Result<Self, TlsError> {
-            let cipher = Sm4Cipher::new(key)
-                .map_err(|e| TlsError::HandshakeFailed(format!("cipher error: {}", e)))?;
+            let cipher =
+                Sm4Cipher::new(key).map_err(|e| TlsError::CipherError(format!("cipher: {}", e)))?;
             Ok(Self { cipher })
         }
     }
@@ -192,7 +192,7 @@ pub mod default {
         ) -> CryptoResult<(Vec<u8>, Vec<u8>)> {
             self.cipher
                 .encrypt_gcm(plaintext, nonce, aad)
-                .map_err(|e| TlsError::HandshakeFailed(format!("encrypt error: {}", e)))
+                .map_err(|e| TlsError::CipherError(format!("encrypt: {}", e)))
         }
 
         fn decrypt_gcm(
@@ -204,7 +204,7 @@ pub mod default {
         ) -> CryptoResult<Vec<u8>> {
             self.cipher
                 .decrypt_gcm(ciphertext, nonce, aad, tag)
-                .map_err(|e| TlsError::HandshakeFailed(format!("decrypt error: {}", e)))
+                .map_err(|e| TlsError::CipherError(format!("decrypt: {}", e)))
         }
     }
 }
