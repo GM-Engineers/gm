@@ -180,7 +180,7 @@ pub mod tlcp;
 // Re-exports for crate-level convenience
 // =============================================================================
 
-pub use error::{TlcpError, TlsError};
+pub use error::{TlcpError, TlcpErrorCode, TlsError};
 pub use record::next_nonce;
 pub use session_keys::SessionKeys;
 // Re-exporting deprecated convenience functions by design (crate-level API

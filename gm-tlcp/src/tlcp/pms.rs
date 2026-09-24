@@ -72,7 +72,7 @@ pub fn sm2_compute_z(pub_xy: &[u8; 64], user_id: &[u8]) -> Result<[u8; 32], Tlcp
     input.extend_from_slice(&SM2_Y_G_BYTES);
     input.extend_from_slice(&pub_xy[..32]);
     input.extend_from_slice(&pub_xy[32..64]);
-    let h = Sm3Hasher::hash(&input).map_err(|e| TlcpError::HandshakeFailed(e.to_string()))?;
+    let h = Sm3Hasher::hash(&input).map_err(|e| TlcpError::CipherError(e.to_string()))?;
     let mut out = [0u8; 32];
     out.copy_from_slice(&h);
     Ok(out)
@@ -106,26 +106,26 @@ pub fn compute_tlcp_ecdhe_pms(
     klen: usize,
 ) -> Result<Vec<u8>, TlcpError> {
     let local_ephemeral_point = parse_uncompressed_point(local_ephemeral_xy)
-        .map_err(|e| TlcpError::HandshakeFailed(format!("local ephemeral point: {}", e)))?;
+        .map_err(|e| TlcpError::Sm2KeyError(format!("local ephemeral point: {}", e)))?;
     let peer_ephemeral_point = parse_uncompressed_point(peer_ephemeral_xy)
-        .map_err(|e| TlcpError::HandshakeFailed(format!("peer ephemeral point: {}", e)))?;
+        .map_err(|e| TlcpError::Sm2KeyError(format!("peer ephemeral point: {}", e)))?;
     let peer_static_point = parse_uncompressed_point(peer_static_xy)
-        .map_err(|e| TlcpError::HandshakeFailed(format!("peer static point: {}", e)))?;
+        .map_err(|e| TlcpError::Sm2KeyError(format!("peer static point: {}", e)))?;
 
     let (local_ephemeral_x, _) = point_xy_bytes(&local_ephemeral_point)
-        .map_err(|e| TlcpError::HandshakeFailed(e.to_string()))?;
-    let local_x_hat = scalar_from_x_hat(&local_ephemeral_x)
-        .map_err(|e| TlcpError::HandshakeFailed(e.to_string()))?;
+        .map_err(|e| TlcpError::CipherError(e.to_string()))?;
+    let local_x_hat =
+        scalar_from_x_hat(&local_ephemeral_x).map_err(|e| TlcpError::CipherError(e.to_string()))?;
     let local_ephemeral_scalar = scalar_from_bytes_checked(local_ephemeral_priv)
-        .map_err(|e| TlcpError::HandshakeFailed(e.to_string()))?;
+        .map_err(|e| TlcpError::CipherError(e.to_string()))?;
     let local_static_scalar = scalar_from_bytes_checked(local_static_priv)
-        .map_err(|e| TlcpError::HandshakeFailed(e.to_string()))?;
+        .map_err(|e| TlcpError::CipherError(e.to_string()))?;
     let t = local_x_hat * local_ephemeral_scalar + local_static_scalar;
 
-    let (peer_ephemeral_x, _) = point_xy_bytes(&peer_ephemeral_point)
-        .map_err(|e| TlcpError::HandshakeFailed(e.to_string()))?;
-    let peer_x_hat = scalar_from_x_hat(&peer_ephemeral_x)
-        .map_err(|e| TlcpError::HandshakeFailed(e.to_string()))?;
+    let (peer_ephemeral_x, _) =
+        point_xy_bytes(&peer_ephemeral_point).map_err(|e| TlcpError::CipherError(e.to_string()))?;
+    let peer_x_hat =
+        scalar_from_x_hat(&peer_ephemeral_x).map_err(|e| TlcpError::CipherError(e.to_string()))?;
     let shared_point = peer_ephemeral_point * peer_x_hat + peer_static_point;
     if bool::from(shared_point.is_identity()) {
         return Err(TlcpError::HandshakeFailed(
@@ -138,7 +138,7 @@ pub fn compute_tlcp_ecdhe_pms(
             "shared point V is identity element".to_string(),
         ));
     }
-    let (v_x, v_y) = point_xy_bytes(&v).map_err(|e| TlcpError::HandshakeFailed(e.to_string()))?;
+    let (v_x, v_y) = point_xy_bytes(&v).map_err(|e| TlcpError::CipherError(e.to_string()))?;
 
     let mut kdf_input = Vec::with_capacity(128);
     kdf_input.extend_from_slice(&v_x);
@@ -146,7 +146,7 @@ pub fn compute_tlcp_ecdhe_pms(
     kdf_input.extend_from_slice(z_a);
     kdf_input.extend_from_slice(z_b);
 
-    sm2_kdf(&kdf_input, klen).map_err(|e| TlcpError::HandshakeFailed(e.to_string()))
+    sm2_kdf(&kdf_input, klen).map_err(|e| TlcpError::CipherError(e.to_string()))
 }
 
 // ============================================================================

@@ -323,7 +323,7 @@ impl TlcpServerKeyExchange {
         sign_key: &Sm2Signer,
     ) -> Result<(Self, Sm2EcdhKeypair), TlcpError> {
         let ephemeral_kp = Sm2EcdhKeypair::generate()
-            .map_err(|e| TlcpError::HandshakeFailed(format!("ECDHE keygen failed: {:?}", e)))?;
+            .map_err(|e| TlcpError::Sm2KeyError(format!("ECDHE keygen failed: {:?}", e)))?;
         let ephemeral_pub = ephemeral_kp.public_key_bytes();
 
         // Sign over the *wire-format* ECDH params (ECParameters-wrapped
@@ -340,7 +340,7 @@ impl TlcpServerKeyExchange {
 
         let signature = sign_key
             .sign(&to_sign)
-            .map_err(|e| TlcpError::HandshakeFailed(format!("SKE sign failed: {:?}", e)))?;
+            .map_err(|e| TlcpError::Sm2KeyError(format!("SKE sign failed: {:?}", e)))?;
 
         Ok((
             Self {
@@ -399,13 +399,13 @@ impl TlcpServerKeyExchange {
 
         let raw_signature = sign_key
             .sign(&to_sign)
-            .map_err(|e| TlcpError::HandshakeFailed(format!("ECC SKE sign failed: {:?}", e)))?;
+            .map_err(|e| TlcpError::Sm2KeyError(format!("ECC SKE sign failed: {:?}", e)))?;
         // Convert raw r||s (64 bytes) to DER (ASN.1) for wire compatibility
         // with openHiTLS / Tongsuo 8.3.0, which both emit DER on the wire.
         let raw_arr: [u8; 64] = raw_signature
             .as_slice()
             .try_into()
-            .map_err(|_| TlcpError::HandshakeFailed("ECC SKE raw sig not 64 bytes".to_string()))?;
+            .map_err(|_| TlcpError::Sm2KeyError("ECC SKE raw sig not 64 bytes".to_string()))?;
         let signature = gm_crypto::sm2::sm2_signature_raw_to_der(&raw_arr);
 
         Ok(Self {
@@ -453,7 +453,7 @@ impl TlcpServerKeyExchange {
         to_sign.extend_from_slice(rsa_cert_der);
         let signature = rsa_signer
             .sign(&to_sign)
-            .map_err(|e| TlcpError::HandshakeFailed(format!("RSA SKE sign: {}", e)))?;
+            .map_err(|e| TlcpError::Sm2KeyError(format!("RSA SKE sign: {}", e)))?;
         Ok(Self {
             body: ServerKeyExchangeBody::Ecc { signature },
         })
@@ -492,7 +492,7 @@ impl TlcpServerKeyExchange {
 
         verifier
             .verify(&signed_data, &params.signature)
-            .map_err(|e| TlcpError::HandshakeFailed(format!("SKE signature verify failed: {}", e)))
+            .map_err(|e| TlcpError::Sm2KeyError(format!("SKE signature verify failed: {}", e)))
     }
 
     /// Serialize the ServerKeyExchange body to wire bytes (the body

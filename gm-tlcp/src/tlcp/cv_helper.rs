@@ -60,7 +60,7 @@ pub(crate) fn process_certificate_verify(
 ) -> Result<(), TlcpError> {
     let (cv_type, cv_body, _rem) = parse_handshake_message_local(cv_probe_payload)?;
     if cv_type != HandshakeType::CertificateVerify {
-        return Err(TlcpError::HandshakeFailed(format!(
+        return Err(TlcpError::HandshakeMessageParse(format!(
             "Expected CertificateVerify, got {:?}",
             cv_type
         )));
@@ -89,7 +89,7 @@ pub(crate) fn process_certificate_verify(
         a
     } else {
         gm_crypto::sm2::sm2_signature_der_to_raw(sig_der)
-            .map_err(|e| TlcpError::HandshakeFailed(format!("CV signature DER decode: {}", e)))?
+            .map_err(|e| TlcpError::Sm2KeyError(format!("CV signature DER decode: {}", e)))?
     };
     let client_sign_cert_der = server_hs.client_certs.first().ok_or_else(|| {
         TlcpError::HandshakeFailed("server received CV but no client Certificate".to_string())
@@ -100,10 +100,10 @@ pub(crate) fn process_certificate_verify(
     let distid_default: String = "1234567812345678".to_string();
     let distid_str: &str = client_sign_distid_override.unwrap_or(&distid_default);
     let verifier = gm_crypto::sm2::Sm2Verifier::new(&client_sign_pub, distid_str)
-        .map_err(|e| TlcpError::HandshakeFailed(format!("CV verifier: {}", e)))?;
+        .map_err(|e| TlcpError::Sm2KeyError(format!("CV verifier: {}", e)))?;
     verifier
         .verify(&server_hs.transcript, &raw_sig)
-        .map_err(|e| TlcpError::HandshakeFailed(format!("CV signature verify: {}", e)))?;
+        .map_err(|e| TlcpError::Sm2KeyError(format!("CV signature verify: {}", e)))?;
     server_hs.transcript.extend_from_slice(cv_probe_payload);
     Ok(())
 }

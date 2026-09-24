@@ -201,7 +201,7 @@ impl TlcpKeyMaterial {
         // A(1) = HMAC(secret, label || seed)
         let mut a = hmac_key
             .compute(&label_seed)
-            .map_err(|e| TlcpError::HandshakeFailed(format!("prf A(1): {}", e)))?;
+            .map_err(|e| TlcpError::CipherError(format!("prf A(1): {}", e)))?;
 
         while result.len() < length {
             // P(i) = HMAC(secret, A(i) || label || seed)
@@ -210,14 +210,14 @@ impl TlcpKeyMaterial {
             p_input.extend_from_slice(&label_seed);
             let p = hmac_key
                 .compute(&p_input)
-                .map_err(|e| TlcpError::HandshakeFailed(format!("prf P(i): {}", e)))?;
+                .map_err(|e| TlcpError::CipherError(format!("prf P(i): {}", e)))?;
             result.extend_from_slice(&p);
 
             // A(i+1) = HMAC(secret, A(i)) — only computed if we still need more.
             if result.len() < length {
                 a = hmac_key
                     .compute(&a)
-                    .map_err(|e| TlcpError::HandshakeFailed(format!("prf A(i+1): {}", e)))?;
+                    .map_err(|e| TlcpError::CipherError(format!("prf A(i+1): {}", e)))?;
             }
         }
         result.truncate(length);

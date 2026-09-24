@@ -386,7 +386,7 @@ impl TlcpHandshake {
             self.cipher_suite
                 .ok_or_else(|| TlcpError::InvalidState("No cipher suite".to_string()))?,
         )
-        .ok_or_else(|| TlcpError::HandshakeFailed("Unknown cipher suite".to_string()))?;
+        .ok_or_else(|| TlcpError::InvalidMessage("Unknown cipher suite".to_string()))?;
 
         // For resumed sessions, derive keys using the cached master_secret
         // with the NEW client_random and server_random from the abbreviated handshake

@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`TlcpErrorCode`** (PR-4.21): new structured error code enum
+  with 13 variants covering all `TlcpError` failure modes
+  (`HandshakeFailed`, `HandshakeMessageParse`, `Cipher`, `Sm2Key`,
+  `CertificateVerificationFailed`, `SequenceOverflow`, `NonceReuse`,
+  `InvalidHandshakeType`, `InvalidMessage`, `InvalidState`,
+  `ParseError`, `TlsRecordError`, `IoError`). Use `e.code()` to
+  get the code for programmatic error handling and metrics labels.
+- **`TlcpError::code()`** (PR-4.21): new method returning a
+  `TlcpErrorCode` for any `TlcpError`. Marked as the canonical way
+  to classify errors for observability (replaces ad-hoc `Display`
+  substring matching).
+- **Four typed `TlcpError` variants** (PR-4.21): `CipherError`,
+  `HandshakeMessageParse`, `Sm2KeyError`, `CertificateVerificationFailed`
+  to replace ~30 call sites that previously constructed
+  `TlcpError::HandshakeFailed(format!(...))`. New variants give
+  operators differentiated metrics (e.g. "cipher error rate" alerts
+  can be set independently of "handshake parse error rate").
+- **PR-4.21 unit tests**: 10 new tests in
+  `error::pr421_error_code_tests` covering variant → code mapping,
+  Display distinctness, and back-compat with `From<gm_crypto::CryptoError>`
+  / `From<std::io::Error>`.
+
+### Changed
+
 - **`TlcpConnector::with_expected_uri(String)`** (PR-2.4): pins the
   server's sign-leaf URI SAN (SPIFFE ID) per
   `gm_crypto::x509::verify::validate_uri_only`. Runs after the chain

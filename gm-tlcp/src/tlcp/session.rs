@@ -84,7 +84,7 @@ impl TlcpResumedSession {
     /// Derive session keys from this resumed session
     pub fn derive_session_keys(&self) -> Result<SessionKeys, TlcpError> {
         let suite = TlcpCipherSuite::from_id(self.cipher_suite).ok_or_else(|| {
-            TlcpError::HandshakeFailed(format!("Unknown cipher suite {:02x?}", self.cipher_suite))
+            TlcpError::InvalidMessage(format!("Unknown cipher suite {:02x?}", self.cipher_suite))
         })?;
 
         let km = TlcpKeyMaterial::derive(

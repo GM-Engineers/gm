@@ -118,7 +118,7 @@ impl RsaKeyPair {
         // `CryptoRngCore` so we use it directly.
         let mut rng = rand_core::OsRng;
         let key = RsaPrivateKey::new(&mut rng, bit_size).map_err(|e| {
-            TlcpError::HandshakeFailed(format!("RSA keygen ({} bits): {}", bit_size, e))
+            TlcpError::Sm2KeyError(format!("RSA keygen ({} bits): {}", bit_size, e))
         })?;
         Ok(Self {
             inner: Arc::new(key),
@@ -129,7 +129,7 @@ impl RsaKeyPair {
     /// usage: read the operator's RSA private key from disk).
     pub fn from_pkcs8_pem(pem: &str) -> Result<Self, TlcpError> {
         let key = RsaPrivateKey::from_pkcs8_pem(pem)
-            .map_err(|e| TlcpError::HandshakeFailed(format!("RSA PKCS#8 PEM parse: {}", e)))?;
+            .map_err(|e| TlcpError::Sm2KeyError(format!("RSA PKCS#8 PEM parse: {}", e)))?;
         Ok(Self {
             inner: Arc::new(key),
         })
@@ -138,7 +138,7 @@ impl RsaKeyPair {
     /// Load an RSA private key from a PKCS#8 DER blob.
     pub fn from_pkcs8_der(der: &[u8]) -> Result<Self, TlcpError> {
         let key = RsaPrivateKey::from_pkcs8_der(der)
-            .map_err(|e| TlcpError::HandshakeFailed(format!("RSA PKCS#8 DER parse: {}", e)))?;
+            .map_err(|e| TlcpError::Sm2KeyError(format!("RSA PKCS#8 DER parse: {}", e)))?;
         Ok(Self {
             inner: Arc::new(key),
         })
@@ -153,7 +153,7 @@ impl RsaKeyPair {
     /// the operator's RSA certificate).
     pub fn to_public_key(&self) -> Result<RsaPubKey, TlcpError> {
         let key = RsaPublicKeyInner::new(self.inner.n().clone(), self.inner.e().clone())
-            .map_err(|e| TlcpError::HandshakeFailed(format!("RSA public key extraction: {}", e)))?;
+            .map_err(|e| TlcpError::Sm2KeyError(format!("RSA public key extraction: {}", e)))?;
         Ok(RsaPubKey {
             inner: Arc::new(key),
         })
@@ -171,7 +171,7 @@ impl RsaPubKey {
     /// usage: read the server's RSA certificate).
     pub fn from_public_key_pem(pem: &str) -> Result<Self, TlcpError> {
         let key = RsaPublicKeyInner::from_public_key_pem(pem)
-            .map_err(|e| TlcpError::HandshakeFailed(format!("RSA public key PEM parse: {}", e)))?;
+            .map_err(|e| TlcpError::Sm2KeyError(format!("RSA public key PEM parse: {}", e)))?;
         Ok(Self {
             inner: Arc::new(key),
         })
@@ -180,7 +180,7 @@ impl RsaPubKey {
     /// Load an RSA public key from a PKCS#8 DER blob.
     pub fn from_public_key_der(der: &[u8]) -> Result<Self, TlcpError> {
         let key = RsaPublicKeyInner::from_public_key_der(der)
-            .map_err(|e| TlcpError::HandshakeFailed(format!("RSA public key DER parse: {}", e)))?;
+            .map_err(|e| TlcpError::Sm2KeyError(format!("RSA public key DER parse: {}", e)))?;
         Ok(Self {
             inner: Arc::new(key),
         })
@@ -190,7 +190,7 @@ impl RsaPubKey {
     /// production callers should use `from_public_key_pem`).
     pub fn from_components(n: rsa::BigUint, e: rsa::BigUint) -> Result<Self, TlcpError> {
         let key = RsaPublicKeyInner::new(n, e).map_err(|err| {
-            TlcpError::HandshakeFailed(format!("RSA public key from components: {}", err))
+            TlcpError::Sm2KeyError(format!("RSA public key from components: {}", err))
         })?;
         Ok(Self {
             inner: Arc::new(key),
@@ -236,7 +236,7 @@ impl RsaSigner {
         let scheme = pkcs1v15::Pkcs1v15Sign::new_unprefixed();
         self.inner
             .sign(scheme, &hashed)
-            .map_err(|e| TlcpError::HandshakeFailed(format!("RSA SKE sign: {}", e)))
+            .map_err(|e| TlcpError::Sm2KeyError(format!("RSA SKE sign: {}", e)))
     }
 }
 
@@ -263,7 +263,7 @@ impl RsaVerifier {
         let scheme = pkcs1v15::Pkcs1v15Sign::new_unprefixed();
         self.inner
             .verify(scheme, &hashed, signature)
-            .map_err(|e| TlcpError::HandshakeFailed(format!("RSA SKE signature verify: {}", e)))
+            .map_err(|e| TlcpError::Sm2KeyError(format!("RSA SKE signature verify: {}", e)))
     }
 }
 
@@ -304,7 +304,7 @@ impl RsaEncryptor {
         let key = pkcs1v15::EncryptingKey::new((*self.inner).clone());
         let mut rng = rand_core::OsRng;
         key.encrypt_with_rng(&mut rng, plaintext)
-            .map_err(|e| TlcpError::HandshakeFailed(format!("RSA PMS encrypt: {}", e)))
+            .map_err(|e| TlcpError::Sm2KeyError(format!("RSA PMS encrypt: {}", e)))
     }
 }
 
@@ -344,7 +344,7 @@ impl RsaDecryptor {
         let priv_clone: RsaPrivateKey = (*self.inner).clone();
         let key = pkcs1v15::DecryptingKey::new(priv_clone);
         key.decrypt(ciphertext)
-            .map_err(|e| TlcpError::HandshakeFailed(format!("RSA PMS decrypt: {}", e)))
+            .map_err(|e| TlcpError::Sm2KeyError(format!("RSA PMS decrypt: {}", e)))
     }
 }
 

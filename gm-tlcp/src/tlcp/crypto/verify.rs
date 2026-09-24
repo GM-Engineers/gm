@@ -42,10 +42,8 @@ pub(crate) fn verify_ske_signature(
         let signature_der = &ske_body[2..2 + sig_len];
         // gmSSL emits SM2 signatures in DER (ASN.1) form; our sm2 crate verifier
         // wants the raw r||s concatenation (64 bytes), so convert first.
-        let signature_raw =
-            gm_crypto::sm2::sm2_signature_der_to_raw(signature_der).map_err(|e| {
-                TlcpError::HandshakeFailed(format!("ECC SKE signature DER decode: {}", e))
-            })?;
+        let signature_raw = gm_crypto::sm2::sm2_signature_der_to_raw(signature_der)
+            .map_err(|e| TlcpError::Sm2KeyError(format!("ECC SKE signature DER decode: {}", e)))?;
         // Build the message that was signed: cr || sr || enc_cert_header || enc_cert
         let mut msg = Vec::with_capacity(32 + 32 + 3 + enc_cert.len());
         msg.extend_from_slice(client_random);
@@ -57,7 +55,7 @@ pub(crate) fn verify_ske_signature(
         msg.extend_from_slice(enc_cert);
         verifier
             .verify(&msg, &signature_raw)
-            .map_err(|e| TlcpError::HandshakeFailed(format!("ECC SKE signature verify: {}", e)))
+            .map_err(|e| TlcpError::Sm2KeyError(format!("ECC SKE signature verify: {}", e)))
     } else {
         // ECDHE path: parse Sm2EcdheParams. SM2 signatures come in two
         // wire formats depending on the producer:
@@ -86,7 +84,7 @@ pub(crate) fn verify_ske_signature(
             a
         } else {
             gm_crypto::sm2::sm2_signature_der_to_raw(&ecdhe_params.signature).map_err(|e| {
-                TlcpError::HandshakeFailed(format!("ECDHE SKE signature DER decode: {}", e))
+                TlcpError::Sm2KeyError(format!("ECDHE SKE signature DER decode: {}", e))
             })?
         };
         // Build signed message: cr || sr || server_ecdh_params (the full
@@ -103,7 +101,7 @@ pub(crate) fn verify_ske_signature(
         msg.extend_from_slice(&ecdhe_params.ephemeral_public);
         verifier
             .verify(&msg, &raw_sig)
-            .map_err(|e| TlcpError::HandshakeFailed(format!("ECDHE SKE signature verify: {}", e)))
+            .map_err(|e| TlcpError::Sm2KeyError(format!("ECDHE SKE signature verify: {}", e)))
     }
 }
 
