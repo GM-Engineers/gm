@@ -124,28 +124,99 @@ pub fn record_handshake_error_code(role: &str, code: ErrorCode) {
 }
 
 /// Scope guard for timing a handshake.
+///
+/// PR-4.25: upgraded from a manually-completed guard to a
+/// true RAII guard. The timer starts at construction and
+/// **automatically records on drop** with `result="error"`
+/// (the conservative default — every handshake that did
+/// not explicitly call [`finish`] with `result="success"`
+/// counts as an error in metrics).
+///
+/// Before PR-4.25, the caller had to invoke
+/// `timer.finish("success")` **at every** control-flow exit
+/// point — including each `?` early-return inside the
+/// handshake coroutine. Missing one under-counted the
+/// handshake-error histogram and the
+/// `gmtls_handshakes_total{result="error"}` counter. The
+/// RAII form eliminates that whole class of bugs: any
+/// path that leaves the timer's scope — panic, unwind,
+/// `?` early-return, or simply forgetting to call
+/// `finish` — still produces a single, idempotent
+/// `result="error"` record.
+///
+/// Explicit calls to [`finish`] (with `"success"` or
+/// `"error"`) continue to work and take precedence over
+/// the drop default — the guard is idempotent on the
+/// first record, regardless of which path wins.
 pub struct HandshakeTimer {
     role: String,
     start: Instant,
+    /// `None` means "no explicit `finish` has been called;
+    /// Drop will record `result="error"`". `Some(label)`
+    /// means an explicit `finish` already recorded with
+    /// that label; Drop is a no-op.
+    recorded: Option<String>,
 }
 
 impl HandshakeTimer {
+    /// Start a handshake timer for `role` (typically
+    /// `"client"` or `"server"`).
     pub fn new(role: &str) -> Self {
         Self {
             role: role.to_string(),
             start: Instant::now(),
+            recorded: None,
         }
     }
 
-    pub fn finish(self, result: &str) {
+    /// Mark this handshake as `result` (`"success"` or
+    /// `"error"`). Subsequent drop will be a no-op
+    /// (already recorded).
+    pub fn finish(mut self, result: &str) {
+        // Idempotent: only the first call records. Both
+        // explicit finish() and Drop funnel through this
+        // record() helper so the metric emission shape
+        // stays in sync.
+        if self.recorded.is_some() {
+            return;
+        }
+        self.recorded = Some(result.to_string());
+        Self::record(&self.role, result, self.start.elapsed().as_secs_f64());
+    }
+
+    /// Emit the counter + histogram pair. Pulled out so
+    /// [`finish`] and [`Drop`] share one emission site.
+    fn record(role: &str, result: &str, elapsed_secs: f64) {
+        counter!(
+            "gmtls_handshakes_total",
+            "role" => role.to_string(),
+            "result" => result.to_string()
+        )
+        .increment(1);
+        histogram!(
+            "gmtls_handshake_duration_seconds",
+            "role" => role.to_string()
+        )
+        .record(elapsed_secs);
+    }
+}
+
+impl Drop for HandshakeTimer {
+    fn drop(&mut self) {
+        // PR-4.25: if `finish()` was never called, record
+        // the conservative outcome (`"error"`) so the
+        // histogram / counter stay accurate even on `?`
+        // early-returns, panics, or simply forgotten
+        // manual cleanups.
+        if self.recorded.is_some() {
+            return;
+        }
         let elapsed = self.start.elapsed().as_secs_f64();
-        let role_for_counter = self.role.clone();
-        let role_for_histogram = self.role;
-        let result = result.to_owned();
-        counter!("gmtls_handshakes_total", "role" => role_for_counter, "result" => result)
-            .increment(1);
-        histogram!("gmtls_handshake_duration_seconds", "role" => role_for_histogram)
-            .record(elapsed);
+        let result = "error".to_string();
+        // Take the slot so re-drop (e.g. via panic during
+        // record itself) is also idempotent.
+        self.recorded = Some(result.clone());
+        Self::record(&self.role, &result, elapsed);
     }
 }
 
@@ -259,5 +330,79 @@ mod pr422_record_handshake_error_code_tests {
             h.join().expect("thread panicked");
         }
         assert_eq!(success.load(Ordering::Relaxed), 8);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PR-4.25 unit tests: HandshakeTimer RAII guard
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod pr425_handshake_timer_raii_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Counter access to the global Prometheus registry is
+    /// not trivially testable from `cargo test` (no real
+    /// exporter is bound in unit tests). These tests instead
+    /// verify the *control flow*: PR-4.25's contract is
+    /// that `Drop` fires the right emission path even when
+    /// `finish()` is skipped, and that `finish()` is
+    /// idempotent.
+    ///
+    /// For end-to-end coverage of the histogram/counter
+    /// emission, see the loopback tests in
+    /// `tests/handshake_timeout.rs` and `tests/spiffe_uri.rs`
+    /// which exercise the real handshake code paths.
+    #[test]
+    fn drop_without_finish_does_not_panic() {
+        // Construct and immediately drop — the Drop impl
+        // should record `result="error"` without complaint.
+        drop(HandshakeTimer::new("client"));
+        drop(HandshakeTimer::new("server"));
+    }
+
+    /// PR-4.25: explicitly calling `finish("success")` must
+    /// not double-emit on drop. We exercise the path by
+    /// finishing the timer (consuming `self`) and trusting
+    /// that the compiler would reject a double-finish call.
+    /// The complementary assertion is the unit-test for
+    /// `record()` visibility — here we only check that the
+    /// `finish()` API surface is still callable.
+    #[test]
+    fn finish_success_is_callable() {
+        HandshakeTimer::new("client").finish("success");
+        HandshakeTimer::new("server").finish("success");
+    }
+
+    /// PR-4.25: `finish("error")` is also still callable
+    /// (pre-PR-4.25 callers relied on this; PR-4.25 keeps
+    /// the API but recommends relying on Drop instead).
+    #[test]
+    fn finish_error_is_callable() {
+        HandshakeTimer::new("client").finish("error");
+        HandshakeTimer::new("server").finish("error");
+    }
+
+    /// PR-4.25: drop semantics under contention. Even
+    /// though most handshakes run in async contexts, we
+    /// sanity-check that 64 timers dropped in parallel do
+    /// not deadlock or panic.
+    #[test]
+    fn drop_many_timers_concurrently() {
+        let n = 64;
+        let success = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::with_capacity(n);
+        for _ in 0..n {
+            let success = Arc::clone(&success);
+            handles.push(std::thread::spawn(move || {
+                drop(HandshakeTimer::new("client"));
+                success.fetch_add(1, Ordering::Relaxed);
+            }));
+        }
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+        assert_eq!(success.load(Ordering::Relaxed), n);
     }
 }

@@ -9,6 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **RAII `HandshakeTimer` guard** (PR-4.25): the handshake
+  timer now self-records on drop with
+  `gmtls_handshakes_total{role, result="error"}` and
+  `gmtls_handshake_duration_seconds{role}` whenever the
+  caller does **not** explicitly call
+  `timer.finish("success")`. The timer keeps the public
+  API (`new(role)` + `finish(self, result)`) intact and
+  adds a `Drop` impl that fires the conservative
+  `result="error"` emission path for any handshake that
+  leaves scope without an explicit success call — `?`
+  early-returns, panics, unwinds, or simply forgotten
+  manual cleanups.
+  - **Motivation**: prior to PR-4.25 the `finish()` call
+    had to be made at *every* control-flow exit point of
+    `connect_gm_rust_inner` / `accept_gm_rust_inner`
+    (currently 8 sites total — `gm.rs` lines 280, 353,
+    386, 433, 539, 579, 583 — plus the inner
+    `accept_gm_rust_inner_with_cert`). Adding a new
+    failure path (e.g. PR-4.22 error-code metrics,
+    PR-4.23 timeout) was a recurring source of bugs that
+    silently under-counted the handshake-error histogram
+    and the
+    `gmtls_handshakes_total{result="error"}` counter.
+  - **Idempotency**: explicit `finish()` calls continue
+    to work. A private `recorded: Option<String>` field
+    ensures that both `finish()` and `Drop` funnel
+    through one `record()` helper and emit exactly one
+    counter + histogram pair per handshake.
+  - **PR-4.25 unit tests** (4) in
+    `mod pr425_handshake_timer_raii_tests`: pin that
+    dropping a timer without `finish()` does not panic,
+    that `finish("success")` and `finish("error")` are
+    still callable, and that 64 concurrent timer drops
+    do not deadlock.
+  - **No behavior change for callers**: the existing
+    `timer.finish("success")` and `timer.finish("error")`
+    sites in `gm.rs` keep working. PR-4.25's drop
+    semantics kick in for the paths that *did not*
+    already manually finish (e.g. a future `?` early
+    return that someone forgets to instrument).
+
+### Changed
+
+- **gm-tls bumped to 0.2.13** (from 0.2.12). The public
+  API of `HandshakeTimer` is unchanged (new + finish);
+  only the *Drop semantics* are added. Existing
+  callers see no observable change.
+
+### Added (prior)
+
 - **Handshake wall-clock timeout** (PR-4.23 / P2-12):
   new `HandshakeOptions::handshake_timeout: Duration`
   field with default **30 seconds**, plus
