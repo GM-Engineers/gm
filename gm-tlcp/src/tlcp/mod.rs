@@ -1700,12 +1700,20 @@ impl TlcpConnector {
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
-        if self.server_sign_pubkey.is_some() {
+        let result = if self.server_sign_pubkey.is_some() {
             self.connect_with_certs(transport).await
         } else {
             #[allow(deprecated)]
             connect_tlcp(transport, &self.session_cache).await
+        };
+        // PR-4.22: structured error code label for
+        // `gmtlcp_handshake_errors_total{role="client",code=...}`.
+        // Emitted once per call regardless of which inner path
+        // produced the error.
+        if let Err(ref e) = result {
+            crate::metrics::record_handshake_error_code("client", e.code());
         }
+        result
     }
     /// Production ECDHE handshake with server certificate verification.
     /// Configure SM9 IBC key material on the client side (R-4.1).
@@ -3660,7 +3668,7 @@ impl TlcpAcceptor {
     {
         // R-5: also accept if RSA-only certs are configured (no SM2 dual
         // cert needed for the 4 RSA suites E019/E01C/E059/E05A).
-        if (self.sign_cert.is_some() && self.sign_key.is_some())
+        let result = if (self.sign_cert.is_some() && self.sign_key.is_some())
             || (self.rsa_cert.is_some()
                 && self.rsa_signer.is_some()
                 && self.rsa_decryptor.is_some())
@@ -3669,7 +3677,15 @@ impl TlcpAcceptor {
         } else {
             #[allow(deprecated)]
             accept_tlcp(transport, &self.session_cache).await
+        };
+        // PR-4.22: structured error code label for
+        // `gmtlcp_handshake_errors_total{role="server",code=...}`.
+        // Emitted once per call regardless of which inner path
+        // produced the error.
+        if let Err(ref e) = result {
+            crate::metrics::record_handshake_error_code("server", e.code());
         }
+        result
     }
     /// Accept with production dual-certificate ECDHE handshake.
     ///

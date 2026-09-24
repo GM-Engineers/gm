@@ -37,7 +37,7 @@
 //!     .await?;
 //! ```
 
-use crate::metrics::HandshakeTimer;
+use crate::metrics::{HandshakeTimer, record_handshake_error_code};
 use crate::{GmTlsStream, TlsAcceptor, TlsConnector};
 use futures::StreamExt;
 use std::future::Future;
@@ -199,6 +199,10 @@ impl GmTlsIncoming {
                                         e
                                     );
                                     timer.finish("error");
+                                    // PR-4.22: structured error code label
+                                    // for `gmtls_handshake_errors_total{role="server",code=...}`.
+                                    // Emit before filtering the stream item.
+                                    record_handshake_error_code("server", e.code());
                                     // Skip failed handshakes - return None to filter them out
                                     None
                                 }
@@ -345,6 +349,12 @@ impl tower::Service<http::Uri> for GmTlsConnector {
                 }
                 Err(e) => {
                     timer.finish("error");
+                    // PR-4.22: structured error code label
+                    // for `gmtls_handshake_errors_total{role="client",code=...}`.
+                    // We capture `e.code()` before boxing into
+                    // `std::io::Error` (which only carries a string).
+                    let code = e.code();
+                    record_handshake_error_code("client", code);
                     Err(Box::new(std::io::Error::other(format!(
                         "GM/TLS handshake failed: {}",
                         e

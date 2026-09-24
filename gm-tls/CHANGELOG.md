@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`gmtls_handshake_errors_total{role, code}` counter** (PR-4.22):
+  new Prometheus counter that lets operators slice handshake
+  failures by structured [`ErrorCode`] (introduced in PR-4.18).
+  Wire through:
+  - `gm_tls::metrics::record_handshake_error_code(role, code)`
+  - Emitted from `connect_gm_rust` / `accept_gm_rust` /
+    `accept_gm_rust_with_client_cert` (gm.rs wrap points) and
+    `GmTlsIncoming::with_max_concurrent` + `GmTlsConnector::call`
+    (grpc.rs paths). `code` label uses [`ErrorCode`]'s `Debug`
+    representation (`Cipher`, `HandshakeMessageParse`, `Sm2Key`,
+    `SessionTicket`, `CrlVerificationFailed`, `Kat`, etc.) so
+    dashboards can alert on differentiated subsystems
+    independently.
+- **PR-4.22 unit tests**: 4 new tests in
+  `metrics::pr422_record_handshake_error_code_tests` covering
+  variant → code mapping, Display distinctness, and
+  thread-safety.
+
+### Changed
+
+- **gm-tls bumped to 0.2.11** (from 0.2.10); the new public
+  function `record_handshake_error_code` and the new counter
+  `gmtls_handshake_errors_total` are observable. No public
+  function signatures were broken; `gmtls_handshakes_total` and
+  `gmtls_cert_verification_errors_total` continue to be emitted
+  unchanged for backward compatibility.
+
 - **Opt-in CRL grace period** (PR-4.20 / P2-11): new
   `HandshakeOptions::crl_grace_period: Duration` field
   (default: `Duration::ZERO`) + `TlsConfig::with_crl_grace_period(period)`

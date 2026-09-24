@@ -53,7 +53,9 @@ use crate::handshake::{
     parse_sm2_pubkey, read_handshake_record, select_client_pubkey_for_finished,
     select_pubkey_for_finished, signer_from_pem_key, signer_from_scalar, write_handshake_record,
 };
-use crate::metrics::{HandshakeTimer, record_cert_error, record_session_resumption};
+use crate::metrics::{
+    HandshakeTimer, record_cert_error, record_handshake_error_code, record_session_resumption,
+};
 use crate::session_store::{InMemorySessionStore, SessionStore};
 use gm_crypto::sm2::{GM_TLS_DEFAULT_ID, Scalar, Sm2Verifier};
 use std::sync::Arc;
@@ -84,6 +86,13 @@ where
         }
         Err(e) => {
             crate::audit::AuditLogger::auth_failure(domain_str, "outbound", &e.to_string());
+            // PR-4.22: structured error code label for
+            // `gmtls_handshake_errors_total{role="client",code=...}`.
+            // Mirrors `record_cert_error("session_ticket_tampered")` in
+            // granularity but uses the canonical PR-4.18 ErrorCode
+            // taxonomy so dashboards can slice all handshake failures
+            // uniformly.
+            record_handshake_error_code("client", e.code());
         }
     }
     result
@@ -118,6 +127,8 @@ where
         }
         Err(e) => {
             crate::audit::AuditLogger::auth_failure("client", "inbound", &e.to_string());
+            // PR-4.22: see `connect_gm_rust` for rationale.
+            record_handshake_error_code("server", e.code());
         }
     }
     result
@@ -153,6 +164,8 @@ where
         }
         Err(e) => {
             crate::audit::AuditLogger::auth_failure("client", "inbound", &e.to_string());
+            // PR-4.22: see `connect_gm_rust` for rationale.
+            record_handshake_error_code("server", e.code());
         }
     }
     result

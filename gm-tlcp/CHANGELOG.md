@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`gmtlcp_handshake_errors_total{role, code}` counter** (PR-4.22):
+  new Prometheus counter that lets operators slice TLCP handshake
+  failures by structured [`TlcpErrorCode`] (introduced in PR-4.21).
+  Wire through:
+  - `gm_tlcp::metrics::record_handshake_error_code(role, code)`
+  - Emitted from `TlcpConnector::connect` / `TlcpAcceptor::accept`
+    (the top-level entry points). `code` label uses
+    [`TlcpErrorCode`]'s `Debug` representation (`Cipher`,
+    `HandshakeMessageParse`, `Sm2Key`,
+    `CertificateVerificationFailed`, etc.) so dashboards can alert
+    on differentiated subsystems independently.
+- **PR-4.22 unit tests**: 4 new tests in
+  `metrics::pr422_record_handshake_error_code_tests` covering
+  variant → code mapping, Display distinctness, and
+  thread-safety.
+
+### Changed
+
+- **gm-tlcp bumped to 0.7.2** (from 0.7.1); the new public
+  function `record_handshake_error_code` and the new counter
+  `gmtlcp_handshake_errors_total` are observable. No public
+  function signatures were broken; `gmtlcp_bytes_transferred_total`
+  continues to be emitted unchanged for backward compatibility.
+
 - **`TlcpErrorCode`** (PR-4.21): new structured error code enum
   with 13 variants covering all `TlcpError` failure modes
   (`HandshakeFailed`, `HandshakeMessageParse`, `Cipher`, `Sm2Key`,
