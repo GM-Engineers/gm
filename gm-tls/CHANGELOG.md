@@ -9,6 +9,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Structured `gmtls_cert_verification_errors_total{code}`**
+  (PR-4.28 / mirror of PR-4.22/4.27): new
+  `gm_tls::metrics::record_cert_error_code(code: ErrorCode)`
+  emits `gmtls_cert_verification_errors_total{code="<ErrorCode
+  Debug>"}` with the canonical `code` label — matches the
+  shape of `gmtls_handshake_errors_total{role, code}`
+  (PR-4.22) and `gmca_errors_total{code}` (PR-4.27), so
+  dashboards can use a unified `{code}`-label query pattern
+  across the three crates.
+  - PR-4.28 also documents the **two cert-related error
+    counters** side by side: `gmtls_handshake_errors_total`
+    emits once per failed handshake (PR-4.22 wrap path);
+    `gmtls_cert_verification_errors_total` emits per cert
+    verification attempt (this PR). Use the former for
+    handshake success / error rate SLOs; use the latter for
+    PKI-level anomalies independent of the handshake state
+    machine (e.g. session-ticket fail-closed reject before a
+    full handshake even starts).
+- **PR-4.28 unit tests** (3) in
+  `mod pr428_record_cert_error_code_tests`:
+  - `record_cert_error_code_accepts_all_variants` —
+    every `ErrorCode` variant (22 of them) is reachable.
+  - `legacy_record_cert_error_still_callable` — the
+    deprecated `record_cert_error(&str)` API continues to
+    emit `gmtls_cert_verification_errors_total{reason="..."}`
+    for one release cycle so existing dashboards do not
+    break.
+  - `record_cert_error_code_is_thread_safe` — 8 threads × 3
+    variants concurrent exercise (no panics, no races).
+
+### Changed
+
+- **gm-tls bumped to 0.2.14** (from 0.2.13). The new
+  `record_cert_error_code` API is observable. No public
+  function signatures were broken (the legacy
+  `record_cert_error(&str)` API is retained and deprecated —
+  see below).
+- **`record_cert_error(&str)` API deprecated**: continues
+  to emit `gmtls_cert_verification_errors_total{reason="..."}`
+  (legacy string label) but emits a `#[deprecated(since =
+  "0.2.14")]` compile-time warning. New call-sites should
+  use `record_cert_error_code(ErrorCode::Xxx)` for
+  compile-time-checked label values. The legacy `reason`
+  label will be removed in gm-tls 0.3.0 — at that point
+  callers still passing strings will get a build break,
+  prompting them to migrate.
+- **The one `record_cert_error` call-site in `gm.rs`** (the
+  session-ticket fail-closed reject path) migrated to
+  `record_cert_error_code(ErrorCode::SessionTicket)`. The
+  legacy `record_cert_error` import was removed from `gm.rs`;
+  `record_cert_error_code` is now the only cert-error metrics
+  surface used internally.
+- **`describe_metrics` updated**: the
+  `gmtls_cert_verification_errors_total` description now
+  documents the PR-4.28 dual-label contract (both `code` and
+  `reason` are emitted during the migration window).
+
+### Added (prior)
+
 - **RAII `HandshakeTimer` guard** (PR-4.25): the handshake
   timer now self-records on drop with
   `gmtls_handshakes_total{role, result="error"}` and

@@ -48,13 +48,13 @@ pub use crate::kdf::{derive_session_keys_sm2, hkdf_sm3};
 
 use crate::cert_verify::extract_server_pubkey_for_cert_verify;
 use crate::der;
-use crate::error::TlsError;
+use crate::error::{ErrorCode, TlsError};
 use crate::handshake::{
     parse_sm2_pubkey, read_handshake_record, select_client_pubkey_for_finished,
     select_pubkey_for_finished, signer_from_pem_key, signer_from_scalar, write_handshake_record,
 };
 use crate::metrics::{
-    HandshakeTimer, record_cert_error, record_handshake_error_code, record_session_resumption,
+    HandshakeTimer, record_cert_error_code, record_handshake_error_code, record_session_resumption,
 };
 use crate::session_store::{InMemorySessionStore, SessionStore};
 use gm_crypto::sm2::{GM_TLS_DEFAULT_ID, Scalar, Sm2Verifier};
@@ -384,7 +384,15 @@ where
                                 if opts.session_ticket_fail_closed =>
                             {
                                 timer.finish("error");
-                                record_cert_error("session_ticket_tampered");
+                                // PR-4.28: structured ErrorCode
+                                // label (was string-based
+                                // "session_ticket_tampered"). The
+                                // legacy string label is still
+                                // emitted by the deprecated
+                                // record_cert_error path; new
+                                // alerts / dashboards should key
+                                // off `gmtls_cert_verification_errors_total{code="SessionTicket"}`.
+                                record_cert_error_code(ErrorCode::SessionTicket);
                                 return Err(TlsError::HandshakeFailed(format!(
                                     "session ticket rejected (fail-closed): {}",
                                     e

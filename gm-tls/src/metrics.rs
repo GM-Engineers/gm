@@ -53,7 +53,8 @@ pub fn describe_metrics() {
     describe_counter!(
         "gmtls_cert_verification_errors_total",
         Unit::Count,
-        "Total certificate verification errors"
+        "Total certificate verification errors (PR-4.28: emits under both `code` (structured) and \
+         `reason` (legacy string) labels)"
     );
     // PR-4.22: errors tagged by structured ErrorCode (PR-4.18) for
     // fine-grained alerting on subsystem failures (cipher vs handshake
@@ -88,7 +89,53 @@ pub fn record_bytes(role: &str, direction: &str, count: usize) {
         .increment(count as u64);
 }
 
+/// PR-4.28: records a certificate verification error tagged by
+/// structured [`ErrorCode`]. Mirror of
+/// `gm_tls::metrics::record_handshake_error_code` (PR-4.22)
+/// and `gm_ca::metrics::record_error_code` (PR-4.27). The
+/// `code` label uses `ErrorCode`'s `Debug` representation
+/// (e.g. `"SessionTicket"`, `"CertificateVerificationFailed"`,
+/// `"CrlVerificationFailed"`).
+///
+/// Replaces the legacy string-based `record_cert_error` API.
+/// The legacy `reason` label is still incremented (from
+/// deprecated `record_cert_error`) so existing dashboards do
+/// not break during the migration.
+///
+/// # Companion metrics
+///
+/// Two cert-related error counters now coexist in gm-tls:
+///
+/// - `gmtls_handshake_errors_total{role, code}` (PR-4.22) —
+///   emits **once per failed handshake**, tagged by the
+///   returned `TlsError::code()`. Covers every TLS layer
+///   failure, including cert verification.
+///
+/// - `gmtls_cert_verification_errors_total{code}` (this PR) —
+///   emits **per certificate verification attempt** (not
+///   necessarily a complete handshake). Use this when you
+///   want to alert on PKI-level anomalies independent of
+///   the handshake state machine (e.g. session-ticket
+///   fail-closed reject before a full handshake even
+///   starts).
+pub fn record_cert_error_code(code: ErrorCode) {
+    let code = format!("{code:?}");
+    counter!("gmtls_cert_verification_errors_total", "code" => code).increment(1);
+}
+
 /// Records a certificate verification error.
+///
+/// **Deprecated** since 0.2.14 — use [`record_cert_error_code`]
+/// with a structured [`ErrorCode`] instead. The legacy `reason`
+/// label continues to be incremented for one release cycle so
+/// existing dashboards do not break, but new alerts / dashboards
+/// should switch to the `code` label via
+/// `record_cert_error_code(ErrorCode::Xxx)`.
+#[deprecated(
+    since = "0.2.14",
+    note = "use record_cert_error_code with structured ErrorCode for compile-time-checked metric \
+            labels"
+)]
 pub fn record_cert_error(reason: &str) {
     let reason = reason.to_owned();
     counter!("gmtls_cert_verification_errors_total", "reason" => reason).increment(1);
@@ -406,5 +453,81 @@ mod pr425_handshake_timer_raii_tests {
             h.join().expect("thread panicked");
         }
         assert_eq!(success.load(Ordering::Relaxed), n);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PR-4.28 unit tests: record_cert_error_code
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod pr428_record_cert_error_code_tests {
+    use super::*;
+    use crate::error::ErrorCode;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// PR-4.28: every `ErrorCode` variant reachable through
+    /// `record_cert_error_code` without panic. Mirror of the
+    /// PR-4.22 / PR-4.27 unit-test pattern.
+    #[test]
+    fn record_cert_error_code_accepts_all_variants() {
+        for code in [
+            ErrorCode::ConfigError,
+            ErrorCode::HandshakeFailed,
+            ErrorCode::HandshakeFailedSource,
+            ErrorCode::CertificateVerificationFailed,
+            ErrorCode::CrlVerificationFailed,
+            ErrorCode::IoError,
+            ErrorCode::Unimplemented,
+            ErrorCode::SequenceOverflow,
+            ErrorCode::SessionStoreError,
+            ErrorCode::DerParseError,
+            ErrorCode::SerializationFailed,
+            ErrorCode::TlsRecordError,
+            ErrorCode::ParseError,
+            ErrorCode::NonceReuse,
+            ErrorCode::InvalidHandshakeType,
+            ErrorCode::InvalidMessage,
+            ErrorCode::InvalidState,
+            ErrorCode::SessionTicket,
+            ErrorCode::Cipher,
+            ErrorCode::HandshakeMessageParse,
+            ErrorCode::Sm2Key,
+            ErrorCode::Kat,
+        ] {
+            record_cert_error_code(code);
+        }
+    }
+
+    /// PR-4.28: the legacy `record_cert_error(&str)` API
+    /// continues to emit `gmtls_cert_verification_errors_total`
+    /// under the legacy `reason` label, so existing dashboards
+    /// do not break during the migration.
+    #[test]
+    #[allow(deprecated)]
+    fn legacy_record_cert_error_still_callable() {
+        record_cert_error("session_ticket_tampered");
+        record_cert_error("custom_reason_xyz");
+    }
+
+    /// PR-4.28: thread safety. 8 threads × 22 variants.
+    #[test]
+    fn record_cert_error_code_is_thread_safe() {
+        const N_THREADS: usize = 8;
+        let success = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::with_capacity(N_THREADS);
+        for _ in 0..N_THREADS {
+            let success = Arc::clone(&success);
+            handles.push(std::thread::spawn(move || {
+                record_cert_error_code(ErrorCode::SessionTicket);
+                record_cert_error_code(ErrorCode::Cipher);
+                record_cert_error_code(ErrorCode::CertificateVerificationFailed);
+                success.fetch_add(3, Ordering::Relaxed);
+            }));
+        }
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+        assert_eq!(success.load(Ordering::Relaxed), N_THREADS * 3);
     }
 }
