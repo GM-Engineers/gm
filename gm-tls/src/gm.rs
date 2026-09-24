@@ -412,16 +412,26 @@ where
             )?;
         }
 
-        // Check CRL if provided
+        // Check CRL if provided. PR-4.20 / P2-11: apply
+        // `crl_grace_period` by passing `now + grace` as the
+        // verification time. `verify_crl` internally checks
+        // `now < crl.next_update`, so passing
+        // `now + crl_grace_period` lets a CRL stay valid for
+        // `crl_grace_period` past its nominal `next_update`.
+        // Note: grace period only extends the freshness
+        // window; serial numbers actually in the CRL are
+        // always rejected (handled inside `verify_crl`).
         if let Some(ref crl) = opts.crl_info {
             let leaf_cert = leaf_chain[0].as_x509()?;
             let cert_serial = leaf_cert.serial.to_bytes_be();
+            let effective_now = OffsetDateTime::now_utc()
+                + time::Duration::seconds(opts.crl_grace_period.as_secs() as i64);
             verify_crl(
                 &cert_serial,
                 leaf_cert.issuer(),
                 &trust[0].as_x509()?,
                 crl,
-                OffsetDateTime::now_utc(),
+                effective_now,
             )?;
         }
     }
@@ -668,16 +678,19 @@ where
             distid_policy,
         )?;
 
-        // Check CRL if provided
+        // Check CRL if provided (PR-4.20 / P2-11: same
+        // grace-period semantics as the client path).
         if let Some(ref crl) = opts.crl_info {
             let leaf_cert = leaf_chain[0].as_x509()?;
             let cert_serial = leaf_cert.serial.to_bytes_be();
+            let effective_now = OffsetDateTime::now_utc()
+                + time::Duration::seconds(opts.crl_grace_period.as_secs() as i64);
             verify_crl(
                 &cert_serial,
                 leaf_cert.issuer(),
                 &trust[0].as_x509()?,
                 crl,
-                OffsetDateTime::now_utc(),
+                effective_now,
             )?;
         }
 

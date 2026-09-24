@@ -157,6 +157,7 @@ use gm::{accept_gm_rust, accept_gm_rust_with_client_cert, connect_gm_rust};
 use gm_crypto::kat;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// TLS backend implementation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -390,6 +391,24 @@ impl TlsConfig {
             .get_or_insert_with(HandshakeOptions::default);
         if let Some(opts) = &mut self.handshake_opts {
             opts.crl_info = Some(crl_info);
+        }
+        self
+    }
+
+    /// PR-4.20 / P2-11: set the CRL grace period. See
+    /// [`HandshakeOptions::crl_grace_period`] for full
+    /// semantics. Default: [`Duration::ZERO`] (fail-fast,
+    /// pre-PR-4.20 behaviour).
+    ///
+    /// Recommended value for production deployments with
+    /// possibly-stale CRL publishers:
+    /// `Duration::from_secs(600)` (10 minutes, matching
+    /// Microsoft WinHTTP's default).
+    pub fn with_crl_grace_period(mut self, period: Duration) -> Self {
+        self.handshake_opts
+            .get_or_insert_with(HandshakeOptions::default);
+        if let Some(opts) = &mut self.handshake_opts {
+            opts.crl_grace_period = period;
         }
         self
     }

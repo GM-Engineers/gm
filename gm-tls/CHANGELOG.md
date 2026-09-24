@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Opt-in CRL grace period** (PR-4.20 / P2-11): new
+  `HandshakeOptions::crl_grace_period: Duration` field
+  (default: `Duration::ZERO`) + `TlsConfig::with_crl_grace_period(period)`
+  builder. Lets operators tolerate transient CRL publisher
+  outages (recommended: `Duration::from_secs(600)`, matching
+  Microsoft WinHTTP's default). Both client and server CRL
+  check call sites now pass `now + grace_period` as the
+  verification time; `verify_crl` internally compares
+  against `crl.next_update`, so passing `now + grace` lets
+  the CRL stay valid for the configured grace past its
+  nominal `next_update`. Security note: grace period only
+  extends the freshness window — cert serial numbers in
+  the CRL's revoked list are always rejected (handled
+  inside `verify_crl`). Default is `Duration::ZERO` so
+  pre-PR-4.20 callers see byte-for-byte identical
+  behaviour. Three new unit tests cover the field
+  default + builder round-trip. Bumps gm-tls to 0.2.10
+  (patch; new field + new builder, `#[non_exhaustive]`
+  protects downstream `match`es).
+
 - **Typed `TlsError` variants for cipher / handshake / SM2-key / KAT** (PR-4.18 / PR-4.16 follow-up): four new typed variants replace the remaining 27 string-only `HandshakeFailed(format!(...))` call sites:
   - `TlsError::CipherError(String)` — GM cipher primitive failed (SM3 hash, SM4-GCM encrypt/decrypt, SM2 sign/verify, close_notify). Maps to `ErrorCode::Cipher`.
   - `TlsError::HandshakeMessageParse(String)` — handshake message parse/validate failed (Finished, Certificate, CertificateVerify). Maps to `ErrorCode::HandshakeMessageParse`.

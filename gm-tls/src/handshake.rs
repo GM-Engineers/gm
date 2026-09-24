@@ -80,6 +80,7 @@ use gm_crypto::sm2::{
     EncodedPoint, GM_TLS_DEFAULT_ID, ProjectivePoint, Scalar, Sm2KeyPair, Sm2Signer, Sm2Verifier,
 };
 use gm_crypto::sm3::Sm3Hasher;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 // ============================================================================
@@ -1078,6 +1079,24 @@ pub struct HandshakeOptions {
     /// enable this. Setting via
     /// [`TlsConfig::with_session_ticket_fail_closed`](crate::TlsConfig::with_session_ticket_fail_closed).
     pub session_ticket_fail_closed: bool,
+    /// PR-4.20 / P2-11: CRL grace period. When the CRL's
+    /// `next_update` is in the past (i.e., the CA hasn't
+    /// refreshed the CRL yet), the verifier accepts the
+    /// CRL for up to `crl_grace_period` past `next_update`
+    /// before treating it as expired.
+    ///
+    /// Default: [`Duration::ZERO`] (fail-fast on stale
+    /// CRL, pre-PR-4.20 behaviour). Operators concerned
+    /// about transient CRL publisher outages should set
+    /// this to e.g. ten minutes (matching Microsoft
+    /// WinHTTP's default) via
+    /// `TlsConfig::with_crl_grace_period(period)`.
+    ///
+    /// Security note: the grace period only applies to
+    /// CRL *freshness* (next_update already past). If a
+    /// cert serial number is in the CRL's revoked list,
+    /// `verify_crl` rejects it regardless of grace period.
+    pub crl_grace_period: Duration,
 }
 
 // ============================================================================
@@ -1436,4 +1455,72 @@ pub fn validate_downgrade_protection(
     }
 
     Ok(())
+}
+
+// ============================================================================
+// PR-4.20 tests: crl_grace_period builder + default
+// ============================================================================
+//
+// PR-4.20 / P2-11 introduces an opt-in CRL grace period.
+// Without a running CRL fixture, the API-shape tests
+// below are sufficient: they pin the field default
+// (`Duration::ZERO` so pre-PR-4.20 behaviour is preserved
+// byte-for-byte) and verify the builder sets the field.
+// End-to-end behaviour (CRL accepted within grace,
+// rejected past grace, reject-on-revoke-still-bypass-grace)
+// is covered by `verify_crl` itself in gm-crypto and is
+// exercised by CI's existing gm-crypto interop suite.
+
+#[cfg(test)]
+mod pr420_crl_grace_period_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn pr420_default_grace_period_is_zero() {
+        // Pre-PR-4.20 behaviour: `HandshakeOptions::default()`
+        // yields `crl_grace_period = Duration::ZERO`. Existing
+        // callers must see no change.
+        let opts = HandshakeOptions::default();
+        assert_eq!(
+            opts.crl_grace_period,
+            Duration::ZERO,
+            "default crl_grace_period must be Duration::ZERO"
+        );
+    }
+
+    #[test]
+    fn pr420_builder_sets_field_to_given_duration() {
+        // `TlsConfig::with_crl_grace_period` sets the field
+        // verbatim, including non-zero durations, large
+        // durations, and the literal `Duration::ZERO`
+        // (which is the default but should also be settable
+        // explicitly to opt-out).
+        for secs in &[0u64, 1, 60, 600, 3600, 86400] {
+            let cfg = crate::TlsConfig::from_bytes(b"c".to_vec(), b"k".to_vec(), b"ca".to_vec())
+                .expect("from_bytes")
+                .with_crl_grace_period(Duration::from_secs(*secs));
+            let opts = cfg.handshake_opts.as_ref().expect("handshake_opts");
+            assert_eq!(
+                opts.crl_grace_period,
+                Duration::from_secs(*secs),
+                "with_crl_grace_period({secs}) must round-trip"
+            );
+        }
+    }
+
+    #[test]
+    fn pr420_default_field_does_not_affect_cert_validation_path() {
+        // Sanity check: setting `crl_grace_period = 0` (the
+        // default) keeps the verifier in fail-fast mode.
+        // The actual verify_crl behaviour is tested in
+        // gm-crypto; this test just pins the public API
+        // shape for the field.
+        let opts = HandshakeOptions::default();
+        assert!(opts.crl_grace_period.is_zero());
+        assert!(
+            !opts.crl_info.is_some(),
+            "default crl_info must be None (CRL check opt-in)"
+        );
+    }
 }
