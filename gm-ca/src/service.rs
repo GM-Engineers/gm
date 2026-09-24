@@ -4,6 +4,7 @@ use crate::ca::v1 as ca_v1;
 use crate::cert::{CaSigner, extract_csr_subject_cn};
 use crate::cert_profile::CertProfile;
 use crate::db::DbStore;
+use crate::error::CaErrorCode;
 use crate::metrics;
 use ca_v1::{
     GetCertificateResponse, GetCrlResponse, RenewCertificateResponse, RevokeCertificateResponse,
@@ -149,7 +150,7 @@ impl CaService for CaServiceImpl {
             CertProfile::default()
         } else {
             serde_json::from_str(&req.profile_json).map_err(|e| {
-                metrics::record_error("invalid_profile_json");
+                metrics::record_error_code(CaErrorCode::InvalidArgument);
                 Status::invalid_argument(format!("invalid profile_json: {}", e))
             })?
         };
@@ -173,13 +174,13 @@ impl CaService for CaServiceImpl {
             .signer
             .sign_csr_with_profile_and_seconds(csr_bytes, validity_seconds, &profile)
             .map_err(|e| {
-                metrics::record_error("sign_failed");
+                metrics::record_error_code(CaErrorCode::SigningFailed);
                 Status::invalid_argument(e.to_string())
             })?;
 
         // Extract subject CN from CSR for database storage
         let subject_cn = extract_csr_subject_cn(csr_bytes).map_err(|e| {
-            metrics::record_error("csr_parse_failed");
+            metrics::record_error_code(CaErrorCode::InvalidCsr);
             Status::invalid_argument(e.to_string())
         })?;
 
@@ -205,7 +206,7 @@ impl CaService for CaServiceImpl {
             )
             .await
             .map_err(|e| {
-                metrics::record_error("db_insert_failed");
+                metrics::record_error_code(CaErrorCode::DatabaseError);
                 Status::internal(format!("failed to store certificate: {}", e))
             })?;
 
@@ -240,7 +241,7 @@ impl CaService for CaServiceImpl {
 
         // Refuse to renew revoked certificates
         if existing.status == "revoked" {
-            metrics::record_error("renew_revoked_cert");
+            metrics::record_error_code(CaErrorCode::InternalError);
             return Ok(Response::new(RenewCertificateResponse {
                 certificate_pem: String::new(),
                 error_code: "CERT_REVOKED".to_string(),
@@ -258,7 +259,7 @@ impl CaService for CaServiceImpl {
             CertProfile::default()
         } else {
             serde_json::from_str(&req.profile_json).map_err(|e| {
-                metrics::record_error("invalid_profile_json");
+                metrics::record_error_code(CaErrorCode::InvalidArgument);
                 Status::invalid_argument(format!("invalid profile_json: {}", e))
             })?
         };
@@ -283,7 +284,7 @@ impl CaService for CaServiceImpl {
                 &profile,
             )
             .map_err(|e| {
-                metrics::record_error("renew_failed");
+                metrics::record_error_code(CaErrorCode::InternalError);
                 Status::invalid_argument(e.to_string())
             })?;
 
@@ -314,7 +315,7 @@ impl CaService for CaServiceImpl {
             )
             .await
             .map_err(|e| {
-                metrics::record_error("db_insert_failed");
+                metrics::record_error_code(CaErrorCode::DatabaseError);
                 Status::internal(format!("failed to store renewed certificate: {}", e))
             })?;
 
@@ -336,7 +337,7 @@ impl CaService for CaServiceImpl {
             .revoke_certificate(&req.serial_number, req.reason, Utc::now())
             .await
             .map_err(|e| {
-                metrics::record_error("revoke_failed");
+                metrics::record_error_code(CaErrorCode::DatabaseError);
                 Status::internal(e.to_string())
             })?;
 

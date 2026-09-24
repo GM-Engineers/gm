@@ -7,7 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Structured `CaErrorCode` enum** (PR-4.27 / mirror of
+  gm-tls PR-4.18 + gm-tlcp PR-4.21): new
+  `gm_ca::error::CaErrorCode` enum with 7 variants:
+  `InvalidArgument`, `InvalidCsr`, `SigningFailed`,
+  `CertificateNotFound`, `InvalidCertificate`,
+  `DatabaseError`, `InternalError`. Acquire the code
+  via [`CaError::code()`](crate::error::CaError::code).
+  `#[non_exhaustive]` for forward compatibility.
+- **Structured error-code metrics** (PR-4.27 / mirror
+  of gm-tls PR-4.22): new
+  `gm_ca::metrics::record_error_code(code: CaErrorCode)`
+  emits `gmca_errors_total{code="<CaErrorCode Debug>"}`
+  with the canonical `code` label (matches the
+  `gmtls_handshake_errors_total{role, code}` and
+  `gmtlcp_handshake_errors_total{role, code}` label
+  shape so dashboards can use a unified query pattern
+  across the three crates).
+- **PR-4.27 unit tests** (4) in
+  `mod pr427_record_error_code_tests`:
+  - `record_error_code_accepts_all_variants` —
+    every `CaErrorCode` is reachable.
+  - `all_ca_error_variants_have_a_code` — every
+    `CaError` variant maps to exactly one
+    `CaErrorCode` (1-to-1, no overlap, no missing case);
+    `Debug` representations are all distinct (required
+    for bounded Prometheus label cardinality).
+  - `legacy_record_error_still_callable` — the
+    deprecated `record_error(&str)` API continues to
+    emit `gmca_errors_total{type="..."}` for one release
+    cycle so existing dashboards do not break.
+  - `record_error_code_is_thread_safe` — 8 threads × 7
+    variants concurrent exercise (no panics, no races).
+
 ### Changed
+
+- **gm-ca bumped to 0.4.2** (from 0.4.1). The new
+  `record_error_code` API and the `CaErrorCode` enum
+  are observable. No public function signatures were
+  broken (the legacy `record_error(&str)` API is
+  retained and deprecated — see below).
+- **`record_error(&str)` API deprecated**: continues
+  to emit `gmca_errors_total{type="..."}` (legacy
+  string label) but emits a `#[deprecated(since =
+  "0.4.2")]` compile-time warning. New call-sites
+  should use `record_error_code(CaErrorCode::Xxx)`
+  for compile-time-checked label values. The legacy
+  `type` label will be removed in gmca 0.5.0 — at that
+  point callers still passing strings will get a
+  build break, prompting them to migrate.
+- **All 9 call-sites in `service.rs` migrated** from
+  string-based `metrics::record_error("xxx")` to
+  structured `metrics::record_error_code(CaErrorCode::Xxx)`.
+  Mapping (pre-PR-4.27 string → `CaErrorCode`):
+  - `"invalid_profile_json"` → `InvalidArgument`
+    (2 sites: `SignCertificate`, `RenewCertificate`)
+  - `"csr_parse_failed"` → `InvalidCsr`
+    (1 site: `SignCertificate`)
+  - `"sign_failed"` → `SigningFailed`
+    (1 site: `SignCertificate`)
+  - `"renew_revoked_cert"` → `InternalError`
+    (1 site: `RenewCertificate`)
+  - `"renew_failed"` → `InternalError`
+    (1 site: `RenewCertificate`)
+  - `"db_insert_failed"` → `DatabaseError`
+    (2 sites: `SignCertificate`, `RenewCertificate`)
+  - `"revoke_failed"` → `DatabaseError`
+    (1 site: `RevokeCertificate`)
+- **`describe_ca_metrics` updated**: the
+  `gmca_errors_total` description now documents the
+  PR-4.27 dual-label contract (both `code` and `type`
+  are emitted during the migration window).
+
+### Changed (prior)
 
 - **Rate limiter is now per-caller (peer IP) instead of global**
   (PR-4.12 / P2-7): pre-PR-4.12 the CA service used a single
