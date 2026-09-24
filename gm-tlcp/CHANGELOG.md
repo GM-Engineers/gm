@@ -9,6 +9,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **TLCP handshake total counter + duration histogram**
+  (PR-4.26 / mirror of gm-tls PR-4.10 + PR-4.25):
+  - new `gmtlcp_handshakes_total{role, result}` counter
+    (PR-4.10 semantics): increments once per handshake
+    with `result="success"` or `result="error"`.
+  - new `gmtlcp_handshake_duration_seconds{role}`
+    histogram (PR-4.10 semantics): records elapsed
+    wall-clock seconds for every handshake. P50/P95/P99
+    quantiles become queryable in Grafana via the
+    standard `histogram_quantile()` operator.
+  - new `gm_tlcp::metrics::describe_metrics()` function
+    that registers Prometheus `describe_counter!` /
+    `describe_histogram!` descriptors at application
+    startup; mirrors `gm_tls::metrics::describe_metrics`.
+- **RAII `HandshakeTimer` guard** (PR-4.26): mirror of
+  `gm_tls::metrics::HandshakeTimer` (PR-4.25). The timer
+  starts at construction and **automatically records on
+  drop** with `result="error"` (the conservative default —
+  every handshake that did not explicitly call
+  [`HandshakeTimer::finish`] with `result="success"`
+  counts as an error in metrics). Eliminates the
+  under-counting class of bug where each `?` early-return
+  inside the handshake coroutine must remember to call
+  `timer.finish("error")` manually.
+  - Wired into the top-level entry points
+    `TlcpConnector::connect` (role "client") and
+    `TlcpAcceptor::accept` (role "server"). The success
+    path calls `timer.finish("success")`; the error
+    path drops `timer` and gets `result="error"` via
+    the `Drop` impl.
+  - **Idempotency**: explicit `finish()` calls continue
+    to work. A private `recorded: Option<String>` field
+    ensures that both `finish()` and `Drop` funnel
+    through one `record()` helper and emit exactly one
+    counter + histogram pair per handshake.
+  - **PR-4.26 unit tests** (4) in
+    `mod pr426_handshake_timer_raii_tests`: pin that
+    dropping a timer without `finish()` does not panic,
+    that `finish("success")` and `finish("error")` are
+    still callable, and that 64 concurrent timer drops
+    do not deadlock.
+- **End-to-end RAII emission coverage**: the existing
+  PR-4.24 loopback tests in
+  `tests/handshake_timeout.rs` now also exercise the
+  Drop path: `pr424_accept_times_out_on_slow_client`
+  triggers a 1s `tokio::time::timeout`, after which the
+  timer drops → records `result="error"` without manual
+  intervention.
+
+### Changed
+
+- **gm-tlcp bumped to 0.7.4** (from 0.7.3); the new
+  metrics (`gmtlcp_handshakes_total`,
+  `gmtlcp_handshake_duration_seconds`), the new RAII
+  `HandshakeTimer` struct, and the new
+  `describe_metrics()` function are observable. No public
+  function signatures were broken.
+- **Top-level entry points** `TlcpConnector::connect`
+  and `TlcpAcceptor::accept` now also emit
+  `gmtlcp_handshakes_total{role, result}` +
+  `gmtlcp_handshake_duration_seconds{role}` in addition
+  to the existing `gmtlcp_handshake_errors_total{role,
+  code}` (PR-4.22). Operators get a single source of
+  truth for handshake success / error rate and latency,
+  with the same label sets as `gm-tls` (so dashboards
+  can aggregate both crates via the `gmtl{s,c}p_`
+  metric name prefix).
+
+### Added (prior)
+
 - **TLCP handshake wall-clock timeout** (PR-4.24 / P2-12):
   new `TlcpConnector::handshake_timeout: Duration` and
   `TlcpAcceptor::handshake_timeout: Duration` fields with

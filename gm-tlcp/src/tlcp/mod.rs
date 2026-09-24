@@ -1747,6 +1747,10 @@ impl TlcpConnector {
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
+        // PR-4.26: RAII handshake timer — records on drop
+        // with `result="error"` if no explicit success is
+        // emitted.
+        let timer = crate::metrics::HandshakeTimer::new("client");
         let timeout = self.handshake_timeout;
         let inner = async {
             if self.server_sign_pubkey.is_some() {
@@ -1757,15 +1761,26 @@ impl TlcpConnector {
             }
         };
         let result = with_handshake_timeout(timeout, "client", inner).await;
-        // PR-4.22: structured error code label for
-        // `gmtlcp_handshake_errors_total{role="client",code=...}`.
-        // Emitted once per call regardless of which inner path
-        // produced the error. PR-4.24: timeout errors flow
-        // through here as `TlcpErrorCode::HandshakeFailed`,
-        // so dashboards see Slowloris-style DoS attempts as
-        // `code="HandshakeFailed"`.
-        if let Err(ref e) = result {
-            crate::metrics::record_handshake_error_code("client", e.code());
+        match &result {
+            Ok(_) => {
+                // PR-4.26: explicit success overrides the
+                // Drop default (which would otherwise record
+                // `result="error"`).
+                timer.finish("success");
+            }
+            Err(e) => {
+                // PR-4.22: structured error code label for
+                // `gmtlcp_handshake_errors_total{role="client",code=...}`.
+                // Emitted once per call regardless of which inner path
+                // produced the error. PR-4.24: timeout errors flow
+                // through here as `TlcpErrorCode::HandshakeFailed`,
+                // so dashboards see Slowloris-style DoS attempts as
+                // `code="HandshakeFailed"`.
+                crate::metrics::record_handshake_error_code("client", e.code());
+                // PR-4.26: `timer` drops here → records
+                // `result="error"` automatically (no manual
+                // call needed).
+            }
         }
         result
     }
@@ -3760,6 +3775,10 @@ impl TlcpAcceptor {
     {
         // R-5: also accept if RSA-only certs are configured (no SM2 dual
         // cert needed for the 4 RSA suites E019/E01C/E059/E05A).
+        // PR-4.26: RAII handshake timer — records on drop
+        // with `result="error"` if no explicit success is
+        // emitted.
+        let timer = crate::metrics::HandshakeTimer::new("server");
         let timeout = self.handshake_timeout;
         let inner = async {
             if (self.sign_cert.is_some() && self.sign_key.is_some())
@@ -3774,14 +3793,25 @@ impl TlcpAcceptor {
             }
         };
         let result = with_handshake_timeout(timeout, "server", inner).await;
-        // PR-4.22: structured error code label for
-        // `gmtlcp_handshake_errors_total{role="server",code=...}`.
-        // Emitted once per call regardless of which inner path
-        // produced the error. PR-4.24: timeout errors flow
-        // through here as `TlcpErrorCode::HandshakeFailed`
-        // for Slowloris detection.
-        if let Err(ref e) = result {
-            crate::metrics::record_handshake_error_code("server", e.code());
+        match &result {
+            Ok(_) => {
+                // PR-4.26: explicit success overrides the
+                // Drop default (which would otherwise record
+                // `result="error"`).
+                timer.finish("success");
+            }
+            Err(e) => {
+                // PR-4.22: structured error code label for
+                // `gmtlcp_handshake_errors_total{role="server",code=...}`.
+                // Emitted once per call regardless of which inner path
+                // produced the error. PR-4.24: timeout errors flow
+                // through here as `TlcpErrorCode::HandshakeFailed`
+                // for Slowloris detection.
+                crate::metrics::record_handshake_error_code("server", e.code());
+                // PR-4.26: `timer` drops here → records
+                // `result="error"` automatically (no manual
+                // call needed).
+            }
         }
         result
     }
