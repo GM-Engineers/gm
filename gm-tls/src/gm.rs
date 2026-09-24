@@ -59,9 +59,37 @@ use crate::metrics::{
 use crate::session_store::{InMemorySessionStore, SessionStore};
 use gm_crypto::sm2::{GM_TLS_DEFAULT_ID, Scalar, Sm2Verifier};
 use std::sync::Arc;
+use std::time::Duration;
 use time::OffsetDateTime;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info, warn};
+
+/// PR-4.23: wrap `inner` in `tokio::time::timeout` if
+/// `handshake_timeout` is non-zero. Returns a
+/// `HandshakeFailed("handshake timeout after Ns")` error
+/// when the deadline expires (the timeout elapsed before
+/// the inner future resolved). Pass `Duration::ZERO` to
+/// disable the timeout entirely (tests only).
+async fn with_handshake_timeout<F, T>(
+    timeout: Duration,
+    role: &str,
+    inner: F,
+) -> Result<T, TlsError>
+where
+    F: std::future::Future<Output = Result<T, TlsError>>,
+{
+    if timeout.is_zero() {
+        return inner.await;
+    }
+    match tokio::time::timeout(timeout, inner).await {
+        Ok(result) => result,
+        Err(_elapsed) => Err(TlsError::HandshakeFailed(format!(
+            "handshake timeout after {}s ({})",
+            timeout.as_secs(),
+            role,
+        ))),
+    }
+}
 
 // ============== Handshake Orchestration ==============
 
@@ -79,7 +107,12 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let domain_str = domain.unwrap_or("unknown");
-    let result = connect_gm_rust_inner(cert_pem, key_pem, ca_pem, domain, alpn, stream, opts).await;
+    let result = with_handshake_timeout(
+        opts.handshake_timeout,
+        "client",
+        connect_gm_rust_inner(cert_pem, key_pem, ca_pem, domain, alpn, stream, opts),
+    )
+    .await;
     match &result {
         Ok(_) => {
             crate::audit::AuditLogger::auth_success(domain_str, "outbound", "-");
@@ -111,14 +144,18 @@ pub async fn accept_gm_rust<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let result = accept_gm_rust_inner(
-        cert_pem,
-        key_pem,
-        ca_pem,
-        require_client_auth,
-        alpn,
-        stream,
-        opts,
+    let result = with_handshake_timeout(
+        opts.handshake_timeout,
+        "server",
+        accept_gm_rust_inner(
+            cert_pem,
+            key_pem,
+            ca_pem,
+            require_client_auth,
+            alpn,
+            stream,
+            opts,
+        ),
     )
     .await;
     match &result {
@@ -147,14 +184,18 @@ pub async fn accept_gm_rust_with_client_cert<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let result = accept_gm_rust_inner_with_cert(
-        cert_pem,
-        key_pem,
-        ca_pem,
-        require_client_auth,
-        alpn,
-        stream,
-        opts,
+    let result = with_handshake_timeout(
+        opts.handshake_timeout,
+        "server",
+        accept_gm_rust_inner_with_cert(
+            cert_pem,
+            key_pem,
+            ca_pem,
+            require_client_auth,
+            alpn,
+            stream,
+            opts,
+        ),
     )
     .await;
     match &result {

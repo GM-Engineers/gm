@@ -412,6 +412,24 @@ impl TlsConfig {
         }
         self
     }
+
+    /// PR-4.23: set the wall-clock timeout for the TLS
+    /// handshake. The default (when this builder is not
+    /// called) is 30 seconds. See
+    /// [`HandshakeOptions::handshake_timeout`] for the
+    /// full contract.
+    ///
+    /// Passing [`Duration::ZERO`] disables the timeout
+    /// entirely (NOT recommended in production — only
+    /// intended for tests).
+    pub fn with_handshake_timeout(mut self, timeout: Duration) -> Self {
+        self.handshake_opts
+            .get_or_insert_with(HandshakeOptions::default);
+        if let Some(opts) = &mut self.handshake_opts {
+            opts.handshake_timeout = timeout;
+        }
+        self
+    }
 }
 
 /// GM/TLS client connector

@@ -1040,7 +1040,7 @@ pub struct HandshakeSecrets {
 /// let mut opts = HandshakeOptions::default();
 /// opts.session_ticket_key = Some(key_set);
 /// ```
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct HandshakeOptions {
     /// Session ticket for resuming a previously established TLS session (used on client side)
@@ -1097,6 +1097,65 @@ pub struct HandshakeOptions {
     /// cert serial number is in the CRL's revoked list,
     /// `verify_crl` rejects it regardless of grace period.
     pub crl_grace_period: Duration,
+    /// PR-4.23: wall-clock timeout for the entire handshake
+    /// (from first byte read/write until the Finished
+    /// message is verified).
+    ///
+    /// Default: [`Duration::from_secs(30)`](Duration::from_secs)
+    /// — balanced between Go `crypto/tls` (15s) and
+    /// OpenSSL (≈60s, platform-dependent). Slowloris
+    /// mitigation: an attacker who opens a TCP connection
+    /// and then dribbles bytes will be terminated after
+    /// `handshake_timeout` even if the underlying TCP
+    /// read/write would otherwise block indefinitely.
+    /// The timer is wrapped around the inner handshake
+    /// future via `tokio::time::timeout`. When the
+    /// deadline expires, the handshake returns
+    /// [`TlsError::HandshakeFailed`] (which PR-4.22
+    /// metrics already classify as `ErrorCode::HandshakeFailed`,
+    /// so this PR inherits the error-code observability
+    /// for free).
+    ///
+    /// Set via
+    /// [`TlsConfig::with_handshake_timeout`](crate::TlsConfig::with_handshake_timeout).
+    /// Use [`Duration::ZERO`] to disable the timeout
+    /// (NOT recommended in production — only intended
+    /// for tests and known-trusted environments).
+    ///
+    /// Recommended values:
+    /// - default (`Duration::from_secs(30)`) — general
+    ///   production
+    /// - shorter (e.g. 5s) for fail-fast service-mesh
+    ///   sidecars behind L4 LBs that already enforce
+    ///   their own idle timeout
+    /// - longer (e.g. 120s) when the server does
+    ///   CPU-intensive work synchronously during
+    ///   handshake (e.g. HSM-backed sign operations,
+    ///   OCSP fetching from a slow CA)
+    pub handshake_timeout: Duration,
+}
+
+/// Default-construct `HandshakeOptions` matching pre-PR-4.23
+/// behavior for every field EXCEPT `handshake_timeout`,
+/// which defaults to 30s (PR-4.23 fail-fast default).
+/// Hand-written (not `#[derive(Default)]`) so that
+/// `handshake_timeout` gets a non-zero default even
+/// though [`std::time::Duration`] itself implements
+/// [`Default`] as [`Duration::ZERO`].
+impl Default for HandshakeOptions {
+    fn default() -> Self {
+        Self {
+            session_ticket: None,
+            session_ticket_key: None,
+            session_store: None,
+            crl_info: None,
+            distid_policy: None,
+            expected_uri: None,
+            session_ticket_fail_closed: false,
+            crl_grace_period: Duration::ZERO,
+            handshake_timeout: Duration::from_secs(30),
+        }
+    }
 }
 
 // ============================================================================
@@ -1522,5 +1581,67 @@ mod pr420_crl_grace_period_tests {
             !opts.crl_info.is_some(),
             "default crl_info must be None (CRL check opt-in)"
         );
+    }
+}
+
+// ============================================================================
+// PR-4.23 / P2-12: handshake_timeout tests
+// ============================================================================
+//
+// These tests pin the field default and the builder wiring
+// for the new `handshake_timeout` field. End-to-end behavior
+// (the timeout actually fires when the peer dribbles bytes)
+// is exercised in `tests/loopback.rs::loopback_handshake_timeout_triggers`.
+
+#[cfg(test)]
+mod pr423_handshake_timeout_tests {
+    use super::*;
+
+    /// PR-4.23: `HandshakeOptions::default()` must have
+    /// `handshake_timeout = 30s` (the PR-4.23 fail-fast
+    /// default). Pinning the literal here (and asserting
+    /// the *field default*, not just `> Duration::ZERO`)
+    /// guards against accidental `derive(Default)` reverts
+    /// or off-by-one tunings.
+    #[test]
+    fn default_handshake_options_has_30s_timeout() {
+        let opts = HandshakeOptions::default();
+        assert_eq!(
+            opts.handshake_timeout,
+            Duration::from_secs(30),
+            "default handshake_timeout must be 30s (PR-4.23 fail-fast default)"
+        );
+    }
+
+    /// PR-4.23: `crl_grace_period` default must remain
+    /// `Duration::ZERO` so that pre-PR-4.20 fail-fast CRL
+    /// behavior is preserved. This guards against an
+    /// accidental "every `Duration` field gets 30s" bug
+    /// introduced by the manual `impl Default`.
+    #[test]
+    fn default_handshake_options_keeps_crl_grace_zero() {
+        let opts = HandshakeOptions::default();
+        assert_eq!(
+            opts.crl_grace_period,
+            Duration::ZERO,
+            "default crl_grace_period must remain Duration::ZERO (PR-4.20 fail-fast)"
+        );
+    }
+
+    /// PR-4.23: all other `bool`/`Option` defaults must
+    /// remain what they were pre-PR-4.23 (pre-PR-4.13
+    /// fail-open, no SPIFFE ID pin, no CRL info, etc.).
+    /// Pinning these in the same test as `handshake_timeout`
+    /// lets a single regression trip a single test.
+    #[test]
+    fn default_handshake_options_other_fields_unchanged() {
+        let opts = HandshakeOptions::default();
+        assert!(!opts.session_ticket_fail_closed);
+        assert!(opts.session_ticket.is_none());
+        assert!(opts.session_ticket_key.is_none());
+        assert!(opts.session_store.is_none());
+        assert!(opts.crl_info.is_none());
+        assert!(opts.distid_policy.is_none());
+        assert!(opts.expected_uri.is_none());
     }
 }

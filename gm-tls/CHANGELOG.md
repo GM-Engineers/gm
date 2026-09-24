@@ -9,23 +9,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`gmtls_handshake_errors_total{role, code}` counter** (PR-4.22):
-  new Prometheus counter that lets operators slice handshake
-  failures by structured [`ErrorCode`] (introduced in PR-4.18).
-  Wire through:
-  - `gm_tls::metrics::record_handshake_error_code(role, code)`
-  - Emitted from `connect_gm_rust` / `accept_gm_rust` /
-    `accept_gm_rust_with_client_cert` (gm.rs wrap points) and
-    `GmTlsIncoming::with_max_concurrent` + `GmTlsConnector::call`
-    (grpc.rs paths). `code` label uses [`ErrorCode`]'s `Debug`
-    representation (`Cipher`, `HandshakeMessageParse`, `Sm2Key`,
-    `SessionTicket`, `CrlVerificationFailed`, `Kat`, etc.) so
-    dashboards can alert on differentiated subsystems
-    independently.
-- **PR-4.22 unit tests**: 4 new tests in
-  `metrics::pr422_record_handshake_error_code_tests` covering
-  variant → code mapping, Display distinctness, and
-  thread-safety.
+- **Handshake wall-clock timeout** (PR-4.23 / P2-12):
+  new `HandshakeOptions::handshake_timeout: Duration`
+  field with default **30 seconds**, plus
+  `TlsConfig::with_handshake_timeout(Duration)` builder.
+  The timeout is wrapped around the inner handshake
+  coroutine via `tokio::time::timeout`; on expiry the
+  handshake returns
+  [`TlsError::HandshakeFailed`]("handshake timeout
+  after Ns ...")`, which is automatically classified
+  as `ErrorCode::HandshakeFailed` by the PR-4.22
+  metric (`gmtls_handshake_errors_total{role, code}`
+  — see also below). Pass `Duration::ZERO` to disable
+  the timeout entirely (tests only — **not
+  recommended in production**).
+  - Slowloris-style DoS mitigation: an attacker who
+    opens a TCP connection and then dribbles bytes
+    is now terminated after `handshake_timeout`
+    even if the underlying TCP read/write would
+    otherwise block indefinitely.
+  - Default 30s balances Go `crypto/tls` (15s) and
+    OpenSSL (≈60s, platform-dependent). Operators
+    with stricter needs (service-mesh sidecars
+    behind an L4 LB) can shorten to e.g. 5s; HSM-
+    backed signers may want 120s.
+  - Wired through all three wrap points:
+    `connect_gm_rust` (`"client"` role),
+    `accept_gm_rust` and
+    `accept_gm_rust_with_client_cert` (`"server"`
+    role).
+- **PR-4.23 unit tests** (3): pin the
+  `handshake_timeout = Duration::from_secs(30)`
+  default, pin `crl_grace_period` to remain
+  `Duration::ZERO` (so the manual `impl Default`
+  doesn't accidentally bump every `Duration` field),
+  and pin the pre-PR-4.23 defaults of every other
+  `HandshakeOptions` field
+  (`mod pr423_handshake_timeout_tests` in
+  `handshake.rs`).
+- **PR-4.23 loopback integration tests**
+  (`tests/handshake_timeout.rs`, 2 tests):
+  - `pr423_accept_times_out_on_slow_client`:
+    server-side timeout fires after 1s when the
+    client sends 1 byte and stalls; asserts the
+    error message contains `"handshake timeout"`
+    and the elapsed wall-clock time is in
+    `[0.9s, 4s]`.
+  - `pr423_zero_timeout_disables_check`:
+    `Duration::ZERO` does NOT cause the handshake
+    to fail when both sides complete normally.
+
+### Changed
+
+- **gm-tls bumped to 0.2.12** (from 0.2.11); the new
+  `with_handshake_timeout` builder and the
+  `HandshakeOptions::handshake_timeout` field are
+  observable. No public function signatures were
+  broken. **Behavioral change**: pre-PR-4.23 the
+  handshake had no wall-clock timeout (Slowloris-
+  vulnerable); with the 0.2.12 default, the
+  handshake now terminates after 30s of inactivity
+  on either side. Operators that rely on longer
+  timeouts should call
+  `with_handshake_timeout(Duration::from_secs(N))`
+  with `N > 30` at config-build time, or
+  `Duration::ZERO` for the pre-PR-4.23 unbounded
+  behavior (tests only).
+- `HandshakeOptions` switched from `#[derive(Default)]`
+  to a hand-written `impl Default` so that the new
+  `handshake_timeout` field gets a non-zero
+  default (the manual impl preserves every other
+  field's pre-PR-4.23 default byte-for-byte).
 
 ### Changed
 
