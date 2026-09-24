@@ -187,6 +187,7 @@ use gm_crypto::x509::verify::{DistidPolicy, OwnedCert};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 use subtle::ConstantTimeEq;
 use time::OffsetDateTime;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
@@ -204,6 +205,34 @@ mod messages;
 pub mod pms;
 mod sm9_helpers;
 pub use pms::*;
+
+// PR-4.24: wrap `inner` in `tokio::time::timeout` if
+// `timeout` is non-zero. Returns a
+// `TlcpError::HandshakeFailed("handshake timeout after
+// Ns ...")` error when the deadline expires. Pass
+// `Duration::ZERO` to disable (tests only). Mirror of the
+// same helper in `gm-tls/src/gm.rs` (PR-4.23).
+async fn with_handshake_timeout<F, T>(
+    timeout: Duration,
+    role: &str,
+    inner: F,
+) -> Result<T, TlcpError>
+where
+    F: std::future::Future<Output = Result<T, TlcpError>>,
+{
+    if timeout.is_zero() {
+        return inner.await;
+    }
+    match tokio::time::timeout(timeout, inner).await {
+        Ok(result) => result,
+        Err(_elapsed) => Err(TlcpError::HandshakeFailed(format!(
+            "handshake timeout after {}s ({})",
+            timeout.as_secs(),
+            role,
+        ))),
+    }
+}
+
 // R-5: RSA helpers (RSA-PKCS1-v1_5 sign/verify + RSAES-PKCS1-v1_5
 // encrypt/decrypt). Exposed as a public module so integration tests
 // (and downstream crates building on gm-tlcp's RSA suites) can
@@ -1533,6 +1562,23 @@ pub struct TlcpConnector {
     /// Set via [`TlcpConnector::with_distid_policy`] for OpenSSL 3.x
     /// interop or other non-GM/T-standard signers.
     distid_policy: Option<DistidPolicy>,
+    /// PR-4.24: wall-clock timeout for the TLCP client
+    /// handshake. Default: 30 seconds (mirror of gm-tls
+    /// PR-4.23). Set via
+    /// [`TlcpConnector::with_handshake_timeout`]. Pass
+    /// `Duration::ZERO` to disable (tests only).
+    ///
+    /// Slowloris mitigation: an attacker who opens a TCP
+    /// connection and then dribbles bytes will be
+    /// terminated after `handshake_timeout` even if the
+    /// underlying TCP read/write would otherwise block
+    /// indefinitely. On expiry the handshake returns
+    /// [`TlcpError::HandshakeFailed`]("handshake timeout
+    /// after Ns ..."), which the PR-4.22 metrics
+    /// (`gmtlcp_handshake_errors_total{role, code}`)
+    /// classify as `TlcpErrorCode::HandshakeFailed` for
+    /// free.
+    handshake_timeout: Duration,
 }
 impl Default for TlcpConnector {
     fn default() -> Self {
@@ -1578,6 +1624,7 @@ impl TlcpConnector {
             server_crls: Vec::new(),
             expected_uri: None,
             distid_policy: None,
+            handshake_timeout: Duration::from_secs(30),
         }
     }
     /// Create a connector with a shared session cache for resumption.
@@ -1700,16 +1747,23 @@ impl TlcpConnector {
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
-        let result = if self.server_sign_pubkey.is_some() {
-            self.connect_with_certs(transport).await
-        } else {
-            #[allow(deprecated)]
-            connect_tlcp(transport, &self.session_cache).await
+        let timeout = self.handshake_timeout;
+        let inner = async {
+            if self.server_sign_pubkey.is_some() {
+                self.connect_with_certs(transport).await
+            } else {
+                #[allow(deprecated)]
+                connect_tlcp(transport, &self.session_cache).await
+            }
         };
+        let result = with_handshake_timeout(timeout, "client", inner).await;
         // PR-4.22: structured error code label for
         // `gmtlcp_handshake_errors_total{role="client",code=...}`.
         // Emitted once per call regardless of which inner path
-        // produced the error.
+        // produced the error. PR-4.24: timeout errors flow
+        // through here as `TlcpErrorCode::HandshakeFailed`,
+        // so dashboards see Slowloris-style DoS attempts as
+        // `code="HandshakeFailed"`.
         if let Err(ref e) = result {
             crate::metrics::record_handshake_error_code("client", e.code());
         }
@@ -1944,6 +1998,20 @@ impl TlcpConnector {
     /// OpenSSL 3.x interop (which defaults to the empty distid).
     pub fn with_distid_policy(mut self, policy: DistidPolicy) -> Self {
         self.distid_policy = Some(policy);
+        self
+    }
+
+    /// PR-4.24: set the wall-clock timeout for the TLCP
+    /// client handshake. The default (when this builder is
+    /// not called) is 30 seconds. See
+    /// [`handshake_timeout`](Self::handshake_timeout) for
+    /// the full contract.
+    ///
+    /// Passing [`Duration::ZERO`] disables the timeout
+    /// entirely (NOT recommended in production — only
+    /// intended for tests).
+    pub fn with_handshake_timeout(mut self, timeout: Duration) -> Self {
+        self.handshake_timeout = timeout;
         self
     }
 
@@ -3394,6 +3462,16 @@ pub struct TlcpAcceptor {
     /// Set via [`TlcpAcceptor::with_distid_policy`] for OpenSSL 3.x
     /// interop or other non-GM/T-standard signers.
     distid_policy: Option<DistidPolicy>,
+    /// PR-4.24: wall-clock timeout for the TLCP server
+    /// handshake. Default: 30 seconds (mirror of gm-tls
+    /// PR-4.23). Set via
+    /// [`TlcpAcceptor::with_handshake_timeout`]. Pass
+    /// `Duration::ZERO` to disable (tests only).
+    ///
+    /// See [`TlcpConnector::handshake_timeout`] for the
+    /// full contract (Slowloris mitigation, metrics
+    /// integration via PR-4.22, etc.).
+    handshake_timeout: Duration,
 }
 impl Default for TlcpAcceptor {
     fn default() -> Self {
@@ -3423,6 +3501,7 @@ impl TlcpAcceptor {
             client_ca_anchors: None,
             client_crls: Vec::new(),
             distid_policy: None,
+            handshake_timeout: Duration::from_secs(30),
         }
     }
     /// Create an acceptor with a shared session cache for resumption.
@@ -3651,6 +3730,20 @@ impl TlcpAcceptor {
         self
     }
 
+    /// PR-4.24: set the wall-clock timeout for the TLCP
+    /// server handshake. The default (when this builder
+    /// is not called) is 30 seconds. See
+    /// [`handshake_timeout`](Self::handshake_timeout) for
+    /// the full contract.
+    ///
+    /// Passing [`Duration::ZERO`] disables the timeout
+    /// entirely (NOT recommended in production — only
+    /// intended for tests).
+    pub fn with_handshake_timeout(mut self, timeout: Duration) -> Self {
+        self.handshake_timeout = timeout;
+        self
+    }
+
     /// Accept a TLCP client connection over the given transport.
     ///
     /// Performs the full handshake and returns an encrypted `TlcpStream`.
@@ -3668,20 +3761,26 @@ impl TlcpAcceptor {
     {
         // R-5: also accept if RSA-only certs are configured (no SM2 dual
         // cert needed for the 4 RSA suites E019/E01C/E059/E05A).
-        let result = if (self.sign_cert.is_some() && self.sign_key.is_some())
-            || (self.rsa_cert.is_some()
-                && self.rsa_signer.is_some()
-                && self.rsa_decryptor.is_some())
-        {
-            self.accept_with_certs(transport).await
-        } else {
-            #[allow(deprecated)]
-            accept_tlcp(transport, &self.session_cache).await
+        let timeout = self.handshake_timeout;
+        let inner = async {
+            if (self.sign_cert.is_some() && self.sign_key.is_some())
+                || (self.rsa_cert.is_some()
+                    && self.rsa_signer.is_some()
+                    && self.rsa_decryptor.is_some())
+            {
+                self.accept_with_certs(transport).await
+            } else {
+                #[allow(deprecated)]
+                accept_tlcp(transport, &self.session_cache).await
+            }
         };
+        let result = with_handshake_timeout(timeout, "server", inner).await;
         // PR-4.22: structured error code label for
         // `gmtlcp_handshake_errors_total{role="server",code=...}`.
         // Emitted once per call regardless of which inner path
-        // produced the error.
+        // produced the error. PR-4.24: timeout errors flow
+        // through here as `TlcpErrorCode::HandshakeFailed`
+        // for Slowloris detection.
         if let Err(ref e) = result {
             crate::metrics::record_handshake_error_code("server", e.code());
         }
@@ -6460,5 +6559,59 @@ mod tests {
             .expect("IBC CKE parse");
         let ct = parsed.as_ibc_ciphertext().expect("IBC variant");
         assert_eq!(ct, ciphertext.as_slice());
+    }
+
+    // ============================================================================
+    // PR-4.24 / P2-12: handshake_timeout tests
+    // ============================================================================
+    //
+    // Pin the new `handshake_timeout` field default (30s, mirror of
+    // gm-tls PR-4.23) and verify the `with_handshake_timeout`
+    // builder propagates. End-to-end behavior (the timeout actually
+    // fires when the peer dribbles bytes) is exercised in
+    // `tests/handshake_timeout.rs` via `tokio::io::duplex`.
+
+    /// PR-4.24: `TlcpConnector::new()` must have
+    /// `handshake_timeout = 30s` (the PR-4.24 fail-fast
+    /// default, mirror of gm-tls PR-4.23).
+    #[test]
+    fn default_tlcp_connector_has_30s_timeout() {
+        let c = TlcpConnector::new();
+        assert_eq!(
+            c.handshake_timeout,
+            Duration::from_secs(30),
+            "default TlcpConnector handshake_timeout must be 30s (PR-4.24)"
+        );
+    }
+
+    /// PR-4.24: `TlcpAcceptor::new()` must have
+    /// `handshake_timeout = 30s`.
+    #[test]
+    fn default_tlcp_acceptor_has_30s_timeout() {
+        let a = TlcpAcceptor::new();
+        assert_eq!(
+            a.handshake_timeout,
+            Duration::from_secs(30),
+            "default TlcpAcceptor handshake_timeout must be 30s (PR-4.24)"
+        );
+    }
+
+    /// PR-4.24: `with_handshake_timeout` builder propagates
+    /// the supplied value verbatim (incl. `ZERO`).
+    #[test]
+    fn tlcp_connector_with_handshake_timeout_propagates() {
+        let c = TlcpConnector::new().with_handshake_timeout(Duration::from_secs(7));
+        assert_eq!(c.handshake_timeout, Duration::from_secs(7));
+        let c0 = TlcpConnector::new().with_handshake_timeout(Duration::ZERO);
+        assert_eq!(c0.handshake_timeout, Duration::ZERO);
+    }
+
+    /// PR-4.24: acceptor-side builder propagates.
+    #[test]
+    fn tlcp_acceptor_with_handshake_timeout_propagates() {
+        let a = TlcpAcceptor::new().with_handshake_timeout(Duration::from_secs(11));
+        assert_eq!(a.handshake_timeout, Duration::from_secs(11));
+        let a0 = TlcpAcceptor::new().with_handshake_timeout(Duration::ZERO);
+        assert_eq!(a0.handshake_timeout, Duration::ZERO);
     }
 }

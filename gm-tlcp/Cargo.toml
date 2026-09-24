@@ -1,7 +1,7 @@
 [package]
 authors = ["Eric Zhang"]
 name = "gm-tlcp"
-version = "0.7.2"
+version = "0.7.3"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "TLCP (Transport Layer Cryptographic Protocol, GB/T 38636-2020) core library in pure Rust with SM2/SM3/SM4 support"
@@ -79,7 +79,7 @@ sm3 = "0.5"  # for digest::Digest trait impl on Sm3Digest (R-5 helper)
 digest = "0.10"  # matches sm3 0.5's transitive dep; used for Sm3Core block API
 
 # 异步运行时（handshake / 流 I/O）
-tokio = { version = "1", features = ["io-util", "net", "sync"] }
+tokio = { version = "1", features = ["io-util", "net", "sync", "time"] }
 
 # 错误定义
 thiserror = "2"

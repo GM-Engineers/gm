@@ -9,6 +9,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **TLCP handshake wall-clock timeout** (PR-4.24 / P2-12):
+  new `TlcpConnector::handshake_timeout: Duration` and
+  `TlcpAcceptor::handshake_timeout: Duration` fields with
+  default **30 seconds** (mirror of gm-tls PR-4.23), plus
+  `with_handshake_timeout(Duration)` builders on both.
+  The timeout is wrapped around the inner handshake
+  coroutine via `tokio::time::timeout`; on expiry the
+  handshake returns
+  [`TlcpError::HandshakeFailed`]("handshake timeout
+  after Ns ..."), which is automatically classified as
+  `TlcpErrorCode::HandshakeFailed` by the PR-4.22
+  metric (`gmtlcp_handshake_errors_total{role, code}`
+  — see also below). Pass `Duration::ZERO` to
+  disable the timeout entirely (tests only — **not
+  recommended in production**).
+  - Slowloris-style DoS mitigation: an attacker who
+    opens a TCP connection and then dribbles bytes
+    is now terminated after `handshake_timeout`
+    even if the underlying TCP read/write would
+    otherwise block indefinitely.
+  - Wired through the top-level entry points
+    `TlcpConnector::connect` (role "client") and
+    `TlcpAcceptor::accept` (role "server"). Inner
+    paths `connect_with_certs` / `accept_with_certs`
+    remain unwrapped (they are reached only through
+    the outer entry points, which already emit
+    PR-4.22 metrics).
+  - tokio `time` feature is now required: the
+    `tokio = { version = "1", features = ["io-util",
+    "net", "sync", "time"] }` line in `Cargo.toml`
+    adds the `time` feature.
+- **PR-4.24 unit tests** (4): pin the
+  `handshake_timeout = Duration::from_secs(30)`
+  default on both `TlcpConnector` and `TlcpAcceptor`,
+  and verify the `with_handshake_timeout` builder
+  propagates the supplied value (incl. `ZERO`)
+  (mod `tests::pr424_handshake_timeout_*` in
+  `tlcp/mod.rs`).
+- **PR-4.24 loopback integration tests**
+  (`tests/handshake_timeout.rs`, 2 tests):
+  - `pr424_accept_times_out_on_slow_client`:
+    server-side timeout fires after 1s when the
+    client sends 1 byte and stalls; asserts the
+    error message contains `"handshake timeout"`
+    and the elapsed wall-clock time is in
+    `[0.9s, 4s]`.
+  - `pr424_zero_timeout_disables_check`:
+    `Duration::ZERO` does NOT cause the handshake
+    to fail when both sides complete normally.
+    Configures full GMCA mTLS dual-cert chain to
+    exercise the production code path.
+
+### Changed
+
+- **gm-tlcp bumped to 0.7.3** (from 0.7.2); the new
+  `with_handshake_timeout` builders and the
+  `handshake_timeout` fields on both `TlcpConnector`
+  and `TlcpAcceptor` are observable. No public
+  function signatures were broken. **Behavioral
+  change**: pre-PR-4.24 the TLCP handshake had no
+  wall-clock timeout (Slowloris-vulnerable); with
+  the 0.7.3 default, the handshake now terminates
+  after 30s of inactivity on either side. Operators
+  that rely on longer timeouts should call
+  `with_handshake_timeout(Duration::from_secs(N))`
+  with `N > 30` at config-build time, or
+  `Duration::ZERO` for the pre-PR-4.24 unbounded
+  behavior (tests only).
+- **Dependency change**: `tokio = { version = "1",
+  features = ["io-util", "net", "sync", "time"] }`
+  — adds the `time` feature required by the new
+  `tokio::time::timeout` wrap. No version bump on
+  the `tokio` crate itself.
+
+### Added (prior)
+
 - **`gmtlcp_handshake_errors_total{role, code}` counter** (PR-4.22):
   new Prometheus counter that lets operators slice TLCP handshake
   failures by structured [`TlcpErrorCode`] (introduced in PR-4.21).
