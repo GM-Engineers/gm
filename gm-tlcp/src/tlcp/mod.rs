@@ -2003,9 +2003,8 @@ impl TlcpConnector {
 
     /// PR-4.24: set the wall-clock timeout for the TLCP
     /// client handshake. The default (when this builder is
-    /// not called) is 30 seconds. See
-    /// [`handshake_timeout`](Self::handshake_timeout) for
-    /// the full contract.
+    /// not called) is 30 seconds. See the
+    /// `handshake_timeout` field for the full contract.
     ///
     /// Passing [`Duration::ZERO`] disables the timeout
     /// entirely (NOT recommended in production — only
@@ -3468,7 +3467,8 @@ pub struct TlcpAcceptor {
     /// [`TlcpAcceptor::with_handshake_timeout`]. Pass
     /// `Duration::ZERO` to disable (tests only).
     ///
-    /// See [`TlcpConnector::handshake_timeout`] for the
+    /// See [`TlcpConnector`](super::TlcpConnector)'s
+    /// `handshake_timeout` field for the
     /// full contract (Slowloris mitigation, metrics
     /// integration via PR-4.22, etc.).
     handshake_timeout: Duration,
@@ -3732,9 +3732,8 @@ impl TlcpAcceptor {
 
     /// PR-4.24: set the wall-clock timeout for the TLCP
     /// server handshake. The default (when this builder
-    /// is not called) is 30 seconds. See
-    /// [`handshake_timeout`](Self::handshake_timeout) for
-    /// the full contract.
+    /// is not called) is 30 seconds. See the
+    /// `handshake_timeout` field for the full contract.
     ///
     /// Passing [`Duration::ZERO`] disables the timeout
     /// entirely (NOT recommended in production — only
