@@ -129,8 +129,8 @@ pub fn record_handshake_error_code(role: &str, code: ErrorCode) {
 /// true RAII guard. The timer starts at construction and
 /// **automatically records on drop** with `result="error"`
 /// (the conservative default — every handshake that did
-/// not explicitly call [`finish`] with `result="success"`
-/// counts as an error in metrics).
+/// not explicitly call [`HandshakeTimer::finish`] with
+/// `result="success"` counts as an error in metrics).
 ///
 /// Before PR-4.25, the caller had to invoke
 /// `timer.finish("success")` **at every** control-flow exit
@@ -144,10 +144,11 @@ pub fn record_handshake_error_code(role: &str, code: ErrorCode) {
 /// `finish` — still produces a single, idempotent
 /// `result="error"` record.
 ///
-/// Explicit calls to [`finish`] (with `"success"` or
-/// `"error"`) continue to work and take precedence over
-/// the drop default — the guard is idempotent on the
-/// first record, regardless of which path wins.
+/// Explicit calls to [`HandshakeTimer::finish`] (with
+/// `"success"` or `"error"`) continue to work and take
+/// precedence over the drop default — the guard is
+/// idempotent on the first record, regardless of which
+/// path wins.
 pub struct HandshakeTimer {
     role: String,
     start: Instant,
@@ -185,7 +186,8 @@ impl HandshakeTimer {
     }
 
     /// Emit the counter + histogram pair. Pulled out so
-    /// [`finish`] and [`Drop`] share one emission site.
+    /// [`HandshakeTimer::finish`] and `Drop` share one
+    /// emission site.
     fn record(role: &str, result: &str, elapsed_secs: f64) {
         counter!(
             "gmtls_handshakes_total",
