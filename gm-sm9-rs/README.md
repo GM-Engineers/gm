@@ -44,26 +44,28 @@ gm-sm9-rs/
 
 ```rust
 use gm_sm9_rs::{Signer, Verifier, Encryptor, Decryptor, SignMasterKey, EncMasterKey};
-use rand::thread_rng;
+
+// rand 0.10: `thread_rng` 已重命名为 `rng`
+let mut rng = rand::rng();
 
 // 生成签名主密钥
-let sign_master = SignMasterKey::generate(&mut thread_rng())?;
+let sign_master = SignMasterKey::generate(&mut rng)?;
 
 // 派生用户签名密钥
 let sign_key = sign_master.extract_key(b"user@example.com")?;
 
 // 签名
 let signer = Signer::new(sign_key);
-let signature = signer.sign(b"message", &mut thread_rng())?;
+let signature = signer.sign(b"message", &mut rng)?;
 
 // 验签
 let verifier = Verifier::new(b"user@example.com", &sign_master.ppubs);
 assert!(verifier.verify(b"message", &signature).unwrap());
 
 // 加密
-let enc_master = EncMasterKey::generate(&mut thread_rng())?;
+let enc_master = EncMasterKey::generate(&mut rng)?;
 let encryptor = Encryptor::new(b"recipient@example.com", &enc_master.ppube);
-let ciphertext = encryptor.encrypt(b"secret message", &mut thread_rng())?;
+let ciphertext = encryptor.encrypt(b"secret message", &mut rng)?;
 
 // 解密
 let dec_key = enc_master.extract_key(b"recipient@example.com")?;

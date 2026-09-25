@@ -47,9 +47,9 @@ The service implements interfaces defined in `proto/ca.proto` (proto package: `g
 - `GetCertificate` — Query certificate
 - `GetCrl` — Get CRL
 
-## Library API (v0.2.0)
+## Library API (v0.4.x)
 
-For Rust library use (`gm-ca = "0.2"`), the core types live in the
+For Rust library use (`gm-ca = "0.4"`), the core types live in the
 `gm_ca::cert` and `gm_ca::cert_profile` modules:
 
 ```rust
@@ -71,7 +71,7 @@ let (_, leaf_pem) = ca_signer.sign_csr_with_profile(&csr_pem, 365, &profile)?;
 Enable the `tlcp-profiles` feature to access the 6 TLCP presets:
 
 ```toml
-gm-ca = { version = "0.2", features = ["tlcp-profiles", "rsa"] }
+gm-ca = { version = "0.4", features = ["tlcp-profiles", "rsa"] }
 ```
 
 ```rust

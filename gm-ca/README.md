@@ -45,9 +45,9 @@ cargo run --bin gm-ca-server
 - `GetCertificate` — 查询证书
 - `GetCrl` — 获取 CRL
 
-## 库 API (v0.2.0)
+## 库 API (v0.4.x)
 
-作为 Rust 库使用 (`gm-ca = "0.2"`) 时,核心类型在 `gm_ca::cert` 与
+作为 Rust 库使用 (`gm-ca = "0.4"`) 时,核心类型在 `gm_ca::cert` 与
 `gm_ca::cert_profile` 模块:
 
 ```rust
@@ -69,7 +69,7 @@ let (_, leaf_pem) = ca_signer.sign_csr_with_profile(&csr_pem, 365, &profile)?;
 启用 `tlcp-profiles` feature 后,可使用 6 个 TLCP 专用 preset:
 
 ```toml
-gm-ca = { version = "0.2", features = ["tlcp-profiles", "rsa"] }
+gm-ca = { version = "0.4", features = ["tlcp-profiles", "rsa"] }
 ```
 
 ```rust

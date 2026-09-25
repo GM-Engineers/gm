@@ -22,7 +22,7 @@
 
 ```toml
 [dependencies]
-gm-crypto = "0.1"
+gm-crypto = "0.3"
 ```
 
 ```rust

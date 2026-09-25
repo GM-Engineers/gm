@@ -5,6 +5,40 @@ All notable changes to the `gm-crypto` crate will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **RFC 5280 §4.2 unknown critical extension rejection** (PR-4.8 / P2-1):
+  added `KNOWN_X509_EXTENSIONS` constant + `check_unknown_critical_extensions`
+  helper in `gm_crypto::x509::verify`. The helper is wired into every
+  verification entry point (`validate_cert_pem`, `validate_hostname_only`,
+  `validate_uri_only`, `verify_cert_chain_sm2_chain_with_distid_policy`,
+  plus its delegates `verify_against_anchors` and
+  `verify_cert_chain_sm2_chain`). Certificates that carry a
+  `critical = TRUE` extension whose OID is not in the known set are
+  rejected with a clear diagnostic naming the offending OID. Pre-PR-4.8
+  the verifier ignored all unknown critical extensions, violating
+  RFC 5280 §4.2 ("SHOULD reject"). Added 7 integration tests in
+  `tests/x509_unknown_critical_ext.rs` covering the rejection path,
+  the non-critical pass-through, the OID-named error message, and
+  the static invariant that all RFC 5280 §4.2 baseline OIDs are in
+  `KNOWN_X509_EXTENSIONS`. `nameConstraints` and `policyConstraints`
+  are accepted (pass the "is recognized" gate) but their semantic
+  enforcement is deferred to a follow-up PR per master plan P2-1
+  路线图项. PR-4.8 also bumps the version to 0.3.8 (patch; new
+  pub API is additive).
+
+### Added
+
+- **`OwnedCert::der_bytes(&self) -> &[u8]`** (PR-2.4): borrow the raw
+  DER bytes backing an `OwnedCert`. Returned for callers that need
+  to re-feed the cert into a verification helper (e.g.
+  `validate_uri_only` for SPIFFE ID matching after the chain walk
+  succeeds). Closes the loop on the URI-SAN path — the PR-2.3
+  `validate_uri_only` entry point needs the leaf DER, which was
+  previously only available via the private `der` field.
+
 ## [0.3.7] - 2026-09-23
 
 ### Added
@@ -109,40 +143,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `x509` module: doc comment expanded to mention PKCS#10 CSR generation
   alongside the existing cert parsing helpers.
-
-## [Unreleased]
-
-### Fixed
-
-- **RFC 5280 §4.2 unknown critical extension rejection** (PR-4.8 / P2-1):
-  added `KNOWN_X509_EXTENSIONS` constant + `check_unknown_critical_extensions`
-  helper in `gm_crypto::x509::verify`. The helper is wired into every
-  verification entry point (`validate_cert_pem`, `validate_hostname_only`,
-  `validate_uri_only`, `verify_cert_chain_sm2_chain_with_distid_policy`,
-  plus its delegates `verify_against_anchors` and
-  `verify_cert_chain_sm2_chain`). Certificates that carry a
-  `critical = TRUE` extension whose OID is not in the known set are
-  rejected with a clear diagnostic naming the offending OID. Pre-PR-4.8
-  the verifier ignored all unknown critical extensions, violating
-  RFC 5280 §4.2 ("SHOULD reject"). Added 7 integration tests in
-  `tests/x509_unknown_critical_ext.rs` covering the rejection path,
-  the non-critical pass-through, the OID-named error message, and
-  the static invariant that all RFC 5280 §4.2 baseline OIDs are in
-  `KNOWN_X509_EXTENSIONS`. `nameConstraints` and `policyConstraints`
-  are accepted (pass the "is recognized" gate) but their semantic
-  enforcement is deferred to a follow-up PR per master plan P2-1
-  路线图项. PR-4.8 also bumps the version to 0.3.8 (patch; new
-  pub API is additive).
-
-### Added
-
-- **`OwnedCert::der_bytes(&self) -> &[u8]`** (PR-2.4): borrow the raw
-  DER bytes backing an `OwnedCert`. Returned for callers that need
-  to re-feed the cert into a verification helper (e.g.
-  `validate_uri_only` for SPIFFE ID matching after the chain walk
-  succeeds). Closes the loop on the URI-SAN path — the PR-2.3
-  `validate_uri_only` entry point needs the leaf DER, which was
-  previously only available via the private `der` field.
 
 ## [0.3.6] - 2026-09-22
 

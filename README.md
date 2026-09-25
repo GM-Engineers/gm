@@ -49,7 +49,7 @@ gm/                          # Workspace root
 ```toml
 [dependencies]
 gm-crypto = "0.3"
-gm-tlcp   = "0.6"
+gm-tlcp   = "0.7"
 gm-sm9-rs = "0.1"
 ```
 

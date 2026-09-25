@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> **Status**: The entries below cover gm-tls **0.2.3 → 0.2.14** (PR-4.6 /
+> 4.9 / 4.10 / 4.13 / 4.16 / 4.18 / 4.20 / 4.22 / 4.23 / 4.25 / 4.28). Each
+> version bump is annotated inline (`gm-tls bumped to 0.2.X (from 0.2.Y)`).
+> The block is intentionally held under a single `[Unreleased]` heading
+> because none of these versions have been published or tagged yet; once
+> a `gm-tls-v0.2.X` annotated tag is created, the matching entries will
+> be promoted into their own `## [0.2.X] - YYYY-MM-DD` sections following
+> the existing `[0.2.2]` precedent.
+
 ### Added
 
 - **Structured `gmtls_cert_verification_errors_total{code}`**

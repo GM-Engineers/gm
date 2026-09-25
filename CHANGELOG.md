@@ -4,26 +4,70 @@ All notable changes to the GM cryptographic library suite.
 
 ## [Unreleased]
 
-### Added
+> Cross-cutting summary only. Full per-PR detail lives in the
+> subcrate CHANGELOGs (`gm-crypto/CHANGELOG.md`,
+> `gm-tls/CHANGELOG.md`, `gm-tlcp/CHANGELOG.md`, `gm-ca/CHANGELOG.md`).
+>
+> Cargo.toml versions are ahead of crates.io: the PR-4.x bumps
+> below are committed on `main` but **no annotated `*-vX.Y.Z` tag
+> has been cut** since the Phase J coordinated release.
+>
+> | Crate | Cargo.toml | Latest crates.io tag |
+> |-------|------------|----------------------|
+> | `gm-tls` | 0.2.14 | `gm-tls-v0.2.2` |
+> | `gm-tlcp` | 0.7.4 | `gm-tlcp-v0.6.6` |
+> | `gm-ca` | 0.4.2 | (Phase J release) |
+> | `gm-crypto` | 0.3.8 | (Phase J release) |
+
+### Security hardening
+
+- **`gm-tls` PR-4.6** — `GmTlsIncoming::local_addr` no longer a stub; tonic middleware can read bound address.
+- **`gm-crypto` PR-4.8 / P2-1** — RFC 5280 §4.2 unknown critical extension rejection (`KNOWN_X509_EXTENSIONS` + `check_unknown_critical_extensions`).
+- **`gm-ca` PR-4.12 / P2-7** — per-caller (peer IP) rate limiter; one misbehaving client no longer locks out everyone.
+- **`gm-tls` PR-4.13 / P2-4** — opt-in session-ticket fail-closed mode (default remains RFC 5077 fail-open).
+- **`gm-tls` PR-4.20 / P2-11** — opt-in CRL grace period (default `Duration::ZERO`).
+
+### Typed error surface
+
+- **`gm-tls` PR-4.16 + PR-4.18** — typed `TlsError` variants: `SessionTicketInvalid` / `Expired` / `Replay`, `CipherError`, `HandshakeMessageParse`, `Sm2KeyError`, `KatFailed`.
+- **`gm-tlcp` PR-4.21** — typed `TlcpError` variants + `TlcpErrorCode` enum (13 variants).
+- **`gm-ca` PR-4.27** — typed `CaErrorCode` enum (7 variants).
+
+### Observability (Prometheus)
+
+- **`gm-tls` PR-4.10** — `gmtls_handshakes_total{result="error"}` wired through tonic gRPC layer.
+- **`gm-tls` PR-4.22** — `gmtls_handshake_errors_total{role, code}` structured labels.
+- **`gm-tls` PR-4.25** — RAII `HandshakeTimer` guard (Drop fires `result="error"`).
+- **`gm-tls` PR-4.28** — `gmtls_cert_verification_errors_total{code}`.
+- **`gm-tlcp` PR-4.22 / PR-4.26** — TLCP-side mirror metrics + RAII timer.
+- **`gm-ca` PR-4.27** — `gmca_errors_total{code}`.
+
+### Handshake resilience
+
+- **`gm-tls` PR-4.23 / P2-12** — wall-clock `handshake_timeout` (default 30 s; Slowloris mitigation).
+- **`gm-tlcp` PR-4.24 / P2-12** — TLCP-side mirror, both connector and acceptor.
+
+### Primitive + API additions
+
+- **`gm-crypto` PR-4.3 / P1-2** — explicit `deterministic_sign` / `randomized_sign` SM2 APIs.
+- **`gm-crypto` PR-2.4** — `OwnedCert::der_bytes()` for SPIFFE ID verification loop.
+- **`gm-tls` / `gm-tlcp` PR-2.4** — `with_expected_uri(String)` (SPIFFE) + `with_distid_policy(DistidPolicy)` (OpenSSL 3.x interop).
+- **`gm-tls` PR-4.9 / P2-2 + P2-5** — `GmTlsConnector` URI host+port resolution (closes silent-fallback + IPv6 bug).
+- **`gm-ca` PR-4.2 / P1-1** — configurable mTLS via `GRPC_TLS_REQUIRE_CLIENT_AUTH`.
+
+### Dependencies
+
+- `gm-crypto` requires RustCrypto `rsa` 0.9 / `sha2` 0.10 / `sha1` 0.10 (versions synced with gm-tlcp 0.7.x).
 
 ## [0.6.5 / 0.3.2 / 0.2.1] - 2026-09-18 (Phase J — RFC 5280 §5 CRL revocation)
 
 3-crate coordinated release closing the 2026-09-17 cert-verification
-plan (Phases B/C/D/D-2/E/F/G/H/I/J). gm-tlcp PR #29 merged after
-9/9 GitHub Actions checks green (Rustfmt / Clippy / Doc Check /
-Build Fuzz Targets / Test Suite / GmSSL Interop / Security Audit /
-Generate SBOM / publish-guard / gm-tlcp × GmSSL TLCP Interop).
-All three crates pushed to GitHub / Gitee / GitCode and published
-to crates.io in the canonical dependency order:
+plan (Phases B/C/D/D-2/E/F/G/H/I/J). All three crates pushed to
+crates.io in canonical dependency order:
 
-  1. gm-crypto 0.3.2 (440.8 KiB / 109.0 KiB compressed)
-  2. gm-ca     0.2.1 (337.3 KiB /  87.4 KiB compressed)
-  3. gm-tlcp   0.6.5 (837.7 KiB / 215.7 KiB compressed)
-
-Annotated tags `gm-crypto-v0.3.2` / `gm-ca-v0.2.1` / `gm-tlcp-v0.6.5`
-created on local main, force-pushed to all three remotes so they
-point to the latest commit (`77abe92`) which includes the
-post-publish dependency relaxation follow-up commit.
+  1. gm-crypto 0.3.2
+  2. gm-ca     0.2.1
+  3. gm-tlcp   0.6.5
 
 ### gm-tlcp surface change (Phase J)
 
@@ -59,37 +103,13 @@ Both fixes are byte-level correctness improvements, not behavior
 changes — anyone depending on the previous output was depending on
 broken RFC 5280 §5 encoding.
 
-### Surprises caught during CI
-
-Phase H commit `ac7c93b` extended `verify_cert_chain_sm2_chain`
-with the new `role: Option<CertRole>` parameter but did not update
-`fuzz_targets/cert_parse.rs`, causing the `Build Fuzz Targets` job
-to fail with E0061 ever since Phase H shipped (Sep 12). Fixed in
-a separate commit `20c1cd2` (`fix(gm-tls/fuzz): pass CertRole to
-verify_cert_chain_sm2_chain`) before the Phase J merge.
-
-### crates.io publish dependency cycle
-
-gm-crypto 0.3.2's dev-dep on gm-ca `^0.2.1` and gm-ca 0.2.1's
-runtime dep on gm-crypto `^0.3.2` form a chicken-and-egg cycle.
-Resolution: temporarily relax gm-crypto's dev-dep on gm-ca to
-`^0.2` (matches existing gm-ca 0.2.0 on crates.io). This lets
-gm-crypto 0.3.2 publish first; gm-ca 0.2.1 follows; gm-tlcp 0.6.5
-follows last (deps on both). The relaxation is committed as a
-follow-up on main and will be tightened back to `^0.2.1` in the
-next release cycle, now that 0.2.1 is on the index.
-
 ### Verification
 
-- `cargo build --workspace --tests`: ✅
-- `cargo test --workspace --features tlcp-profiles`: ✅ 204 passed
-- `cargo test -p gm-crypto`: ✅ 181 passed (no regressions)
-- `cargo test -p gm-ca`: ✅ 34 passed (no regressions)
-- `cargo fmt --check`: ✅ clean
-- `cargo clippy --workspace --all-features -- -D warnings`: ✅ clean
-- GitHub Actions CI on PR #29: ✅ 9/9 checks pass
-- `cargo deny check licenses`: ✅ (advisory-db fetch failed due
-  to sandbox network restriction; unrelated to this release)
+- `cargo test --workspace --features tlcp-profiles`: 204 passed
+- `cargo test -p gm-crypto`: 181 passed (no regressions)
+- `cargo test -p gm-ca`: 34 passed (no regressions)
+- `cargo fmt --check` and `cargo clippy --workspace --all-features -- -D warnings`: clean
+- GitHub Actions CI on PR #29: 9/9 checks pass
 
 #### `gm-crypto` 0.3.1 (Phase 3 / post-release)
 

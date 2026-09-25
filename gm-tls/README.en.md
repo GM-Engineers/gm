@@ -91,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 During `v0.x`, maintainers will try to keep the following APIs stable, but reserve the right to adjust signatures or rename items when necessary.
 
-**Current version**: v0.2.1
+**Current version**: v0.2.14
 
 ### Quasi-stable API (best-effort compatibility within v0.x)
 

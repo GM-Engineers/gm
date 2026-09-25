@@ -646,8 +646,6 @@ the SM2 cert slot.
 3 Major resolved, 0 Major blocked, 6 Minor resolved, 0 Minor blocked,
 2 Doc resolved, 0 Doc blocked, **1 External-Upstream-Blocker (F4)**.
 
-## [0.6.4] - 2026-09-11
-
 ### Documented — R-12 test infrastructure refactor (Phase 12)
 
 Phase 12 (R-12) restructures `tests/support/` so that the integration-test
@@ -757,8 +755,6 @@ encode the binary the helper depends on. Side effects:
 **Audit tally post-R-12**: 7 Critical resolved, 0 Critical blocked,
 3 Major resolved, 0 Major blocked, 6 Minor resolved, 0 Minor blocked,
 2 Doc resolved, 0 Doc blocked, **1 External-Upstream-Blocker (F4)**.
-
-## [0.6.4] - 2026-09-11
 
 ### Documented — F4 External-Upstream-Blocker reclassification (R-9)
 
