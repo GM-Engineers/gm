@@ -53,15 +53,6 @@ harness = false
 
 [dev-dependencies.gm-ca]
 path = "../gm-ca"
-# Publish-time dep relaxation: gm-crypto 0.3.2's dev-dep on
-# `^0.2.1` and gm-ca 0.2.1's runtime dep on gm-crypto `^0.3.2`
-# form a chicken-and-egg cycle. Relaxing to `^0.2` lets
-# gm-crypto 0.3.2 publish first (against the existing gm-ca
-# 0.2.0); gm-ca 0.2.1 follows; gm-tlcp 0.6.5 follows last.
-# PR-3.1 bumped gm-ca to 0.3.0 (P1-8 + P1-9 proto v0.3.0 + serde);
-# widen to `^0.3` to follow. PR-4.2 bumps gm-ca to 0.4.0
-# (P1-1 configurable mTLS); widen to `^0.4` to follow.
-version = "0.4"
 default-features = false
 features = ["tlcp-profiles"]
 
