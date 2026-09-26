@@ -87,9 +87,13 @@ pub fn extract_csr_subject_cn(csr_input: &[u8]) -> Result<String, CaError> {
 // Encoded in DER base-128: 1.2 = 0x2A, 156 = 0x81 0x1C, 10197 = 0xCF 0x55,
 // 1 = 0x01, 501 = 0x83 0x75.
 const SM2_SIG_OID: &[u8] = &[0x2A, 0x81, 0x1C, 0xCF, 0x55, 0x01, 0x83, 0x75];
-// SM2 public key OID: 1.2.156.10197.1.301.
+// SM2 public-key OID: 1.2.156.10197.1.301.
 // Encoded in DER base-128: ... 301 = 0x82 0x2D.
 const SM2_PK_OID: &[u8] = &[0x2A, 0x81, 0x1C, 0xCF, 0x55, 0x01, 0x82, 0x2D];
+// id-ecPublicKey (RFC 5480 §2.1.1): 1.2.840.10045.2.1
+// Encoded in DER base-128: 1.2.840 = 0x2A 0x86 0x48, 10045 = 0xCE 0x3D,
+// 2 = 0x02, 1 = 0x01.
+const EC_PUBLIC_KEY_OID: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01];
 // CN OID: 2.5.4.3
 const CN_OID: &[u8] = &[0x55, 0x04, 0x03];
 // CRL Number extension OID: 1.2.156.10197.1.106.
@@ -251,7 +255,11 @@ impl CaSigner {
             .sign(&tbs_der)
             .map_err(|e| CaError::SigningFailed(format!("self-sign failed: {}", e)))?;
 
-        let cert_der = build_certificate_der(&tbs_der, sig_alg_id, &signature);
+        let cert_der = build_certificate_der(
+            &tbs_der,
+            sig_alg_id,
+            &wrap_sm2_signature_for_x509(&signature),
+        );
         let pem_obj = pem::Pem::new("CERTIFICATE", cert_der);
         Ok(pem::encode(&pem_obj))
     }
@@ -396,7 +404,11 @@ impl CaSigner {
             .map_err(|e| CaError::SigningFailed(format!("signing failed: {}", e)))?;
 
         // Build full Certificate DER
-        let cert_der = build_certificate_der(&tbs_der, sm2_sig_alg_id(), &signature);
+        let cert_der = build_certificate_der(
+            &tbs_der,
+            sm2_sig_alg_id(),
+            &wrap_sm2_signature_for_x509(&signature),
+        );
 
         // Encode as PEM
         let pem_obj = pem::Pem::new("CERTIFICATE", cert_der);
@@ -507,7 +519,11 @@ impl CaSigner {
             .sign(&tbs_der)
             .map_err(|e| CaError::SigningFailed(format!("signing failed: {}", e)))?;
 
-        let cert_der = build_certificate_der(&tbs_der, sm2_sig_alg_id(), &signature);
+        let cert_der = build_certificate_der(
+            &tbs_der,
+            sm2_sig_alg_id(),
+            &wrap_sm2_signature_for_x509(&signature),
+        );
         let pem_obj = pem::Pem::new("CERTIFICATE", cert_der);
         Ok(pem::encode(&pem_obj))
     }
@@ -586,7 +602,10 @@ impl CaSigner {
             .map_err(|e| CaError::SigningFailed(format!("CRLsigning failed: {}", e)))?;
 
         // Full CRL DER: TBS || AlgorithmIdentifier || BIT STRING
-        let sig_bits = der_bit_string(&signature);
+        // signatureValue BIT STRING body MUST be DER ECDSA-Sig-Value
+        // per RFC 5280 §5.1.1 (same requirement as Certificate
+        // signatureValue, RFC 5480 §3).
+        let sig_bits = der_bit_string(&wrap_sm2_signature_for_x509(&signature));
         let crl = der_sequence(&[tbs_der, sm2_sig_alg_id(), sig_bits].concat());
 
         Ok(crl)
@@ -637,17 +656,37 @@ fn build_basic_constraints(is_ca: bool, path_len: Option<u8>) -> Vec<u8> {
 
 /// Build AuthorityKeyIdentifier extension value (RFC 5280 §4.2.1.1):
 ///   AuthorityKeyIdentifier ::= SEQUENCE {
-///       keyIdentifier \[0\] EXPLICIT OCTET STRING OPTIONAL, ...
+///       keyIdentifier \[0\] KeyIdentifier OPTIONAL, ...
 ///   }
-/// The OCTET STRING content is the 20-byte key-id (already hashed by the
-/// caller per RFC 7093 §2 Method 1: SM3[\:20] for SM2 certs, SHA-1[\:20]
-/// for RSA certs to interop with the global PKI). The hash function is
-/// chosen by the caller; this helper is purely DER layout.
 ///
-/// Produces: `30 <len> A0 <len> 04 14 <20 bytes>`
+/// The `[0]` tag is ASN.1 IMPLICIT (default tagging mode — the
+/// reference does not write `EXPLICIT`), so the encoded form is
+/// the OCTET STRING **content** directly under the context tag,
+/// without the inner `04 <len>` OCTET STRING TLV. The outer
+/// SEQUENCE wraps a single `[0] <len> <key_identifier_bytes>`
+/// TLV — the IMPLICIT form every major TLS stack (GmSSL,
+/// OpenSSL, BoringSSL) emits, and what RFC 5280 §A.1 examples
+/// use. Earlier revisions of this helper wrapped the bytes as
+/// `[0] EXPLICIT OCTET STRING`, producing `A0 <len> 04 <len> <bytes>`;
+/// that double-tag form is valid DER but rejected by strict
+/// X.509 consumers (GmSSL `x509_tbs_cert_from_der` fails at
+/// `[0]` parsing; `x509-cert` 0.3 errors with
+/// `Error { kind: Value { tag: Tag(0x02: INTEGER) } }`).
+///
+/// The OCTET STRING content is the 20-byte key-id (already hashed
+/// by the caller per RFC 7093 §2 Method 1: SM3[\:20] for SM2 certs,
+/// SHA-1[\:20] for RSA certs to interop with the global PKI). The
+/// hash function is chosen by the caller; this helper is purely
+/// DER layout.
 pub(crate) fn build_authority_key_id_from_hash(key_id: &[u8]) -> Vec<u8> {
-    let key_id_tlv = der_octet_string(key_id);
-    der_sequence(&[der_explicit_context(0, &key_id_tlv)].concat())
+    // IMPLICIT [0] tagging: prefix the raw key-id bytes with
+    // context-specific [0] tag (0xA0) + length. No inner OCTET
+    // STRING tag — IMPLICIT replaces the base tag.
+    let mut ki_tlv = Vec::with_capacity(key_id.len() + 2);
+    ki_tlv.push(0xA0);
+    ki_tlv.push(key_id.len() as u8);
+    ki_tlv.extend_from_slice(key_id);
+    der_sequence(&[ki_tlv].concat())
 }
 
 /// Build a complete Extensions SEQUENCE for a certificate, driven by
@@ -754,11 +793,26 @@ pub(crate) fn build_extensions(
     der_sequence_v(&exts)
 }
 
-/// SM2 SPKI AlgorithmIdentifier: SEQUENCE { OID(sm2), NULL }
-/// OID: 1.2.156.10197.1.301
+/// SM2 SPKI AlgorithmIdentifier: SEQUENCE { OID(id-ecPublicKey), OID(sm2p256v1) }
+///
+/// RFC 5480 §2.1.1 mandates the named-curve encoding for EC public
+/// keys: the AlgorithmIdentifier carries `id-ecPublicKey` (1.2.840.10045.2.1)
+/// as the algorithm OID and the curve OID (sm2p256v1 = 1.2.156.10197.1.301)
+/// in the parameters slot. The implicit form (just `sm2` as the algorithm
+/// OID with NULL parameters) is permitted by GM/T 0003.4-2012 but is
+/// rejected by every standard X.509 stack outside of GM-only tooling
+/// (GmSSL 3.1.1 fails at `x509_tbs_cert_from_der`, OpenSSL 3.6 reports
+/// `X509_PUBKEY_get0: decode error` and cannot load the public key,
+/// `x509-cert` 0.3 errors with `Error { kind: Value { tag: Tag(0x02: INTEGER) } }`).
+/// Cross-library interop therefore requires the RFC 5480 form, which is
+/// also what GmSSL's own `gmssl certgen` emits (verified against its
+/// self-signed root CA reference).
+///
+/// Produces: `30 <len> 06 07 2a 86 48 ce 3d 02 01 06 08 2a 81 1c cf 55 01 82 2d`
 fn sm2_spki_alg_id() -> Vec<u8> {
-    let oid = encode_oid(SM2_PK_OID);
-    der_sequence(&[oid, vec![0x05, 0x00]].concat())
+    let ec_oid = encode_oid(EC_PUBLIC_KEY_OID);
+    let curve_oid = encode_oid(SM2_PK_OID);
+    der_sequence(&[ec_oid, curve_oid].concat())
 }
 
 /// SM2 Signature AlgorithmIdentifier: SEQUENCE { OID(sm3WithSM2), NULL }
@@ -895,7 +949,16 @@ pub(crate) fn build_tbs_certificate(
     extensions: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, CaError> {
     // [0] EXPLICIT version v3
-    let version_inner = der_integer_positive(&[0x03]);
+    // RFC 5280 §4.1.2.1: Version ::= INTEGER { v1(0), v2(1), v3(2) } —
+    // i.e. 0-based. Earlier revisions of this code wrote `&[0x03]`
+    // (decimal 3) which is a syntactically valid INTEGER but out of
+    // the X.509-defined range; OpenSSL reports "Version: Unknown (3)"
+    // and GmSSL's `x509_cert_from_der` rejects the cert at
+    // `x509_tbs_cert_from_der:1052` because it cannot bind the value
+    // to any known X.509 version. The CRL builder at line 577 uses
+    // `&[1]` because CRLVersion is also 0-based (v1=0, v2=1) and
+    // we issue v2 CRLs per RFC 5280 §5.1.
+    let version_inner = der_integer_positive(&[0x02]);
     let version = der_explicit_context(0, &version_inner);
 
     // SerialNumber
@@ -934,7 +997,37 @@ pub(crate) fn build_tbs_certificate(
 ///     signatureValue     BIT STRING
 ///   }
 ///
+/// Wrap the raw 64-byte SM2 signature (r||s, returned by
+/// `Sm2Signer::sign()`) into the DER `ECDSA-Sig-Value` form
+/// required by X.509 / RFC 5280 §4.1.1 / RFC 5480 §3 and the
+/// equivalent CRL signatureValue per RFC 5280 §5.1.1.
+///
+/// Without this wrap, gm-ca emits a BIT STRING whose body is a
+/// bare 64-byte r||s sequence, which every strict DER consumer
+/// (GmSSL `x509_cert_from_der`, `x509-cert` 0.3, OpenSSL with
+/// ECDSA-Sig-Value) rejects. See gm-ca 0.4.2 → 0.4.3 CHANGELOG
+/// for the cross-verification evidence trail (GmSSL 3.1.1
+/// `certparse: read certificate failure`, `x509-cert` 0.3
+/// `Error { kind: Value { tag: Tag(0x02: INTEGER) } }`).
+fn wrap_sm2_signature_for_x509(signature: &[u8]) -> Vec<u8> {
+    let sig_raw: [u8; 64] = signature
+        .try_into()
+        .expect("SM2 signature must be 64 raw bytes (r||s)");
+    gm_crypto::sm2::sm2_signature_raw_to_der(&sig_raw)
+}
+
 /// `sig_alg_id` must match the AlgorithmIdentifier inside the TBS.
+///
+/// `signature` is already in the wire format required by the chosen
+/// signature algorithm:
+///   - SM2 / ECDSA: caller must pass the DER encoding of
+///     `ECDSA-Sig-Value = SEQUENCE { INTEGER r, INTEGER s }`
+///     (RFC 5480 §3, GM/T 0015-2012 §6). `Sm2Signer::sign()` returns
+///     the raw 64-byte r||s concatenation, so callers should wrap
+///     via [`wrap_sm2_signature_for_x509`] before calling here.
+///   - RSA: caller passes the PKCS#1 v1.5 raw signature bytes
+///     directly (the PKCS#1 padding is the DER layer; the X.509
+///     BIT STRING just wraps the result without further encoding).
 pub(crate) fn build_certificate_der(tbs: &[u8], sig_alg_id: Vec<u8>, signature: &[u8]) -> Vec<u8> {
     let sig_bits = der_bit_string(signature);
     der_sequence(&[tbs.to_vec(), sig_alg_id, sig_bits].concat())
@@ -1249,5 +1342,246 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("."),
         )
+    }
+
+    // -------------------------------------------------------------
+    // Cross-tool interop regression tests (gm-ca 0.4.3)
+    //
+    // These tests assert that gm-ca-issued certs satisfy the DER
+    // shape that strict X.509 consumers (GmSSL 3.1.1's
+    // `x509_tbs_cert_from_der`, `x509-cert` 0.3, OpenSSL 3.6's
+    // `X509_PUBKEY_get0`) require. Each property maps to a bug
+    // fixed in 0.4.3:
+    //
+    //   - version INTEGER must be 2 (v3 = 2 in the 0-based X.509
+    //     version enum; previously gm-ca emitted 3 which OpenSSL
+    //     rejected as "Unknown (3)" and GmSSL failed at
+    //     x509_tbs_cert_from_der:1052).
+    //   - signature BIT STRING body must be the DER encoding of
+    //     ECDSA-Sig-Value = SEQUENCE { INTEGER r, INTEGER s }
+    //     (RFC 5480 §3); previously gm-ca stuffed raw r||s bytes
+    //     into the BIT STRING, which every strict consumer rejected.
+    //   - SPKI AlgorithmIdentifier must encode the named curve via
+    //     id-ecPublicKey + sm2p256v1 (RFC 5480 §2.1.1); the implicit
+    //     sm2-only form (permitted by GM/T 0003.4-2012 but rejected
+    //     by OpenSSL / GmSSL / x509-cert) is no longer used.
+    //   - AuthorityKeyIdentifier must use `[0] IMPLICIT` (the RFC 5280
+    //     default tagging), not `[0] EXPLICIT` (the previous
+    //     double-tag form which x509-cert rejected with
+    //     `Error { kind: Value { tag: Tag(0x02: INTEGER) } }`).
+    //
+    // The tests use x509-parser 0.16 (already a transitive dev-dep)
+    // for human-readable assertions, plus raw-byte checks against
+    // the DER hex layout.
+    // -------------------------------------------------------------
+
+    /// Helper: extract the trailing BIT STRING (signatureValue)
+    /// body from a DER-encoded certificate by walking
+    /// outer SEQUENCE → TBS SEQUENCE → signatureAlgorithm
+    /// SEQUENCE → signatureValue BIT STRING. We don't pull in
+    /// a full ASN.1 parser for these regression checks; the
+    /// certs we produce use a mix of short-form and long-form
+    /// lengths depending on size.
+    fn extract_signature_bit_string(cert_der: &[u8]) -> &[u8] {
+        fn read_len(b: &[u8], off: usize) -> (usize, usize) {
+            if b[off] & 0x80 == 0 {
+                (b[off] as usize, 1)
+            } else {
+                let n = (b[off] & 0x7F) as usize;
+                let mut len = 0usize;
+                for i in 0..n {
+                    len = (len << 8) | b[off + 1 + i] as usize;
+                }
+                (len, 1 + n)
+            }
+        }
+        // Outer Certificate SEQUENCE
+        assert_eq!(cert_der[0], 0x30, "outer must be SEQUENCE");
+        let (_outer_len, hdr1) = read_len(cert_der, 1);
+        // off is now at the start of the outer SEQUENCE content
+        // (= start of the TBSCertificate).
+        let mut off = 1 + hdr1;
+        // TBS SEQUENCE — skip it
+        assert_eq!(cert_der[off], 0x30, "TBS must be SEQUENCE");
+        let (tbs_len, hdr_tbs) = read_len(cert_der, off + 1);
+        off += 1 + hdr_tbs + tbs_len;
+        // signatureAlgorithm SEQUENCE — skip it
+        assert_eq!(cert_der[off], 0x30, "signatureAlgorithm must be SEQUENCE");
+        let (sig_alg_len, hdr_sa) = read_len(cert_der, off + 1);
+        off += 1 + hdr_sa + sig_alg_len;
+        // signatureValue BIT STRING — body starts after tag + length + unused-bits
+        assert_eq!(
+            cert_der[off], 0x03,
+            "signatureValue must be BIT STRING (tag 0x03)"
+        );
+        let (sig_val_len, hdr_sv) = read_len(cert_der, off + 1);
+        let body_start = off + 1 + hdr_sv + 1; // +1 unused-bits byte
+        let body_end = off + 1 + hdr_sv + sig_val_len;
+        &cert_der[body_start..body_end]
+    }
+
+    #[test]
+    fn regression_signature_is_der_ecdsa_sig_value() {
+        // Cert signatureValue BIT STRING body MUST be DER
+        // ECDSA-Sig-Value = SEQUENCE { INTEGER r, INTEGER s }
+        // (RFC 5480 §3, GM/T 0015-2012 §6).
+        let key = Sm2KeyPair::generate().expect("gen key");
+        let signer = CaSigner::new(key, "Regression Test CA");
+        let pem = signer
+            .self_sign_ca(365, &CertProfile::root_ca())
+            .expect("self_sign_ca");
+        let pem_obj = pem::parse(pem.as_bytes()).expect("pem parse");
+        let sig_body = extract_signature_bit_string(pem_obj.contents());
+
+        // First byte must be SEQUENCE (0x30) — not raw r||s.
+        assert_eq!(
+            sig_body[0], 0x30,
+            "signature BIT STRING body must start with DER SEQUENCE tag, \
+             not raw r||s bytes (RFC 5480 §3)"
+        );
+        // Compute SEQUENCE length (handles short- and long-form).
+        let (seq_len, hdr) = if sig_body[1] & 0x80 == 0 {
+            (sig_body[1] as usize, 1usize)
+        } else {
+            let n = (sig_body[1] & 0x7F) as usize;
+            let mut len = 0usize;
+            for i in 0..n {
+                len = (len << 8) | sig_body[2 + i] as usize;
+            }
+            (len, 1 + n)
+        };
+        assert_eq!(
+            seq_len + hdr + 1,
+            sig_body.len(),
+            "DER SEQUENCE length must match body"
+        );
+        // First element is INTEGER r (tag 0x02).
+        let inner = &sig_body[1 + hdr..];
+        assert_eq!(inner[0], 0x02, "first element must be INTEGER r");
+        // Skip r, then check s is INTEGER.
+        let r_len = inner[1] as usize;
+        assert_eq!(
+            inner[2 + r_len],
+            0x02,
+            "second element must be INTEGER s (DER ECDSA-Sig-Value shape)"
+        );
+    }
+
+    #[test]
+    fn regression_version_is_v3_integer_2() {
+        // X.509 Version ::= INTEGER { v1(0), v2(1), v3(2) }.
+        // The encoded INTEGER must be 2, not 3 — GmSSL
+        // x509_tbs_cert_from_der and OpenSSL `x509 -text` reject
+        // an out-of-range version value.
+        let key = Sm2KeyPair::generate().expect("gen key");
+        let signer = CaSigner::new(key, "Regression Test CA");
+        let pem = signer
+            .self_sign_ca(365, &CertProfile::root_ca())
+            .expect("self_sign_ca");
+        let pem_obj = pem::parse(pem.as_bytes()).expect("pem parse");
+        let cert = parse_cert_der(pem_obj.contents());
+        // X509Version enum (V1 / V2 / V3) — V3 corresponds to the
+        // 0-based INTEGER value 2 in the X.509 spec. The pre-fix
+        // gm-ca emitted INTEGER 3 which x509-parser surfaces as
+        // "Unknown" / out-of-range; OpenSSL `x509 -text` reported
+        // "Version: Unknown (3)" and GmSSL's `x509_tbs_cert_from_der`
+        // rejected the cert at line 1052.
+        assert!(
+            matches!(cert.version(), x509_parser::x509::X509Version::V3),
+            "cert must encode version as V3 (X.509 0-based INTEGER 2), got {:?}",
+            cert.version(),
+        );
+    }
+
+    #[test]
+    fn regression_spki_uses_id_ec_public_key_with_sm2_curve() {
+        // RFC 5480 §2.1.1 named-curve encoding:
+        //   AlgorithmIdentifier ::= SEQUENCE {
+        //     algorithm   id-ecPublicKey (1.2.840.10045.2.1),
+        //     parameters  sm2p256v1     (1.2.156.10197.1.301)
+        //   }
+        // OpenSSL `X509_PUBKEY_get0` and GmSSL's reference certgen
+        // both emit this form; the implicit `sm2` + NULL form is
+        // rejected by every standard X.509 stack outside of
+        // GM-only tooling.
+        let key = Sm2KeyPair::generate().expect("gen key");
+        let signer = CaSigner::new(key, "Regression Test CA");
+        let pem = signer
+            .self_sign_ca(365, &CertProfile::root_ca())
+            .expect("self_sign_ca");
+        let pem_obj = pem::parse(pem.as_bytes()).expect("pem parse");
+        let cert = parse_cert_der(pem_obj.contents());
+        // x509-parser's Oid<'_> is non-Copy (carries lifetime), so
+        // borrow it for the assertion.
+        let spki_alg_oid = cert.public_key().algorithm.algorithm.to_id_string();
+        assert_eq!(
+            spki_alg_oid, "1.2.840.10045.2.1",
+            "SPKI algorithm must be id-ecPublicKey (RFC 5480 §2.1.1), \
+             not the implicit sm2 OID"
+        );
+    }
+
+    #[test]
+    fn regression_authority_key_identifier_uses_implicit_tagging() {
+        // RFC 5280 §4.2.1.1: keyIdentifier [0] IMPLICIT (default).
+        // The OCTET STRING content goes directly under [0],
+        // without an inner `04 <len>` wrapper. The IMPLICIT form
+        // is what every major TLS stack emits.
+        let key = Sm2KeyPair::generate().expect("gen key");
+        let signer = CaSigner::new(key, "Regression Test CA");
+        let pem = signer
+            .self_sign_ca(365, &CertProfile::root_ca())
+            .expect("self_sign_ca");
+        let pem_obj = pem::parse(pem.as_bytes()).expect("pem parse");
+        let der = pem_obj.contents();
+
+        // Find the AuthorityKeyIdentifier OCTET STRING body.
+        // It's inside extensions — find by OID tag `06 03 55 1d 23`.
+        let aki_oid = [0x06, 0x03, 0x55, 0x1D, 0x23];
+        let aki_oid_pos = find_subsequence(der, &aki_oid).expect("AKI OID present");
+        // Skip extnID OID, find extnValue OCTET STRING (04).
+        // The OCTET STRING tag should follow the OID (with optional
+        // critical BOOLEAN in between — we always emit non-critical).
+        let mut pos = aki_oid_pos + aki_oid.len();
+        // If next byte is BOOLEAN (01 01 ff), skip it.
+        if der[pos] == 0x01 {
+            pos += 3;
+        }
+        assert_eq!(
+            der[pos], 0x04,
+            "extnValue must be OCTET STRING (RFC 5280 §4.1 Extension)"
+        );
+        pos += 1; // tag
+        let octet_len = der[pos] as usize;
+        pos += 1;
+        let aki_body = &der[pos..pos + octet_len];
+
+        // AuthorityKeyIdentifier ::= SEQUENCE { [0] IMPLICIT OCTET STRING ... }
+        // Outer tag must be SEQUENCE (0x30).
+        assert_eq!(aki_body[0], 0x30, "AKI outer must be SEQUENCE");
+        let aki_seq_len = aki_body[1] as usize;
+        assert_eq!(aki_seq_len, aki_body.len() - 2);
+        // First child must be [0] IMPLICIT — tag 0xA0 directly
+        // followed by the key-identifier bytes (no inner `04`).
+        assert_eq!(
+            aki_body[2], 0xA0,
+            "first AKI child must be [0] IMPLICIT (tag 0xA0), \
+             not [0] EXPLICIT which would require an inner 04 tag"
+        );
+        let ki_len = aki_body[3] as usize;
+        // If the previous bug were still present, aki_body[4] would
+        // be 0x04 (OCTET STRING tag) inside the [0] wrapper.
+        assert_ne!(
+            aki_body[4], 0x04,
+            "IMPLICIT [0] must not have inner OCTET STRING tag — \
+             that's the EXPLICIT form that strict consumers reject"
+        );
+        // Key-identifier length should be 20 (SM3[:20]) — common case.
+        assert!(ki_len >= 8, "key-identifier should be at least 8 bytes");
+    }
+
+    /// Naive subsequence search; acceptable for test fixtures only.
+    fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|w| w == needle)
     }
 }

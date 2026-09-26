@@ -7,7 +7,140 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+### Fixed
+
+- **X.509 / CRL `signatureValue` DER wrap (RFC 5480 §3, GM/T 0015-2012 §6).**
+  gm-ca 0.4.2 wrapped the raw 64-byte SM2 signature (`r||s`)
+  returned by [`Sm2Signer::sign`](gm_crypto::sm2::Sm2Signer::sign)
+  directly in the BIT STRING `signatureValue` field, omitting the
+  DER `ECDSA-Sig-Value = SEQUENCE { INTEGER r, INTEGER s }`
+  wrapper that RFC 5480 §3 and GM/T 0015-2012 §6 require. Every
+  strict DER consumer rejects the resulting cert:
+  - `gmssl certparse`: `read certificate failure` at
+    `x509_tbs_cert_from_der:1052`.
+  - `x509-cert` 0.3: `Error { kind: Value { tag: Tag(0x02: INTEGER) } }`.
+  - OpenSSL 3.6: parses but downstream ECDSA signature verification
+    fails because the BIT STRING body is not a valid ECDSA-Sig-Value.
+  - `x509-parser` 0.16 (the only one gm-ca tests round-tripped
+    through) silently accepts the malformed encoding because it
+    does not interpret the BIT STRING contents — hence the bug
+    went undetected.
+
+  Fix: new `wrap_sm2_signature_for_x509(signature: &[u8]) -> Vec<u8>`
+  helper wraps the raw 64 bytes via
+  [`gm_crypto::sm2::sm2_signature_raw_to_der`](gm_crypto::sm2::sm2_signature_raw_to_der)
+  before the BIT STRING emission. All four SM2 call sites in
+  `cert.rs` — root self-sign (`self_sign_ca`), CSR signing
+  (`sign_csr_with_profile_and_seconds`), renewal
+  (`renew_certificate_with_profile_and_seconds`), and CRL
+  generation (`generate_crl`) — now route their signature through
+  this helper. CRLs gain the fix for free (they use the same
+  `signatureValue` layout per RFC 5280 §5.1.1).
+
+  Note for downstream callers: gm-crypto already exposed the
+  `sm2_signature_raw_to_der` function for X.509/CMS use; gm-tlcp
+  has used it since 0.5.0 in its handshake signature verifier
+  (`src/tlcp/crypto/verify.rs`, `src/tlcp/messages/ecdhe.rs`,
+  `src/tlcp/mod.rs`). gm-ca simply had not adopted it.
+
+### Fixed (cont.)
+
+- **AuthorityKeyIdentifier IMPLICIT tagging (RFC 5280 §4.2.1.1).**
+  gm-ca 0.4.2 wrapped the `keyIdentifier` bytes as
+  `[0] EXPLICIT OCTET STRING`, producing
+  `A0 <len> 04 <len> <bytes>`. The RFC default is IMPLICIT —
+  `A0 <len> <bytes>` — which is also what every major TLS
+  stack (GmSSL, OpenSSL, BoringSSL, Rustls) emits and what
+  RFC 5280 §A.1 examples show. The EXPLICIT form is valid
+  DER but causes `x509-cert` 0.3 to fail with
+  `Error { kind: Value { tag: Tag(0x02: INTEGER) } }`
+  (it expects the `[0]` payload to start directly with
+  OCTET STRING content, not an inner TLV).
+
+  Fix: `build_authority_key_id_from_hash` in `cert.rs`
+  now emits the IMPLICIT form by hand
+  (`0xA0` tag + length + raw bytes, no `der_octet_string`
+  wrapper around the key-id bytes).
+
+### Fixed (cont.)
+
+- **SPKI named-curve encoding (RFC 5480 §2.1.1).**
+  gm-ca 0.4.2 emitted the SubjectPublicKeyInfo
+  AlgorithmIdentifier as
+  `SEQUENCE { OID(sm2 = 1.2.156.10197.1.301), NULL }` —
+  the implicit SM2 form permitted by GM/T 0003.4-2012.
+  OpenSSL 3.6's `X509_PUBKEY_get0` reports
+  `error:03000072:digital envelope routines:X509_PUBKEY_get0:decode error`
+  and cannot load the public key, and GmSSL's `x509_tbs_cert_from_der`
+  rejects the cert before any application-level processing.
+
+  Fix: `sm2_spki_alg_id()` now emits the RFC 5480 named-curve form
+  `SEQUENCE { OID(id-ecPublicKey = 1.2.840.10045.2.1), OID(sm2p256v1 = 1.2.156.10197.1.301) }`.
+  This matches what `gmssl certgen` itself emits (verified
+  against a self-signed reference cert) and what every
+  standard X.509 stack expects.
+
+### Fixed (cont.)
+
+- **X.509 `Version` INTEGER value (RFC 5280 §4.1.2.1).**
+  gm-ca 0.4.2 wrote the version field as INTEGER 3 (decimal).
+  X.509 `Version ::= INTEGER { v1(0), v2(1), v3(2) }` is
+  0-based — v3 must encode as INTEGER 2. OpenSSL 3.6's
+  `x509 -text` reported `Version: Unknown (3)` for every
+  gm-ca cert, and GmSSL's `x509_tbs_cert_from_der` rejected
+  the cert at line 1052 because no version was matched.
+
+  Fix: `build_tbs_certificate` in `cert.rs` now passes
+  `&[0x02]` (decimal 2) to `der_integer_positive` for the
+  version field. The CRL builder at `generate_crl`
+  already used `&[1]` (CRL v2 = 1, also 0-based) and is
+  untouched.
+
+### Regression coverage
+
+- Four new `#[cfg(test)]` regression tests in `cert::tests`:
+  `regression_signature_is_der_ecdsa_sig_value` (asserts the
+  BIT STRING body starts with SEQUENCE tag 0x30 and contains
+  INTEGER r / INTEGER s in the DER ECDSA-Sig-Value shape),
+  `regression_authority_key_identifier_uses_implicit_tagging`
+  (asserts the AKI extension's content uses `[0] IMPLICIT`,
+  not `[0] EXPLICIT`, by checking no inner `04` OCTET STRING
+  tag is present inside the `[0]` wrapper),
+  `regression_version_is_v3_integer_2` (asserts
+  `X509Certificate::version() == X509Version::V3`), and
+  `regression_spki_uses_id_ec_public_key_with_sm2_curve`
+  (asserts the SPKI AlgorithmIdentifier is `1.2.840.10045.2.1`
+  via x509-parser's OID API). These tests would have caught
+  the four bugs above had they existed at 0.4.2 publication.
+
+## [0.4.3] - 2026-09-26
+
+### Summary
+
+DER compliance patch. Four wire-format bugs in cert.rs and
+the CRL path — collectively the reason gm-ca 0.4.2 certs
+were rejected by every standard X.509 stack outside of
+gm-ca's own tests (which round-trip through the very lenient
+`x509-parser` 0.16). One external developer cross-validation
+caught all four in sequence; this release restores
+interoperability with GmSSL 3.1.1, OpenSSL 3.6, and
+`x509-cert` 0.3.
+
+The bugs fixed are wire-format only — no public API change,
+no SemVer-breaking change to the gRPC surface, no SQL schema
+change. All 32 pre-existing lib tests + 11 integration tests
+in gm-ca, and all 190 tests in gm-tlcp / gm-tls that consume
+gm-ca certs, continue to pass with no fixture changes.
+
+### Notes for downstream consumers
+
+gm-ca 0.4.2 certs already issued and in the wild will remain
+parseable by lenient parsers (`x509-parser` 0.16) but are
+**not retroactively fixed** — reissue from the same CSR
+to obtain a 0.4.3-compliant cert if strict interop with
+GmSSL / OpenSSL / `x509-cert` is required. The CA private
+key is unchanged across versions, so reissuance does not
+require CA re-provisioning.
 
 - **Structured `CaErrorCode` enum** (PR-4.27 / mirror of
   gm-tls PR-4.18 + gm-tlcp PR-4.21): new
