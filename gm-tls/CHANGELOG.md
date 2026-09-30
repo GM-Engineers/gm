@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 > **Status**: The entries below cover gm-tls **0.2.3 → 0.2.14** (PR-4.6 /
-> 4.9 / 4.10 / 4.13 / 4.16 / 4.18 / 4.20 / 4.22 / 4.23 / 4.25 / 4.28). Each
+> 4.9 / 4.10 / 4.13 / 4.16 / 4.18 / 4.20 / 4.22 / 4.23 / 4.25 / 4.28 / 4.29). Each
 > version bump is annotated inline (`gm-tls bumped to 0.2.X (from 0.2.Y)`).
 > The block is intentionally held under a single `[Unreleased]` heading
 > because none of these versions have been published or tagged yet; once
@@ -55,6 +55,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   function signatures were broken (the legacy
   `record_cert_error(&str)` API is retained and deprecated —
   see below).
+
+### Fixed
+
 - **`record_cert_error(&str)` API deprecated**: continues
   to emit `gmtls_cert_verification_errors_total{reason="..."}`
   (legacy string label) but emits a `#[deprecated(since =
@@ -372,6 +375,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test_loopback_echo_large_data`, `test_loopback_mutual_auth`) now
   run by default, opting into `DistidPolicy::Permissive{..}` for the
   OpenSSL-issued fixture (empty distid).
+
+## [0.2.15] - 2026-09-30
+
+### Fixed
+
+- **Multi-CA CRL issuer lookup**: the CRL verification path in
+  `gm-tls/src/gm.rs` (both client ~line 525 and server ~line 781)
+  used `verify_crl(..., &trust[0].as_x509()?, ...)`, picking the
+  **first** trust anchor to verify the CRL signature. In
+  multi-CA deployments (GM mTLS federation, dual-trust-domain
+  gateways, SPIFFE trust-store bundles) the trust anchor pool
+  carries multiple CA certs concatenated in PEM, so any
+  deployment whose CRL issuer happened not to be at index 0
+  silently failed. The chain verifier already iterates trust
+  anchors correctly (and falls through to the matching one);
+  this gap was specific to the CRL signature path.
+  - New private `find_crl_issuer(crl, &trust)` helper walks
+    `trust` and returns the anchor whose subject DN matches the
+    CRL's issuer DN (DER byte comparison, same approach as
+    `check_revocations_with_policy` in gm-crypto).
+  - When no anchor matches, returns
+    `TlsError::CrlVerificationFailed("no trust anchor matches
+    CRL issuer (trust pool size = N)")` — a clearer error than
+    the misleading "CRL signature verification failed" the
+    `&trust[0]` path produced.
+  - 3 new integration tests in `tests/multi_ca_crl_repro.rs`:
+    `crl_match_first_succeeds` (matching CA first — baseline),
+    `crl_match_second_succeeds` (matching CA second — the bug
+    scenario, now passes), and
+    `crl_no_matching_anchor_clean_error` (CRL signed by an
+    unknown CA — must fail with the new explicit message).
+
+- **Multi-CA chain verification investigated, not changed**: the
+  same issue report also claimed that multi-CA trust pools
+  could produce `tonic::ConnectionReset` instead of a clean
+  `CertificateVerificationFailed` error when the first CA did
+  not match the server's issuer. Reproduced against
+  gm-tls 0.2.14 / gm-crypto 0.3.8 and confirmed the chain
+  verifier already iterates trust anchors and falls through
+  correctly. No code change needed; the investigation is
+  documented in the issue so future readers know the
+  reproduction matrix in the original report was internally
+  inconsistent. Two new regression tests in
+  `tests/multi_ca_anchor_repro.rs` (gm-tls) and
+  `tests/multi_ca_anchor_chain_verify.rs` (gm-crypto) pin
+  the iteration behaviour in both directions.
+
+- **CRL signature BIT STRING walker** (gm-crypto 0.3.9 companion
+  fix): `find_bitstring_in_outer` in
+  `gm-crypto/src/x509/verify.rs` jumped past the declared
+  length of any BIT STRING candidate whose content didn't
+  match the target. On any CRL whose TBS contained an OID of
+  length 3 (every standard CRL — `commonName` 2.5.4.3 =
+  `06 03 55 04 03`, `CRL Number` 2.5.29.20 = `06 03 55 1d 14`)
+  the walker treated the `06 03 ...` byte sequence as a fake
+  BIT STRING of length 85, jumped 87 bytes forward, and sailed
+  past the real signature BIT STRING at the end of the DER.
+  Result: every CRL signature verification with a real-world
+  CRL failed with "CRL signature BIT STRING data not found in
+  outer DER", which made the multi-CA CRL lookup fix above
+  untestable. Fixed by falling back to byte-by-byte scanning
+  (`pos += 1`) on a candidate mismatch instead of jumping
+  past the candidate's declared length.
 
 ## [0.2.2] - 2026-09-18
 

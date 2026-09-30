@@ -1817,8 +1817,8 @@ fn extract_crl_signature(der: &[u8]) -> Result<&[u8], CryptoError> {
     // CRL structure: SEQUENCE { tbsCertList, signatureAlgorithm, signatureValue }.
     //
     // A previous hand-rolled walker stopped at the end of the OUTER CRL
-    // content (i.e. past signatureAlgorithm + signatureValue), not at
-    // the end of the TBS — so it reported "CRL signature algorithm
+    // content (i.e. past signatureAlgorithm + signatureValue), not at the
+    // end of the TBS — so it reported "CRL signature algorithm
     // SEQUENCE not found" for CRLs whose outer length used the long
     // form (e.g. `30 81 c9 ...`). The signature BIT STRING lives at
     // the end of the buffer, so the walker would index out of bounds.
@@ -1844,11 +1844,22 @@ fn extract_crl_signature(der: &[u8]) -> Result<&[u8], CryptoError> {
 /// tag+length header. We scan for the BIT STRING tag (0x03), skip its
 /// length, then look for the `unused_bits` byte followed by `target`.
 fn find_bitstring_in_outer<'a>(der: &'a [u8], target: &[u8]) -> Option<&'a [u8]> {
-    // Walk the outermost CRL SEQUENCE to find the LAST BIT STRING
-    // (the signatureValue BIT STRING — there is exactly one after the
-    // TBSCertList's optional extensions BIT STRING, but the extensions
-    // BIT STRING is wrapped in CONTEXT[0] (0xa0) so a tag of 0x03 alone
-    // uniquely identifies the signatureValue).
+    // CRL structure: SEQUENCE { tbsCertList, signatureAlgorithm,
+    // signatureValue BIT STRING }. The signatureValue BIT STRING is the
+    // last BIT STRING in any well-formed CRL.
+    //
+    // Naively jumping past a BIT STRING candidate's declared length on
+    // a content mismatch is unsafe: the OID-length-3 byte sequence
+    // (`06 03 ...`) at the start of any `commonName` (2.5.4.3) or
+    // `CRL Number` (2.5.29.20) — i.e. every standard CRL — gets
+    // misparsed as a fake BIT STRING header. The fake header reports
+    // a multi-byte payload (the rest of the OID value plus everything
+    // after), and jumping past it leaps over the real signatureValue
+    // at the end of the DER. Falling back to byte-by-byte scanning on
+    // a mismatch keeps the real BIT STRING reachable on the next
+    // forward iteration. The cost is re-examining every byte of any
+    // misidentified candidate, which is negligible since the real
+    // signatureValue lives near the end of the DER.
     let mut pos = 0;
     while pos < der.len() {
         if der[pos] == 0x03 && pos + 1 < der.len() {
@@ -1874,8 +1885,10 @@ fn find_bitstring_in_outer<'a>(der: &'a [u8], target: &[u8]) -> Option<&'a [u8]>
                 if content == target {
                     return Some(content);
                 }
+                pos += 1;
+            } else {
+                pos += 1;
             }
-            pos = data_start + sig_len;
         } else {
             pos += 1;
         }

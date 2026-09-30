@@ -91,6 +91,36 @@ where
     }
 }
 
+/// Find the trust anchor whose subject DN equals the CRL's
+/// issuer DN. A CRL is signed by exactly one CA — the CA whose
+/// subject DN matches the CRL's issuer DN — and the CRL
+/// signature must be verified with that CA's public key.
+///
+/// Multi-CA trust pools (GM mTLS federation, dual-trust-domain
+/// gateways, SPIFFE trust-store bundles) put multiple CA certs
+/// in the PEM concat. The chain verifier
+/// (`verify_cert_chain_sm2_chain_with_distid_policy`) already
+/// iterates and falls through to the matching anchor; this
+/// helper applies the same iteration to CRL verification.
+fn find_crl_issuer<'a>(
+    crl: &CrlInfo,
+    trust_anchors: &'a [OwnedCert],
+) -> Result<&'a OwnedCert, TlsError> {
+    let crl_issuer_der = crl
+        .issuer_der()
+        .map_err(|e| TlsError::CrlVerificationFailed(format!("CRL issuer parse: {}", e)))?;
+    for anchor in trust_anchors {
+        let anchor_cert = anchor.as_x509()?;
+        if anchor_cert.subject().as_raw() == crl_issuer_der.as_slice() {
+            return Ok(anchor);
+        }
+    }
+    Err(TlsError::CrlVerificationFailed(format!(
+        "no trust anchor matches CRL issuer (trust pool size = {})",
+        trust_anchors.len()
+    )))
+}
+
 // ============== Handshake Orchestration ==============
 
 /// Establish GmRust client connection
@@ -488,10 +518,11 @@ where
             let cert_serial = leaf_cert.serial.to_bytes_be();
             let effective_now = OffsetDateTime::now_utc()
                 + time::Duration::seconds(opts.crl_grace_period.as_secs() as i64);
+            let crl_ca = find_crl_issuer(crl, &trust)?;
             verify_crl(
                 &cert_serial,
                 leaf_cert.issuer(),
-                &trust[0].as_x509()?,
+                &crl_ca.as_x509()?,
                 crl,
                 effective_now,
             )?;
@@ -747,10 +778,11 @@ where
             let cert_serial = leaf_cert.serial.to_bytes_be();
             let effective_now = OffsetDateTime::now_utc()
                 + time::Duration::seconds(opts.crl_grace_period.as_secs() as i64);
+            let crl_ca = find_crl_issuer(crl, &trust)?;
             verify_crl(
                 &cert_serial,
                 leaf_cert.issuer(),
-                &trust[0].as_x509()?,
+                &crl_ca.as_x509()?,
                 crl,
                 effective_now,
             )?;

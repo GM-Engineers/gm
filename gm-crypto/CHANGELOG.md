@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CRL signature BIT STRING walker** (PR-4.29 companion fix):
+  `find_bitstring_in_outer` in `gm-crypto/src/x509/verify.rs`
+  jumped past the declared length of any BIT STRING candidate
+  whose content didn't match the target. On any CRL whose TBS
+  contained an OID of length 3 (every standard CRL — `commonName`
+  2.5.4.3 = `06 03 55 04 03`, `CRL Number` 2.5.29.20 =
+  `06 03 55 1d 14`) the walker treated the `06 03 ...` byte
+  sequence as a fake BIT STRING of length 85, jumped 87 bytes
+  forward, and sailed past the real signatureValue BIT STRING at
+  the end of the DER. Result: every CRL signature verification
+  with a real-world CRL failed with "CRL signature BIT STRING
+  data not found in outer DER". Fixed by falling back to
+  byte-by-byte scanning (`pos += 1`) on a candidate mismatch
+  instead of jumping past the candidate's declared length. No
+  public API change.
+
 - **RFC 5280 §4.2 unknown critical extension rejection** (PR-4.8 / P2-1):
   added `KNOWN_X509_EXTENSIONS` constant + `check_unknown_critical_extensions`
   helper in `gm_crypto::x509::verify`. The helper is wired into every
