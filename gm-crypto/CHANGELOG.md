@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.10] - 2026-10-01
+
+SM4-GCM compliance audit response (third-party report). Doc + KAT + Wycheproof
++ live-GmSSL-CLI interop. No public-API change; `src/sm4.rs` untouched.
+
 ### Changed
 
 - **Standards references: `GM/T 0028-2014` → `GM/T 0028-2024`** in `src/kat.rs`
@@ -591,6 +596,7 @@ removed. The crate's public surface is fully backwards-compatible with
 the 0.1.x series.
 
 [Unreleased]: https://github.com/GM-Engineers/gm/compare/main...HEAD
+[0.3.10]: https://github.com/GM-Engineers/gm/compare/gm-crypto-v0.3.9...gm-crypto-v0.3.10
 [0.3.6]: https://github.com/GM-Engineers/gm/compare/gm-crypto-v0.3.5...gm-crypto-v0.3.6
 [0.3.5]: https://github.com/GM-Engineers/gm/compare/gm-crypto-v0.3.4...gm-crypto-v0.3.5
 [0.3.4]: https://github.com/GM-Engineers/gm/compare/gm-crypto-v0.3.3...gm-crypto-v0.3.4
