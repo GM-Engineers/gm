@@ -84,6 +84,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   If a future PR adds that capability, this test file is the place to
   re-enable them. SemVer: PATCH (additive test-only).
 
+- **SM4-GCM live GmSSL 3.1.1 CLI interop test** in
+  `tests/conformance_test.rs`: the new `sm4_tests::gcm_vs_gmssl_cli`
+  test shells out to `gmssl sm4 -gcm` and verifies byte-for-byte parity
+  against gm-crypto's `encrypt_gcm` / `decrypt_gcm` for both an
+  empty-AAD case and an `AAD = "additional data"` case. 4 round-trip
+  assertions (encrypt + decrypt, both AAD variants) — all pass against
+  GmSSL 3.1.1 (Homebrew build 20250911-5311). When `gmssl` is not on
+  PATH the test skips gracefully, matching the existing interop-test
+  pattern (e.g. `sm2_e2e_cross::gmssl_encrypt_rust_decrypt`).
+
+  The pre-existing `gcm_vs_gmssl` test is preserved as
+  `gcm_vs_gmssl_known_values` (hardcoded reference hex against
+  `8b985a9c…f1bed` / `8b985a9c…bcf44`), serving as a
+  `gmssl`-PATH-independent regression guard. Both tests coexist.
+
+  Key design choice: the new test uses `-aad ""` (the ASCII-string form,
+  NOT `-aad_hex ""`) for empty AAD. Although GmSSL 3.1.1 happens to
+  produce identical output for all three empty-AAD invocation forms
+  (no-flag / `-aad ""` / `-aad_hex ""`, sha256 = `9c8da069…3de6`),
+  future versions of `hex_to_bytes("", 0, …)` may reject empty input,
+  making `-aad_hex ""` version-sensitive. `-aad ""` is the
+  cross-version-stable form. Verified empirically on 2026-10-01 — full
+  results in
+  `interop/INTEROP-2026-10-01-sm4-gcm-verification.md`. SemVer: PATCH
+  (additive test-only).
+
+- **`README.md` SM4 compliance row + `合规与基准` section** — the SM4
+  algorithm table row now explicitly enumerates **GM/T 0028-2024**,
+  **GB/T 32907-2016**, **GB/T 36624-2018**, **RFC 8998**, the
+  Wycheproof SM4-GCM 65/104 vectors, and the GmSSL 3.1.1 CLI
+  live-interop. A new `合规与基准` (Compliance & Benchmark) section
+  below the table maps each standard/benchmark to its gm-crypto test
+  surface (KAT function or integration test) with checkmark status.
+  Closes the README-level compliance-declaration gap noted in
+  `AUDIT-2026-09-10-gm-crypto-v1.md` I-2 ("referenced in doc-comment
+  but not in README").
+
+- **`interop/INTEROP-2026-10-01-sm4-gcm-verification.md`** — new
+  interop report documenting the full third-party-report response:
+  (1) the trigger; (2) the PR-1 → PR-4 audit trail; (3) empirical
+  byte-for-byte equivalence between gm-crypto and GmSSL 3.1.1 CLI for
+  4 test cases; (4) the `-aad` / `-aad_hex` flag semantics verified on
+  2026-10-01; (5) the standards coverage matrix; (6) the coverage gap
+  (NIST SP 800-38D §5.2.1.1 GHASH-keyed IV, out of API scope); (7)
+  conclusion explicitly rebutting the third-party report's
+  "OpenSSL 3.6.3 as independent judge" claim (OpenSSL has no SM4-GCM).
+  No behavior change. SemVer: PATCH (documentation only).
+
 ### Fixed
 
 - **CRL signature BIT STRING walker** (PR-4.29 companion fix):

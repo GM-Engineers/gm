@@ -85,6 +85,7 @@ mod sm3_tests {
 
 mod sm4_tests {
     use gm_crypto::sm4::Sm4Cipher;
+    use std::process::Command;
 
     /// SM4-CBC 对比 GmSSL 参考值
     /// 注意：encrypt_cbc 自带 PKCS7 padding，GmSSL 输出也含 padding
@@ -148,9 +149,13 @@ mod sm4_tests {
         assert!(pass1 && pass2, "SM4-CBC conformance test failed");
     }
 
-    /// SM4-GCM 对比 GmSSL 参考值
+    /// SM4-GCM 对比 GmSSL 参考值 (硬编码 known-values 回归护栏，不依赖 PATH 上的 gmssl)
+    ///
+    /// 该测试保留原始硬编码参考 hex，作为不依赖 `gmssl` CLI 是否安装的回归
+    /// 护栏。原始参考来源：bash /tmp/gm_conformance_v2.sh 输出，2026-05-25。
+    /// 真实活体 cross-impl interop 见下方的 `gcm_vs_gmssl_cli` 测试。
     #[test]
-    fn gcm_vs_gmssl() {
+    fn gcm_vs_gmssl_known_values() {
         let key_hex = "0123456789abcdef0123456789abcdef";
         let iv_hex = "0123456789abcdef01234567";
 
@@ -203,6 +208,166 @@ mod sm4_tests {
         assert_eq!(decrypted2, plaintext1.to_vec());
 
         assert!(pass1 && pass2, "SM4-GCM conformance test failed");
+    }
+
+    /// SM4-GCM 实时对比 GmSSL 3.1.1 CLI（若 gmssl 不在 PATH 则跳过）
+    ///
+    /// 这是真正的 cross-impl interop 测试：动态调用 `gmssl sm4 -gcm` 加密，
+    /// 然后验证 gm-crypto 输出 byte-for-byte 一致。当 gmssl CLI 不在 PATH
+    /// 时优雅跳过（与同文件中其他 gmssl interop 测试一致）。
+    ///
+    /// 关键设计选择：使用 `-aad ""`（字符串形式）而不是 `-aad_hex ""`（十六进制
+    /// 形式）声明空 AAD。虽然在 GmSSL 3.1.1 上三种空 AAD 形式（无 flag /
+    /// `-aad ""` / `-aad_hex ""`）产生相同输出，未来的 hex_to_bytes 实现可能
+    /// 对空输入返回错误。使用 `-aad ""` 是版本安全的。
+    #[test]
+    fn gcm_vs_gmssl_cli() {
+        let key_hex = "0123456789abcdef0123456789abcdef";
+        let iv_hex = "0123456789abcdef01234567";
+        let plaintext = b"hello world";
+
+        // 写入临时文件，使用唯一路径避免并发冲突
+        let tmp_dir = std::env::temp_dir().join("sm4_gcm_cli_e2e");
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let pt_path = tmp_dir.join("pt.bin");
+        let ct_path = tmp_dir.join("ct.bin");
+        std::fs::write(&pt_path, plaintext).expect("write pt.bin");
+
+        let cipher = Sm4Cipher::from_hex(key_hex).expect("SM4 key create failed");
+        let iv = hex::decode(iv_hex).expect("iv hex decode");
+
+        // 测试 1: 无 AAD（关键：用 -aad "" 显式声明，与 #2 形式对称）
+        //   echo -n "hello world" | gmssl sm4 -gcm -encrypt -key ... -iv ... -aad ""
+        let encrypt1 = match Command::new("gmssl")
+            .args([
+                "sm4",
+                "-gcm",
+                "-encrypt",
+                "-key",
+                key_hex,
+                "-iv",
+                iv_hex,
+                "-aad",
+                "", // 字符串形式的空 AAD（版本安全）
+                "-in",
+                pt_path.to_str().unwrap(),
+                "-out",
+                ct_path.to_str().unwrap(),
+            ])
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => {
+                println!(
+                    "SM4-GCM Rust ↔ GmSSL CLI live interop: ⚠️ gmssl CLI not available (skipping)"
+                );
+                return;
+            }
+        };
+        assert!(
+            encrypt1.status.success(),
+            "gmssl sm4 -gcm encrypt (no AAD) failed: stderr={}",
+            String::from_utf8_lossy(&encrypt1.stderr)
+        );
+        let gmssl_ct1 = std::fs::read(&ct_path).expect("read ct1.bin");
+        // ct 末尾 16 字节是 tag
+        assert!(
+            gmssl_ct1.len() >= 16,
+            "GmSSL output too short ({} bytes, expected ≥ 16)",
+            gmssl_ct1.len()
+        );
+        let (gmssl_ciphertext1, gmssl_tag1) = gmssl_ct1.split_at(gmssl_ct1.len() - 16);
+
+        let (rust_ct1, rust_tag1) = cipher
+            .encrypt_gcm(plaintext, &iv, &[])
+            .expect("SM4-GCM encrypt (no AAD) failed");
+        assert_eq!(
+            rust_ct1,
+            gmssl_ciphertext1,
+            "SM4-GCM ciphertext mismatch (no AAD): Rust={} GmSSL={}",
+            hex::encode(&rust_ct1),
+            hex::encode(gmssl_ciphertext1)
+        );
+        assert_eq!(
+            &rust_tag1[..],
+            gmssl_tag1,
+            "SM4-GCM tag mismatch (no AAD): Rust={} GmSSL={}",
+            hex::encode(&rust_tag1),
+            hex::encode(gmssl_tag1)
+        );
+
+        // 测试 2: 带 AAD "additional data"
+        //   echo -n "hello world" | gmssl sm4 -gcm -encrypt -key ... -iv ... -aad "additional data"
+        let aad_str = "additional data";
+        let encrypt2 = Command::new("gmssl")
+            .args([
+                "sm4",
+                "-gcm",
+                "-encrypt",
+                "-key",
+                key_hex,
+                "-iv",
+                iv_hex,
+                "-aad",
+                aad_str,
+                "-in",
+                pt_path.to_str().unwrap(),
+                "-out",
+                ct_path.to_str().unwrap(),
+            ])
+            .output()
+            .expect("gmssl sm4 -gcm encrypt (with AAD) spawn");
+        assert!(
+            encrypt2.status.success(),
+            "gmssl sm4 -gcm encrypt (with AAD) failed: stderr={}",
+            String::from_utf8_lossy(&encrypt2.stderr)
+        );
+        let gmssl_ct2 = std::fs::read(&ct_path).expect("read ct2.bin");
+        assert!(
+            gmssl_ct2.len() >= 16,
+            "GmSSL output too short ({} bytes)",
+            gmssl_ct2.len()
+        );
+        let (gmssl_ciphertext2, gmssl_tag2) = gmssl_ct2.split_at(gmssl_ct2.len() - 16);
+
+        let (rust_ct2, rust_tag2) = cipher
+            .encrypt_gcm(plaintext, &iv, aad_str.as_bytes())
+            .expect("SM4-GCM encrypt (with AAD) failed");
+        assert_eq!(
+            rust_ct2,
+            gmssl_ciphertext2,
+            "SM4-GCM ciphertext mismatch (with AAD): Rust={} GmSSL={}",
+            hex::encode(&rust_ct2),
+            hex::encode(gmssl_ciphertext2)
+        );
+        assert_eq!(
+            &rust_tag2[..],
+            gmssl_tag2,
+            "SM4-GCM tag mismatch (with AAD): Rust={} GmSSL={}",
+            hex::encode(&rust_tag2),
+            hex::encode(gmssl_tag2)
+        );
+
+        // 解密 round-trip（用 GmSSL 加密的密文，gm-crypto 解密应还原 plaintext）
+        let decrypted1 = cipher
+            .decrypt_gcm(gmssl_ciphertext1, &iv, &[], gmssl_tag1)
+            .expect("SM4-GCM decrypt (no AAD) failed");
+        assert_eq!(
+            decrypted1,
+            plaintext.to_vec(),
+            "SM4-GCM decrypt (no AAD) round-trip mismatch"
+        );
+
+        let decrypted2 = cipher
+            .decrypt_gcm(gmssl_ciphertext2, &iv, aad_str.as_bytes(), gmssl_tag2)
+            .expect("SM4-GCM decrypt (with AAD) failed");
+        assert_eq!(
+            decrypted2,
+            plaintext.to_vec(),
+            "SM4-GCM decrypt (with AAD) round-trip mismatch"
+        );
+
+        println!("SM4-GCM Rust ↔ GmSSL 3.1.1 CLI live interop: ✅ (encrypt/decrypt byte-for-byte)");
     }
 }
 
