@@ -1,7 +1,13 @@
 //! Known Answer Tests (KAT) for cryptographic algorithm self-testing.
 //!
-//! This module implements startup self-tests as required by GM/T 0028-2014
-//! (密码模块通用准则) Section 7.2.4.1 and FIPS 140-2/3 Section 4.9.1.
+//! This module implements startup self-tests as required by GM/T 0028-2024
+//! 《密码模块安全要求》 Section 7.2.4.1 and FIPS 140-2/3 Section 4.9.1.
+//!
+//! GM/T 0028-2024 was published 2024-12-27 and became effective 2025-07-01,
+//! replacing GM/T 0028-2014 (制修订=修订, 代替标准=GM/T 0028-2014,
+//! confirmed via 全国标准信息公共服务平台 hbba.sacinfo.org.cn).
+//! Section references (7.2.4.1–7.2.4.5) follow the GM/T 0028-2014 structure;
+//! TODO: re-verify against the 2024 PDF when it becomes publicly downloadable.
 //!
 //! KAT verifies that the cryptographic implementation produces consistent and
 //! correct results, detecting any corruption or implementation bugs.
@@ -15,7 +21,7 @@
 //! kat::self_test().expect("KAT self-test failed");
 //! ```
 //!
-//! # GM/T 0028-2014 Compliance
+//! # GM/T 0028-2024 Compliance
 //!
 //! This module implements the following self-test requirements:
 //! - **Power-up self-test**: Run at module initialization (7.2.4.1)
@@ -98,7 +104,7 @@ mod sm2_vectors {
 ///
 /// Uses the official test vectors from GB/T 32905-2016 Appendix A
 /// to verify SM3 implementation correctness, as required by
-/// GM/T 0028-2014 Section 7.2.4.2.
+/// GM/T 0028-2024 Section 7.2.4.2.
 fn kat_sm3() -> KatResult {
     // GB/T 32905-2016 Appendix A, Example 1:
     // Input: "abc"
@@ -171,7 +177,7 @@ fn kat_sm3() -> KatResult {
 ///
 /// Uses the official test vectors from GB/T 32907-2016 Appendix A
 /// to verify SM4 implementation correctness, as required by
-/// GM/T 0028-2014 Section 7.2.4.2.
+/// GM/T 0028-2024 Section 7.2.4.2.
 #[allow(deprecated)]
 fn kat_sm4() -> KatResult {
     // GB/T 32907-2016 Appendix A:
@@ -333,7 +339,7 @@ fn kat_rng() -> KatResult {
 
 /// Run all KAT self-tests
 ///
-/// This function implements GM/T 0028-2014 Section 7.2.4.1 power-up self-test.
+/// This function implements GM/T 0028-2024 Section 7.2.4.1 power-up self-test.
 /// It should be called at module initialization before any cryptographic
 /// operations are performed.
 ///
@@ -362,7 +368,7 @@ pub fn self_test() -> KatResult {
 /// # Errors
 /// Returns error if any test fails.
 pub fn self_test_with_options(force: bool) -> KatResult {
-    // GM/T 0028-2014 7.2.4.1: Self-test should run once at power-up
+    // GM/T 0028-2024 7.2.4.1: Self-test should run once at power-up
     if !force && SELF_TEST_PASSED.load(Ordering::SeqCst) {
         return Err(CryptoError::EncryptionFailed(
             "Self-test already completed; re-entry not allowed".to_string(),
@@ -404,7 +410,7 @@ pub fn ensure_self_test() -> KatResult {
     self_test_with_options(false)
 }
 
-/// Run SM2 pair-wise consistency test (GM/T 0028-2014 7.2.4.3)
+/// Run SM2 pair-wise consistency test (GM/T 0028-2024 7.2.4.3)
 ///
 /// Tests that freshly generated keys can perform sign/verify operations.
 fn kat_sm2_pairwise() -> KatResult {
@@ -495,18 +501,152 @@ fn kat_sm2_kex() -> KatResult {
     Ok(())
 }
 
-/// Run SM4-GCM Known Answer Test
+/// Run SM4-GCM Known Answer Tests.
 ///
-/// Tests authenticated encryption with associated data.
+/// Asserts against three standard-issued SM4-GCM KAT vectors from Chinese national
+/// standards and the IETF, plus a self-consistency smoke test (encrypt + decrypt
+/// round-trip) and negative tests for tampered tag / ciphertext.
+///
+/// Standards asserted:
+/// - **GB/T 36624-2018 附录 C.5** "可鉴别的加密机制 5" (GCM with SM4), 2 vectors
+///   (Mechanism 5 v1 with empty PT/AAD, v2 with 16-byte zero PT and empty AAD).
+///   Directly verified via macOS Vision OCR of the GB/T 36624-2018 PDF,
+///   page 18 / standard §C.5.
+/// - **RFC 8998 附录 A.1** "SM4-GCM Test Vectors", 1 vector (64-byte PT,
+///   20-byte AAD, K=0123…3210). Verified verbatim against
+///   `https://www.rfc-editor.org/rfc/rfc8998.txt`.
+///
+/// Failure semantics:
+/// - Each vector asserts the *expected* ciphertext and tag bytes
+///   independently (`if got != expected { return Err(...) }`), so a wrong
+///   implementation is pinpointed to a specific vector, not the whole KAT.
 fn kat_sm4_gcm() -> KatResult {
-    let key = [
-        0x01u8, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32,
+    // KAT vector 1: GB/T 36624-2018 附录 C.5 (Mechanism 5) v1
+    // K = 00..00 (16B), IV = 00..00 (12B), AAD = empty, PT = empty
+    // Expected: tag = 232F0CFE308B49EA6FC88229B5DC858D (no ciphertext).
+    let key1 = [0u8; 16];
+    let iv1 = [0u8; 12];
+    let aad1: &[u8] = b"";
+    let pt1: &[u8] = b"";
+
+    let cipher1 = Sm4Cipher::new(&key1)?;
+    let (ct1, tag1) = cipher1.encrypt_gcm(pt1, &iv1, aad1)?;
+
+    let expected_tag1: [u8; 16] = [
+        0x23, 0x2F, 0x0C, 0xFE, 0x30, 0x8B, 0x49, 0xEA, 0x6F, 0xC8, 0x82, 0x29, 0xB5, 0xDC, 0x85,
+        0x8D,
+    ];
+    if tag1 != expected_tag1 {
+        return Err(CryptoError::Sm4Error(format!(
+            "SM4-GCM KAT failed: GB/T 36624-2018 附录C.5 v1 (empty PT/AAD)\n\
+             expected tag: {:02x?}\n\
+             got tag:      {:02x?}",
+            expected_tag1, tag1
+        )));
+    }
+    if !ct1.is_empty() {
+        return Err(CryptoError::Sm4Error(format!(
+            "SM4-GCM KAT failed: GB/T 36624-2018 附录C.5 v1 — expected empty ciphertext, got {} bytes",
+            ct1.len()
+        )));
+    }
+
+    // KAT vector 2: GB/T 36624-2018 附录 C.5 (Mechanism 5) v2
+    // K = 00..00, IV = 00..00 (12B), AAD = empty, PT = 16B zero.
+    let pt2 = [0u8; 16];
+
+    let (ct2, tag2) = cipher1.encrypt_gcm(&pt2, &iv1, aad1)?;
+
+    let expected_ct2: [u8; 16] = [
+        0x7D, 0xE2, 0xAA, 0x7F, 0x11, 0x10, 0x18, 0x82, 0x18, 0x06, 0x3B, 0xE1, 0xBF, 0xEB, 0x6D,
+        0x89,
+    ];
+    let expected_tag2: [u8; 16] = [
+        0xB8, 0x51, 0xB5, 0xF3, 0x94, 0x93, 0x75, 0x2B, 0xE5, 0x08, 0xF1, 0xBB, 0x44, 0x82, 0xC5,
+        0x57,
+    ];
+    if ct2 != expected_ct2 {
+        return Err(CryptoError::Sm4Error(format!(
+            "SM4-GCM KAT failed: GB/T 36624-2018 附录C.5 v2 (16B zero PT)\n\
+             expected ct: {:02x?}\n\
+             got ct:      {:02x?}",
+            expected_ct2, ct2
+        )));
+    }
+    if tag2 != expected_tag2 {
+        return Err(CryptoError::Sm4Error(format!(
+            "SM4-GCM KAT failed: GB/T 36624-2018 附录C.5 v2 (16B zero PT)\n\
+             expected tag: {:02x?}\n\
+             got tag:      {:02x?}",
+            expected_tag2, tag2
+        )));
+    }
+
+    // KAT vector 3: RFC 8998 附录 A.1
+    // K = 0123456789ABCDEFFEDCBA9876543210
+    // IV = 00001234567800000000ABCD (12B)
+    // AAD = FEEDFACEDEADBEEFFEEDFACEDEADBEEFABADDAD2 (20B)
+    // PT  = AAAA...AAAA (16 × 4 = 64B)
+    let key3: [u8; 16] = [
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32,
         0x10,
     ];
+    let iv3: [u8; 12] = [
+        0x00, 0x00, 0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x00, 0xAB, 0xCD,
+    ];
+    let aad3: &[u8] = &[
+        0xFE, 0xED, 0xFA, 0xCE, 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED, 0xFA, 0xCE, 0xDE, 0xAD, 0xBE,
+        0xEF, 0xAB, 0xAD, 0xDA, 0xD2,
+    ];
+    let pt3: [u8; 64] = [
+        0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB,
+        0xBB, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xDD, 0xDD, 0xDD, 0xDD, 0xDD, 0xDD,
+        0xDD, 0xDD, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xAA, 0xAA, 0xAA, 0xAA,
+        0xAA, 0xAA, 0xAA, 0xAA,
+    ];
+    let expected_ct3: [u8; 64] = [
+        0x17, 0xF3, 0x99, 0xF0, 0x8C, 0x67, 0xD5, 0xEE, 0x19, 0xD0, 0xDC, 0x99, 0x69, 0xC4, 0xBB,
+        0x7D, 0x5F, 0xD4, 0x6F, 0xD3, 0x75, 0x64, 0x89, 0x06, 0x91, 0x57, 0xB2, 0x82, 0xBB, 0x20,
+        0x07, 0x35, 0xD8, 0x27, 0x10, 0xCA, 0x5C, 0x22, 0xF0, 0xCC, 0xFA, 0x7C, 0xBF, 0x93, 0xD4,
+        0x96, 0xAC, 0x15, 0xA5, 0x68, 0x34, 0xCB, 0xCF, 0x98, 0xC3, 0x97, 0xB4, 0x02, 0x4A, 0x26,
+        0x91, 0x23, 0x3B, 0x8D,
+    ];
+    let expected_tag3: [u8; 16] = [
+        0x83, 0xDE, 0x35, 0x41, 0xE4, 0xC2, 0xB5, 0x81, 0x77, 0xE0, 0x65, 0xA9, 0xBF, 0x7B, 0x62,
+        0xEC,
+    ];
+
+    let cipher3 = Sm4Cipher::new(&key3)?;
+    let (ct3, tag3) = cipher3.encrypt_gcm(&pt3, &iv3, aad3)?;
+
+    if ct3 != expected_ct3 {
+        return Err(CryptoError::Sm4Error(format!(
+            "SM4-GCM KAT failed: RFC 8998 附录A.1 (64B PT, 20B AAD)\n\
+             expected ct: {:02x?}\n\
+             got ct:      {:02x?}",
+            expected_ct3, ct3
+        )));
+    }
+    if tag3 != expected_tag3 {
+        return Err(CryptoError::Sm4Error(format!(
+            "SM4-GCM KAT failed: RFC 8998 附录A.1 (64B PT, 20B AAD)\n\
+             expected tag: {:02x?}\n\
+             got tag:      {:02x?}",
+            expected_tag3, tag3
+        )));
+    }
+
+    // Self-consistency smoke test (existing behavior, preserved).
+    //
     // NOTE: All-zero nonce is used here ONLY for KAT determinism.
     // Never use a zero or fixed nonce in production — GCM nonce reuse
     // is catastrophic. Production code must generate unique nonces per
     // encryption (e.g., counter or random per RFC 5116 §3.2).
+    let key = [
+        0x01u8, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32,
+        0x10,
+    ];
     let nonce = [0x00u8; 12];
     let aad = b"GM/TLS KAT AAD";
     let plaintext = b"GM/T 0028 SM4-GCM test plaintext";
@@ -549,7 +689,7 @@ fn kat_sm4_gcm() -> KatResult {
     Ok(())
 }
 
-/// Run critical function tests (GM/T 0028-2014 7.2.4.5)
+/// Run critical function tests (GM/T 0028-2024 7.2.4.5)
 ///
 /// Tests key generation and key loading critical paths.
 fn kat_critical_functions() -> KatResult {
@@ -574,7 +714,7 @@ fn kat_critical_functions() -> KatResult {
     Ok(())
 }
 
-/// Software integrity verification (GM/T 0028-2014 7.2.4.4)
+/// Software integrity verification (GM/T 0028-2024 7.2.4.4)
 ///
 /// Verifies that critical cryptographic functions have not been tampered with
 /// by checking their expected behavior with known inputs.

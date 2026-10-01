@@ -7,6 +7,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Standards references: `GM/T 0028-2014` → `GM/T 0028-2024`** in `src/kat.rs`
+  doc-comments (9 locations: module-level, `kat_sm3`, `kat_sm4`, `self_test`,
+  `self_test_with_options`, `kat_sm2_pairwise`, `kat_critical_functions`,
+  `verify_software_integrity`, plus the `# GM/T 0028-2024 Compliance`
+  section heading). `GM/T 0028-2024` 《密码模块安全要求》 was published
+  2024-12-27 and became effective 2025-07-01, replacing `GM/T 0028-2014`
+  per 全国标准信息公共服务平台 (hbba.sacinfo.org.cn). Status: 现行,
+  制修订=修订, 代替标准=GM/T 0028-2014. Section-number references
+  (§7.2.4.1–7.2.4.5) follow the 2014 structure; the 2024 PDF is
+  currently viewable on hbba.sacinfo.org.cn but requires auth to download,
+  so section-number preservation across the 2014→2024 revision will be
+  re-verified in a follow-up patch when the PDF is publicly released.
+
+  The 3 KAT sign-input bytes containing the literal `b"GM/T 0028 ..."`
+  (lines 424/518/595 of `src/kat.rs`) are KAT input data — SM2 sign
+  payload, SM4-GCM plaintext, and SM3 software-integrity canary — and
+  are preserved unchanged to keep existing KAT signatures stable. No
+  behavior change.
+
+### Added
+
+- **SM4-GCM standard KAT vectors in `kat_sm4_gcm`** (`src/kat.rs`): asserts
+  against three official standard-issued SM4-GCM test vectors, in addition
+  to the existing self-consistency round-trip and tampered-input checks.
+  These guard against silent SM4-GCM regressions that the previous
+  self-consistency tests could not detect.
+
+  Three new assertions added, each independently pinpointed by its error:
+
+  - **GB/T 36624-2018 附录 C.5 v1** (K=∅, IV=∅(12B), AAD=∅, PT=∅):
+    expected tag = `232f0cfe308b49ea6fc88229b5dc858d` (no ciphertext).
+    This is the empty-payload case of the "可鉴别的加密机制 5" (GCM with SM4)
+    section of the GB/T 36624-2018 national standard, verified via
+    macOS Vision OCR of the PDF (page 18, PDF page 24).
+
+  - **GB/T 36624-2018 附录 C.5 v2** (K=∅, IV=∅(12B), AAD=∅, PT=∅(16B)):
+    expected ct = `7de2aa7f1110188218063be1bfeb6d89`,
+    tag = `b851b5f39493752be508f1bb4482c557`.
+
+  - **RFC 8998 附录 A.1** (K=`0123…3210`, IV=`00001234567800000000abcd`,
+    AAD=`feedfacedeadbeeffeedfacedeadbeefabaddad2` (20B),
+    PT=AAAA…AAAA (64B)):
+    expected ct = `17f399f08c67d5ee19d0dc9969c4bb7d5fd46fd3756489069157b282bb200735d82710ca5c22f0ccfa7cbf93d496ac15a56834cbcf98c397b4024a2691233b8d`,
+    tag = `83de3541e4c2b58177e065a9bf7b62ec`.
+    Cross-verified against the IETF RFC text at `rfc-editor.org/rfc/rfc8998.txt`.
+
+  All three vectors were independently verified before this change against
+  the current gm-crypto implementation AND against `gmssl 3.1.1` CLI on the
+  same inputs (see `/tmp/sm4_gcm_verify`). The implementation already
+  produces byte-for-byte matches, and this PR hardcodes the expected values
+  as regression guards. SemVer: PATCH (additive KAT only).
+
+- **Wycheproof SM4-GCM 65 vectors** in new `tests/wycheproof_sm4_gcm.rs`
+  integration test, sourced from C2SP Wycheproof `testvectors_v1/sm4_gcm_test.json`
+  via `gmssl-master/tests/sm4_gcmtest.h` (Apache-2.0). Embeds the 65 of 104
+  Wycheproof vectors that fit gm-crypto's 12-byte nonce constraint:
+
+  - **38 valid vectors** (1 `Ktv` + 35 `Pseudorandom` + 2 `SpecialCase`):
+    expected to encrypt byte-for-byte to the documented ct/tag and round-trip
+    decrypt to msg.
+  - **27 invalid `ModifiedTag` vectors** (bit-flip and all-zero / all-one tag
+    variants per Wycheproof): expected to be rejected by `decrypt_gcm`.
+
+  Plus one positive API-contract test
+  `wycheproof_sm4_gcm_rejects_non_12b_iv` asserting that `encrypt_gcm` rejects
+  IVs of length 0/1/8/11/13/16/32/64/128/257 (gm-crypto's
+  `SM4_GCM_NONCE_LENGTH = 12` constraint). Regression guard against silent
+  relaxation of the IV-length check.
+
+  The other 39 Wycheproof vectors (12 `SmallIv` + 2 `ZeroLengthIv` + 25
+  `LongIv`/`CounterWrap`/`SpecialCase`) require GHASH-keyed IV derivation
+  per NIST SP 800-38D §5.2.1.1 — outside gm-crypto's current API contract.
+  If a future PR adds that capability, this test file is the place to
+  re-enable them. SemVer: PATCH (additive test-only).
+
 ### Fixed
 
 - **CRL signature BIT STRING walker** (PR-4.29 companion fix):
