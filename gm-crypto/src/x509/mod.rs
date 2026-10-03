@@ -21,7 +21,12 @@ pub struct CertInfo {
     pub not_after: OffsetDateTime,
     /// DNS name from SubjectAlternativeName extension, if present
     pub san_dns_name: Option<String>,
-    /// Serial number as lowercase hex string (e.g. "1a2b3c...")
+    /// Serial number as lowercase hex string (e.g. "1a2b3c...").
+    ///
+    /// Format invariant: lowercase hexadecimal encoding of the
+    /// DER-encoded serial-number INTEGER bytes (`cert.raw_serial()`).
+    /// For a typical 20-byte serial this is a 40-char string;
+    /// callers can round-trip it via `hex::decode`.
     pub serial_hex: Option<String>,
 }
 
@@ -63,7 +68,7 @@ pub fn parse_cert_pem(cert_pem: &str) -> Result<CertInfo, CryptoError> {
         spki_bytes,
         not_after,
         san_dns_name,
-        serial_hex: Some(cert.serial.to_string()),
+        serial_hex: Some(hex::encode(cert.raw_serial())),
     })
 }
 

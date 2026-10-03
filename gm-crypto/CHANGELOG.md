@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`x509::CertInfo::serial_hex` was decimal, now correctly hex** (`src/x509/mod.rs:66`).
+  The field is documented as "Serial number as lowercase hex string (e.g. '1a2b3c...')"
+  but was being populated via `cert.serial.to_string()` where `cert.serial: BigUint`,
+  which returns decimal. For a typical 20-byte serial this produced a 48-char
+  decimal string instead of the 40-char hex string the field name and downstream
+  callers expected. The downstream contract was hex:
+  - gm-ca `service.rs` persists `serial_hex` directly into the `serial_number`
+    column (`VARCHAR(64)` / `TEXT`); pre-fix, renewed certificates were stored
+    as decimal strings, breaking lookup by hex and breaking
+    `gm-ca/src/cert.rs:545`'s `hex::decode(&entry.serial_number)` during CRL
+    generation.
+  - gm-ca's initial issuance path (`cert.rs:418`) was already hex
+    (`hex::encode(serial_bytes)`); only the renewal round-trip through
+    `parse_cert_pem` was buggy.
+
+  Fixed to `hex::encode(cert.raw_serial())`, matching the openssl convention.
+  Doc comment expanded to make the format invariant explicit (lowercase hex,
+  no `0x` prefix, no leading zeros stripped, round-trips through `hex::decode`).
+  Field type unchanged (`Option<String>`). Added `tests/x509_serial_hex_format.rs`
+  with 4 invariant-locking tests (matches openssl, valid hex, lowercase only,
+  byte-length parity). SemVer: PATCH (additive test + bug fix; no public API
+  shape change, only data-format correctness).
+
+  **Migration note for gm-ca callers**: any pre-PR-5 rows in the
+  `serial_number` column that were stored via the renewal round-trip are
+  decimal strings and must be either re-issued (renew again under PR-5+) or
+  migrated by hand to hex before `hex::decode` will succeed on them in the
+  CRL generator. Initial-issuance rows (always hex per `cert.rs:418`) are
+  unaffected.
+
 ## [0.3.10] - 2026-10-01
 
 SM4-GCM compliance audit response (third-party report). Doc + KAT + Wycheproof
