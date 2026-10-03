@@ -1578,7 +1578,7 @@ mod pr420_crl_grace_period_tests {
         let opts = HandshakeOptions::default();
         assert!(opts.crl_grace_period.is_zero());
         assert!(
-            !opts.crl_info.is_some(),
+            opts.crl_info.is_none(),
             "default crl_info must be None (CRL check opt-in)"
         );
     }

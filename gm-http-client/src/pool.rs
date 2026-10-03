@@ -139,6 +139,92 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + PooledStream + 'static> Connecti
     }
 }
 
+/// Wrapper around GmHttpClient that uses connection pooling
+#[derive(Clone)]
+pub struct PooledHttpClient {
+    client: GmHttpClient,
+    pool: Arc<ConnectionPool<GmTlsStream<TcpStream>>>,
+}
+
+impl PooledHttpClient {
+    /// Create a new pooled HTTP client
+    pub fn new(client: GmHttpClient, pool: ConnectionPool<GmTlsStream<TcpStream>>) -> Self {
+        Self {
+            client,
+            pool: Arc::new(pool),
+        }
+    }
+
+    /// Send a GET request
+    pub async fn get(&self, url: &str) -> Result<Response, HttpClientError> {
+        let parsed = parse_and_validate_url(url)?;
+        self.request("GET", &parsed.host, parsed.port, &parsed.path, &[])
+            .await
+    }
+
+    /// Send a POST request
+    pub async fn post(&self, url: &str, body: &[u8]) -> Result<Response, HttpClientError> {
+        let parsed = parse_and_validate_url(url)?;
+        self.request("POST", &parsed.host, parsed.port, &parsed.path, body)
+            .await
+    }
+
+    async fn request(
+        &self,
+        method: &str,
+        host: &str,
+        port: u16,
+        path: &str,
+        body: &[u8],
+    ) -> Result<Response, HttpClientError> {
+        let addr = format!("{}:{}", host, port);
+
+        // Try to get pooled connection
+        let mut tls_stream = if let Some(stream) = self.pool.get_connection(host, port).await? {
+            stream
+        } else {
+            // Create new connection
+            let tcp = TcpStream::connect(&addr)
+                .await
+                .map_err(|e| HttpClientError::ConnectionFailed(e.to_string()))?;
+
+            self.client
+                .tls_connector()
+                .connect(tcp)
+                .await
+                .map_err(|e| HttpClientError::TlsError(e.to_string()))?
+        };
+
+        let request = build_request(method, host, path, body);
+        tls_stream
+            .write_all(request.as_bytes())
+            .await
+            .map_err(|e| HttpClientError::IoError(e.to_string()))?;
+
+        // For now, we read the full response and return the connection
+        let response = self.client.read_response(&mut tls_stream).await;
+
+        // Return connection to pool if still valid
+        if response.is_ok() {
+            self.pool.return_connection(host, port, tls_stream).await;
+        }
+
+        response
+    }
+
+    /// Start background cleanup task for the connection pool
+    pub fn start_cleanup_task(self) -> tokio::task::JoinHandle<()> {
+        let pool = self.pool.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                pool.cleanup().await;
+            }
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,91 +494,5 @@ mod tests {
         // Cleanup should remove stale connection
         pool.cleanup().await;
         assert_eq!(pool.len().await, 0);
-    }
-}
-
-/// Wrapper around GmHttpClient that uses connection pooling
-#[derive(Clone)]
-pub struct PooledHttpClient {
-    client: GmHttpClient,
-    pool: Arc<ConnectionPool<GmTlsStream<TcpStream>>>,
-}
-
-impl PooledHttpClient {
-    /// Create a new pooled HTTP client
-    pub fn new(client: GmHttpClient, pool: ConnectionPool<GmTlsStream<TcpStream>>) -> Self {
-        Self {
-            client,
-            pool: Arc::new(pool),
-        }
-    }
-
-    /// Send a GET request
-    pub async fn get(&self, url: &str) -> Result<Response, HttpClientError> {
-        let parsed = parse_and_validate_url(url)?;
-        self.request("GET", &parsed.host, parsed.port, &parsed.path, &[])
-            .await
-    }
-
-    /// Send a POST request
-    pub async fn post(&self, url: &str, body: &[u8]) -> Result<Response, HttpClientError> {
-        let parsed = parse_and_validate_url(url)?;
-        self.request("POST", &parsed.host, parsed.port, &parsed.path, body)
-            .await
-    }
-
-    async fn request(
-        &self,
-        method: &str,
-        host: &str,
-        port: u16,
-        path: &str,
-        body: &[u8],
-    ) -> Result<Response, HttpClientError> {
-        let addr = format!("{}:{}", host, port);
-
-        // Try to get pooled connection
-        let mut tls_stream = if let Some(stream) = self.pool.get_connection(host, port).await? {
-            stream
-        } else {
-            // Create new connection
-            let tcp = TcpStream::connect(&addr)
-                .await
-                .map_err(|e| HttpClientError::ConnectionFailed(e.to_string()))?;
-
-            self.client
-                .tls_connector()
-                .connect(tcp)
-                .await
-                .map_err(|e| HttpClientError::TlsError(e.to_string()))?
-        };
-
-        let request = build_request(method, host, path, body);
-        tls_stream
-            .write_all(request.as_bytes())
-            .await
-            .map_err(|e| HttpClientError::IoError(e.to_string()))?;
-
-        // For now, we read the full response and return the connection
-        let response = self.client.read_response(&mut tls_stream).await;
-
-        // Return connection to pool if still valid
-        if response.is_ok() {
-            self.pool.return_connection(host, port, tls_stream).await;
-        }
-
-        response
-    }
-
-    /// Start background cleanup task for the connection pool
-    pub fn start_cleanup_task(self) -> tokio::task::JoinHandle<()> {
-        let pool = self.pool.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
-            loop {
-                interval.tick().await;
-                pool.cleanup().await;
-            }
-        })
     }
 }
