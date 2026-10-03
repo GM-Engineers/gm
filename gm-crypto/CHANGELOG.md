@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.11] - 2026-10-03
+
+Fix `x509::CertInfo::serial_hex` data-format bug (was decimal, now hex; see `### Fixed` below).
+
 ### Fixed
 
 - **`x509::CertInfo::serial_hex` was decimal, now correctly hex** (`src/x509/mod.rs:66`).
@@ -628,6 +632,7 @@ removed. The crate's public surface is fully backwards-compatible with
 the 0.1.x series.
 
 [Unreleased]: https://github.com/GM-Engineers/gm/compare/main...HEAD
+[0.3.11]: https://github.com/GM-Engineers/gm/compare/gm-crypto-v0.3.10...gm-crypto-v0.3.11
 [0.3.10]: https://github.com/GM-Engineers/gm/compare/gm-crypto-v0.3.9...gm-crypto-v0.3.10
 [0.3.6]: https://github.com/GM-Engineers/gm/compare/gm-crypto-v0.3.5...gm-crypto-v0.3.6
 [0.3.5]: https://github.com/GM-Engineers/gm/compare/gm-crypto-v0.3.4...gm-crypto-v0.3.5
