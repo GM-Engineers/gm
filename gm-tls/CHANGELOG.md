@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.16] - 2026-10-09
+
+### Fixed
+
+- **`AsyncRead::poll_read` non-resumable short reads**: the record
+  layer's `poll_read` (in `gm-tls/src/record_layer.rs`, the
+  `impl AsyncRead for GmTlsStream<S>`) read the 5-byte record header
+  and the record body into stack-local buffers. On a short read
+  followed by `Poll::Pending` the bytes already pulled off the wire
+  were dropped on the next poll — because each `poll_read` is a
+  fresh synchronous frame — and the stream desynchronised,
+  surfacing as `expected application_data record 0x17`,
+  `TLS record too short`, `TLS record exceeds size limit`, or
+  `TLS record read incomplete` depending on which bytes landed in
+  the partial buffer. Partial header / body bytes now live on a
+  private `ReadState` field on `GmTlsStream` so a short read resumes
+  on the next poll. No public API change.
+  - New regression test in
+    `gm-tls/tests/record_layer_partial_read_regression.rs`
+    exercises the schedule with a one-byte ring buffer.
+
 > **Status**: The entries below cover gm-tls **0.2.3 → 0.2.14** (PR-4.6 /
 > 4.9 / 4.10 / 4.13 / 4.16 / 4.18 / 4.20 / 4.22 / 4.23 / 4.25 / 4.28 / 4.29). Each
 > version bump is annotated inline (`gm-tls bumped to 0.2.X (from 0.2.Y)`).
