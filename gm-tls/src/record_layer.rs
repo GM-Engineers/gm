@@ -33,6 +33,39 @@ const INNER_CONTENT_TYPE_ALERT: u8 = 0x15;
 /// Maximum TLS record size (24KB) - prevents memory exhaustion attacks
 const MAX_RECORD_SIZE: usize = 24 * 1024;
 
+/// Persistent partial-read state for [`AsyncRead::poll_read`].
+///
+/// Each `poll_read` is a fresh synchronous frame, so any bytes already
+/// pulled off the wire must live on `self` to survive a `Poll::Pending`
+/// return and a subsequent polling.
+#[derive(Default)]
+struct ReadState {
+    /// Accumulating 5-byte TLS record header pulled from the wire.
+    header: [u8; 5],
+    /// Number of bytes of `header` already filled (0..=5).
+    header_filled: usize,
+    /// `u16::from_be_bytes([header[3], header[4]])` decoded from a
+    /// fully-read header; valid only when `header_filled == 5`.
+    ct_len: usize,
+    /// Accumulating ciphertext body buffer; sized to `ct_len` once the
+    /// header has been validated.
+    body: Vec<u8>,
+    /// Number of bytes of `body` already filled (0..=ct_len).
+    body_filled: usize,
+}
+
+impl ReadState {
+    /// Drop any in-flight record progress so the next `poll_read` starts
+    /// a fresh record.
+    fn reset(&mut self) {
+        self.header = [0u8; 5];
+        self.header_filled = 0;
+        self.ct_len = 0;
+        self.body.clear();
+        self.body_filled = 0;
+    }
+}
+
 /// Generate the next nonce for a given sequence number.
 ///
 /// Per TLS 1.3 RFC 8446 Section 5.3, the nonce is constructed as:
@@ -102,6 +135,10 @@ pub struct GmTlsStream<S> {
     read_seq: u64,
     read_buf: Vec<u8>,
     read_buf_pos: usize,
+    /// Persistent partial-read state; survives `Poll::Pending` so a short
+    /// read resumes on the next poll instead of desynchronising the
+    /// stream.
+    read_state: ReadState,
     peer_cert_pem: Option<Vec<u8>>,
     /// Negotiated ALPN protocol
     alpn: Option<String>,
@@ -186,6 +223,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> GmTlsStream<S> {
             read_seq: 0,
             read_buf: Vec::new(),
             read_buf_pos: 0,
+            read_state: ReadState::default(),
             peer_cert_pem,
             alpn,
             cipher_enc: None,
@@ -876,45 +914,65 @@ impl<S: AsyncRead + AsyncWrite + Unpin> GmTlsStream<S> {
 
 impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for GmTlsStream<S> {
     fn poll_read(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        if self.read_buf_pos < self.read_buf.len() {
-            let available = self.read_buf.len() - self.read_buf_pos;
-            let to_copy = available.min(buf.remaining());
-            buf.put_slice(&self.read_buf[self.read_buf_pos..self.read_buf_pos + to_copy]);
-            self.read_buf_pos += to_copy;
+        let this = self.get_mut();
 
-            if self.read_buf_pos >= self.read_buf.len() {
-                self.read_buf.clear();
-                self.read_buf_pos = 0;
+        // Drain any plaintext already decrypted and queued by a previous
+        // poll (an earlier record may have produced more plaintext than
+        // fit into the caller's buffer).
+        if this.read_buf_pos < this.read_buf.len() {
+            let available = this.read_buf.len() - this.read_buf_pos;
+            let to_copy = available.min(buf.remaining());
+            buf.put_slice(&this.read_buf[this.read_buf_pos..this.read_buf_pos + to_copy]);
+            this.read_buf_pos += to_copy;
+
+            if this.read_buf_pos >= this.read_buf.len() {
+                this.read_buf.clear();
+                this.read_buf_pos = 0;
             }
 
             return Poll::Ready(Ok(()));
         }
 
-        let mut stream_ref = Pin::new(&mut self.inner);
-
-        // Read 5-byte TLS record header
-        let mut header = [0u8; 5];
-        match stream_ref
-            .as_mut()
-            .poll_read(cx, &mut ReadBuf::new(&mut header))
-        {
-            Poll::Ready(Ok(_)) => {}
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-            Poll::Pending => return Poll::Pending,
+        // Fill the 5-byte record header across short reads, persisting
+        // partial progress in `read_state` so `Poll::Pending` does not
+        // discard any bytes already pulled off the wire.
+        while this.read_state.header_filled < 5 {
+            let mut stream_ref = Pin::new(&mut this.inner);
+            let mut chunk =
+                ReadBuf::new(&mut this.read_state.header[this.read_state.header_filled..]);
+            match stream_ref.as_mut().poll_read(cx, &mut chunk) {
+                Poll::Ready(Ok(())) => {
+                    let n = chunk.filled().len();
+                    if n == 0 {
+                        // EOF mid-header: a partial all-zero header is not
+                        // a legitimate record — fail rather than mis-parse
+                        // it as a length-0 record below.
+                        return Poll::Ready(Err(std::io::Error::other(
+                            "TLS record header read incomplete",
+                        )));
+                    }
+                    this.read_state.header_filled += n;
+                }
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            }
         }
 
-        if header[0] != RECORD_TYPE_APPLICATION_DATA {
+        // Header complete — validate it.
+        if this.read_state.header[0] != RECORD_TYPE_APPLICATION_DATA {
             return Poll::Ready(Err(std::io::Error::other(format!(
                 "expected application_data record 0x17, got 0x{:02X}",
-                header[0]
+                this.read_state.header[0]
             ))));
         }
 
-        let ct_len = u16::from_be_bytes([header[3], header[4]]) as usize;
+        let ct_len =
+            u16::from_be_bytes([this.read_state.header[3], this.read_state.header[4]]) as usize;
+
         if ct_len < 16 {
             return Poll::Ready(Err(std::io::Error::other("TLS record too short")));
         }
@@ -922,35 +980,53 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for GmTlsStream<S> {
             return Poll::Ready(Err(std::io::Error::other("TLS record exceeds size limit")));
         }
 
-        let mut ciphertext_buf = vec![0u8; ct_len];
-        let mut filled = 0;
-        while filled < ct_len {
-            let mut chunk_buf = ReadBuf::new(&mut ciphertext_buf[filled..]);
-            match stream_ref.as_mut().poll_read(cx, &mut chunk_buf) {
-                Poll::Ready(Ok(_)) => {
-                    let n = chunk_buf.filled().len();
+        // Lazily (re)allocate the body buffer when the header length
+        // changes across records; discard any partial progress that no
+        // longer matches the freshly decoded length.
+        if this.read_state.ct_len != ct_len {
+            this.read_state.body = vec![0u8; ct_len];
+            this.read_state.body_filled = 0;
+            this.read_state.ct_len = ct_len;
+        }
+
+        // Fill the record body across short reads, again persisting
+        // partial progress in `read_state`.
+        while this.read_state.body_filled < this.read_state.body.len() {
+            let mut stream_ref = Pin::new(&mut this.inner);
+            let mut chunk = ReadBuf::new(&mut this.read_state.body[this.read_state.body_filled..]);
+            match stream_ref.as_mut().poll_read(cx, &mut chunk) {
+                Poll::Ready(Ok(())) => {
+                    let n = chunk.filled().len();
                     if n == 0 {
                         return Poll::Ready(Err(std::io::Error::other(
                             "TLS record read incomplete",
                         )));
                     }
-                    filled += n;
+                    this.read_state.body_filled += n;
                 }
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Pending => return Poll::Pending,
             }
         }
 
-        let (ciphertext, tag) = ciphertext_buf.split_at(ct_len - 16);
+        // Body complete — move ownership out so `this` can be borrowed
+        // mutably for the SM4-GCM machinery, then reset the partial-read
+        // state for the next record.
+        let header = this.read_state.header;
+        let ciphertext = std::mem::take(&mut this.read_state.body);
+        this.read_state.reset();
 
-        let nonce = match next_nonce(&self.read_nonce, self.read_seq) {
+        // Decrypt and dispatch by RFC 8446 §5.4 inner content type.
+        let (ciphertext_bytes, tag) = ciphertext.split_at(ct_len - 16);
+
+        let nonce = match next_nonce(&this.read_nonce, this.read_seq) {
             Ok(n) => n,
             Err(e) => {
                 return Poll::Ready(Err(std::io::Error::other(format!("Nonce overflow: {}", e))));
             }
         };
-        let seq_bytes = self.read_seq.to_be_bytes();
-        self.read_seq = match self.read_seq.checked_add(1) {
+        let seq_bytes = this.read_seq.to_be_bytes();
+        this.read_seq = match this.read_seq.checked_add(1) {
             Some(s) => s,
             None => {
                 return Poll::Ready(Err(std::io::Error::other("Sequence overflow")));
@@ -960,14 +1036,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for GmTlsStream<S> {
         // Build record header for AAD
         let aad = [&seq_bytes[..], &header[..]].concat();
 
-        let cipher = match self.get_cipher_dec() {
+        let cipher = match this.get_cipher_dec() {
             Ok(c) => c,
             Err(e) => {
                 return Poll::Ready(Err(std::io::Error::other(format!("SM4 key error: {}", e))));
             }
         };
 
-        let mut plaintext = match cipher.decrypt_gcm(ciphertext, &nonce, &aad, tag) {
+        let mut plaintext = match cipher.decrypt_gcm(ciphertext_bytes, &nonce, &aad, tag) {
             Ok(p) => p,
             Err(e) => {
                 return Poll::Ready(Err(std::io::Error::other(format!(
@@ -987,16 +1063,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for GmTlsStream<S> {
 
         match inner_content_type {
             INNER_CONTENT_TYPE_APPLICATION_DATA => {
-                self.read_buf = plaintext;
-                self.read_buf_pos = 0;
+                this.read_buf = plaintext;
+                this.read_buf_pos = 0;
 
-                let to_copy = self.read_buf.len().min(buf.remaining());
-                buf.put_slice(&self.read_buf[..to_copy]);
-                self.read_buf_pos = to_copy;
+                let to_copy = this.read_buf.len().min(buf.remaining());
+                buf.put_slice(&this.read_buf[..to_copy]);
+                this.read_buf_pos += to_copy;
 
-                if self.read_buf_pos >= self.read_buf.len() {
-                    self.read_buf.clear();
-                    self.read_buf_pos = 0;
+                if this.read_buf_pos >= this.read_buf.len() {
+                    this.read_buf.clear();
+                    this.read_buf_pos = 0;
                 }
 
                 Poll::Ready(Ok(()))
@@ -1004,7 +1080,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for GmTlsStream<S> {
             INNER_CONTENT_TYPE_HANDSHAKE => {
                 // Post-handshake message (e.g., KeyUpdate)
                 // Process it and then indicate we need another read
-                match self.process_inner_handshake(&plaintext) {
+                match this.process_inner_handshake(&plaintext) {
                     Ok(()) => {
                         // Signal that we consumed no application data;
                         // the caller should poll again.
