@@ -91,13 +91,27 @@ fn base_connector(certs: &GmcaCerts) -> TlcpConnector {
         .with_server_ca_chain(vec![certs.ca_cert_der.clone()])
 }
 
-/// Client sign + enc keys encrypted with the default scrypt KDF.
+/// Client sign + enc keys encrypted with the scrypt KDF.
+///
+/// Uses explicit low-cost scrypt parameters (`log_n = 12, r = 1, p = 1`)
+/// rather than the deliberately expensive `to_encrypted_pem` default
+/// (`log_n = 15, r = 8`). This still exercises the full scrypt code path
+/// end-to-end — the PEM carries a scrypt PBES2 identifier, which the
+/// connector must parse and decrypt inside the handshake — while keeping
+/// the derivation fast enough to fit the handshake timeout on slower
+/// shared CI runners. The expensive default cost profile is covered by
+/// gm-crypto's own round-trip tests.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn handshake_with_scrypt_encrypted_client_keys_succeeds() {
     let certs = support::gmca_cert_setup::generate_gmca_test_certs(&std::path::PathBuf::from("."))
         .expect("gen certs");
-    let sign_enc_pem = encrypt_key(&certs.client_sign_key_pem, None);
-    let enc_enc_pem = encrypt_key(&certs.client_enc_key_pem, None);
+    let kdf = PbeKdf::Scrypt {
+        log_n: 12,
+        r: 1,
+        p: 1,
+    };
+    let sign_enc_pem = encrypt_key(&certs.client_sign_key_pem, Some(&kdf));
+    let enc_enc_pem = encrypt_key(&certs.client_enc_key_pem, Some(&kdf));
 
     let connector = base_connector(&certs).with_client_certs(
         vec![
