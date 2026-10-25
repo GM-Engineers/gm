@@ -1689,6 +1689,39 @@ impl TlcpConnector {
         self.client_sign_key_password = password;
         self
     }
+    /// Load a client SM2 key pair from a PEM that may be either a
+    /// plaintext key (SEC1 / unencrypted PKCS#8) or an encrypted
+    /// PKCS#8 (`-----BEGIN ENCRYPTED PRIVATE KEY-----`).
+    ///
+    /// The plaintext form is tried first; only on failure do we attempt
+    /// encrypted-PKCS#8 decryption, so the common unencrypted case never
+    /// needs a password. Decryption uses the password passed to
+    /// [`with_client_certs`](Self::with_client_certs) — the same value
+    /// for the sign and enc keys — falling back to the documented
+    /// `"P@ssw0rd"` default when none was configured (matching the
+    /// gmssl test-cert convention promised in the README). If both
+    /// attempts fail the error reports BOTH the plaintext-parse and the
+    /// decryption reasons, so operators can distinguish "not a valid
+    /// PEM at all" from "wrong password".
+    fn load_client_key(&self, pem: &str) -> Result<gm_crypto::sm2::Sm2KeyPair, TlcpError> {
+        match gm_crypto::sm2::Sm2KeyPair::from_private_key_pem(pem) {
+            Ok(kp) => Ok(kp),
+            Err(plain_err) => {
+                let password = self
+                    .client_sign_key_password
+                    .as_deref()
+                    .unwrap_or("P@ssw0rd");
+                match gm_crypto::sm2::Sm2KeyPair::from_encrypted_pem(pem, password) {
+                    Ok(kp) => Ok(kp),
+                    Err(dec_err) => Err(TlcpError::HandshakeFailed(format!(
+                        "client key is neither a plaintext PEM ({plain_err}) nor a \
+                         decryptable encrypted PKCS#8 PEM with the configured password \
+                         ({dec_err})"
+                    ))),
+                }
+            }
+        }
+    }
     /// Configure the SM2 distid for the server encryption certificate
     /// used in ECDHE PMS derivation (Z_server per GB/T 32918.2-2016 §6.1).
     ///
@@ -1741,8 +1774,17 @@ impl TlcpConnector {
     }
     /// Connect to a TLCP server over the given transport.
     ///
-    /// If `server_sign_pubkey` is configured, performs a production ECDHE handshake
-    /// with ServerKeyExchange verification. Otherwise falls back to simulated handshake.
+    /// Requires a server signing public key pinned via
+    /// [`with_server_sign_key`](Self::with_server_sign_key): the handshake
+    /// then runs the production ECDHE path with ServerKeyExchange
+    /// verification (and, when configured, trust-anchor / CRL checks).
+    ///
+    /// If no pin is configured this returns an explicit error rather than
+    /// silently degrading to the deprecated, **no server-verification**
+    /// [`connect_tlcp`] path. Callers who genuinely want that unauthenticated
+    /// legacy behaviour (e.g. a throwaway test harness) must invoke
+    /// [`connect_tlcp`] directly so the security-critical choice is visible
+    /// at the call site.
     pub async fn connect<S>(&self, transport: S) -> Result<TlcpStream<S>, TlcpError>
     where
         S: AsyncRead + AsyncWrite + Unpin,
@@ -1752,14 +1794,16 @@ impl TlcpConnector {
         // emitted.
         let timer = crate::metrics::HandshakeTimer::new("client");
         let timeout = self.handshake_timeout;
-        let inner = async {
-            if self.server_sign_pubkey.is_some() {
-                self.connect_with_certs(transport).await
-            } else {
-                #[allow(deprecated)]
-                connect_tlcp(transport, &self.session_cache).await
-            }
-        };
+        if self.server_sign_pubkey.is_none() {
+            return Err(TlcpError::HandshakeFailed(
+                "TlcpConnector::connect() requires a pinned server signing key; \
+                 call with_server_sign_key() (with with_server_ca_chain() for full \
+                 PKI validation), or use connect_tlcp() explicitly for the legacy \
+                 no-verification path."
+                    .to_string(),
+            ));
+        }
+        let inner = async { self.connect_with_certs(transport).await };
         let result = with_handshake_timeout(timeout, "client", inner).await;
         match &result {
             Ok(_) => {
@@ -2958,14 +3002,8 @@ impl TlcpConnector {
                             .to_string(),
                     )
                 })?;
-                let client_enc_kp = gm_crypto::sm2::Sm2KeyPair::from_private_key_pem(
-                    client_enc_pem,
-                )
-                .map_err(|e| {
-                    TlcpError::HandshakeFailed(format!(
-                        "client enc key load (PKCS#8/SEC1 PEM): {}",
-                        e
-                    ))
+                let client_enc_kp = self.load_client_key(client_enc_pem).map_err(|e| {
+                    TlcpError::HandshakeFailed(format!("client enc key load: {}", e))
                 })?;
                 let client_enc_pub_sec1 = client_enc_kp.public_key_bytes_uncompressed();
                 if client_enc_pub_sec1.len() != 65 || client_enc_pub_sec1[0] != 0x04 {
@@ -3215,8 +3253,7 @@ impl TlcpConnector {
             let pem = client_sign_key_pem.as_deref().ok_or_else(|| {
                 TlcpError::HandshakeFailed("client signing key disappeared mid-handshake".into())
             })?;
-            let client_kp = gm_crypto::sm2::Sm2KeyPair::from_private_key_pem(pem)
-                .map_err(|e| TlcpError::Sm2KeyError(format!("client key load: {:?}", e)))?;
+            let client_kp = self.load_client_key(pem)?;
             // CV signing must use the SAME distid the peer uses to verify
             // the SM2 signature. The peer's verify path is
             // `SM3(Z || transcript)` with Z computed over OUR sign cert's
