@@ -31,6 +31,7 @@
 
 use crate::error::CryptoError;
 use crate::sm2::{Sm2Verifier, decompress_sm2_pubkey};
+use std::borrow::Cow;
 use std::sync::Arc;
 use time::OffsetDateTime;
 use x509_parser::oid_registry::{
@@ -46,6 +47,33 @@ use x509_parser::pem::Pem;
 use x509_parser::prelude::FromDer;
 use x509_parser::prelude::X509Certificate;
 use x509_parser::revocation_list::CertificateRevocationList;
+
+/// GM/T 0024-2012 (《信息安全技术 GM/T 0024-2012 SSL VPN技术规范》)
+/// TLCP certificate extension OIDs, present on TLCP sign/enc certs
+/// issued by Chinese CAs (and by GmSSL/Tongsuo in some configs):
+///   * `1.2.156.11235.1.1.1` — TLCP **server** (sign) certificate marker
+///   * `1.2.156.11235.1.1.2` — TLCP **client** certificate marker
+///
+/// These are frequently marked `critical`, so RFC 5280 §4.2 requires a
+/// conforming verifier to *recognize* them (otherwise it must reject the
+/// cert). gm-crypto recognizes them here but does **not** enforce their
+/// semantics — the sign/enc role distinction is already enforced through
+/// the `CertRole` KU/EKU checks — so the treatment matches
+/// `nameConstraints` / `policyConstraints` above ("accepted, semantics
+/// not enforced"). The `cryptblock` namespace OIDs
+/// (`1.2.156.11235.1.1.6` / `.1.1.7`) are intentionally NOT added: they
+/// live in the PKCS#7 cryptblock domain, never on X.509 certificates.
+///
+/// DER base-128 content bytes: `0x2A` (arcs 1.2), `0x81 0x1C` (156),
+/// `0xD7 0x63` (11235), then `0x01 0x01 0x01` / `0x01 0x01 0x02`.
+const GMTLS_TLCP_SERVER_CERT_EXT_OID: x509_parser::oid_registry::Oid<'static> =
+    x509_parser::oid_registry::Oid::new(Cow::Borrowed(&[
+        0x2A, 0x81, 0x1C, 0xD7, 0x63, 0x01, 0x01, 0x01,
+    ]));
+const GMTLS_TLCP_CLIENT_CERT_EXT_OID: x509_parser::oid_registry::Oid<'static> =
+    x509_parser::oid_registry::Oid::new(Cow::Borrowed(&[
+        0x2A, 0x81, 0x1C, 0xD7, 0x63, 0x01, 0x01, 0x02,
+    ]));
 
 /// RFC 5280 §4.2 — extensions that gm-crypto **recognizes** when
 /// verifying a certificate.
@@ -84,6 +112,8 @@ pub const KNOWN_X509_EXTENSIONS: &[x509_parser::oid_registry::Oid<'static>] = &[
     OID_X509_EXT_CERTIFICATE_POLICIES,      // 2.5.29.32
     OID_X509_EXT_POLICY_CONSTRAINTS,        // 2.5.29.36 — accepted, semantics deferred
     OID_X509_EXT_POLICY_MAPPINGS,           // 2.5.29.33
+    GMTLS_TLCP_SERVER_CERT_EXT_OID, // 1.2.156.11235.1.1.1 — accepted, semantics not enforced
+    GMTLS_TLCP_CLIENT_CERT_EXT_OID, // 1.2.156.11235.1.1.2 — accepted, semantics not enforced
 ];
 
 /// RFC 5280 §4.2: reject certificates that carry `critical = TRUE`

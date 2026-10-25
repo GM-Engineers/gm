@@ -209,3 +209,66 @@ fn pr48_check_helper_rejects_unknown_critical() {
         .expect_err("unknown critical extension must be rejected at helper level");
     assert!(format!("{err}").contains("unrecognized critical extension"));
 }
+
+// ============================================================================
+// GM/T 0024 TLCP certificate extension OIDs (1.2.156.11235.1.1.1 / .1.1.2)
+// — recognized (accepted), semantics NOT enforced
+// ============================================================================
+
+#[test]
+fn gmtls_tlcp_ext_oids_present_in_known_set() {
+    // Cross-check the hand base-128-encoded whitelist entries against a
+    // canonically-built Oid, so an encoding slip (e.g. a dropped arc)
+    // fails here even before the openssl fixtures run.
+    use x509_parser::oid_registry::Oid;
+    for arcs in [
+        &[1u64, 2, 156, 11235, 1, 1, 1][..],
+        &[1u64, 2, 156, 11235, 1, 1, 2][..],
+    ] {
+        let oid = Oid::from(arcs).expect("build oid from arcs");
+        assert!(
+            KNOWN_X509_EXTENSIONS.contains(&oid),
+            "GM/T 0024 TLCP extension OID {} must be whitelisted",
+            oid
+        );
+    }
+}
+
+#[test]
+fn gmtls_tlcp_server_cert_ext_critical_is_accepted() {
+    // 1.2.156.11235.1.1.1 marks a TLCP **server** (sign) certificate and
+    // is frequently emitted `critical` by Chinese CAs. RFC 5280 §4.2
+    // forces rejection of any unrecognized *critical* extension, so
+    // gm-crypto must recognize this OID or it would break interop with
+    // such certs. Pre-fix this cert was rejected.
+    let (_dir, pem) = issue_cert_with_ext(
+        "[v3_req]\nbasicConstraints=critical,CA:FALSE\n\
+         1.2.156.11235.1.1.1=critical,ASN1:NULL\n",
+    );
+    validate_cert_pem(&pem, now(), None)
+        .expect("critical GM/T 0024 server-cert extension must be accepted");
+}
+
+#[test]
+fn gmtls_tlcp_client_cert_ext_critical_is_accepted() {
+    let (_dir, pem) = issue_cert_with_ext(
+        "[v3_req]\nbasicConstraints=critical,CA:FALSE\n\
+         1.2.156.11235.1.1.2=critical,ASN1:NULL\n",
+    );
+    validate_cert_pem(&pem, now(), None)
+        .expect("critical GM/T 0024 client-cert extension must be accepted");
+}
+
+#[test]
+fn gmtls_cryptblock_ext_oids_remain_unrecognized_on_certs() {
+    // The GM/T 0024 `cryptblock` namespace OIDs (.1.1.6 / .1.1.7) live in
+    // the PKCS#7 domain and are deliberately NOT whitelisted here; a
+    // critical one on a certificate must still be rejected.
+    let (_dir, pem) = issue_cert_with_ext("[v3_req]\n1.2.156.11235.1.1.6=critical,ASN1:NULL\n");
+    let err = validate_cert_pem(&pem, now(), None)
+        .expect_err("cryptblock OID must remain unrecognized on X.509 certs");
+    assert!(
+        format!("{err}").contains("1.2.156.11235.1.1.6"),
+        "error must name the offending cryptblock OID; got: {err}"
+    );
+}

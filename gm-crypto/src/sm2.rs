@@ -7,7 +7,7 @@ use elliptic_curve::{
     sec1::{FromEncodedPoint, ToEncodedPoint},
 };
 use pkcs8::der::Decode;
-use rand_core::{CryptoRngCore, OsRng};
+use rand_core::{CryptoRngCore, OsRng, RngCore};
 use signature::{RandomizedSigner, Signer, Verifier};
 use sm2::Sm2;
 use sm2::dsa::{Signature, SigningKey, VerifyingKey};
@@ -27,6 +27,28 @@ pub const SM2_MAX_PLAINTEXT_LEN: usize = 64 * 1024;
 
 /// Magic header for versioned SM2 ciphertext: ASCII "SM".
 pub const SM2_CIPHER_VERSIONED_HEADER: [u8; 2] = [0x53, 0x4D];
+
+/// Password-based key-derivation function selection for
+/// [`Sm2KeyPair::to_encrypted_pem_with_kdf`].
+///
+/// Both variants produce a PBES2 / AES-256-CBC encrypted PKCS#8 PEM
+/// that [`Sm2KeyPair::from_encrypted_pem`] can decrypt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PbeKdf {
+    /// scrypt (memory-hard). `log_n` is log2(N); the
+    /// [`Sm2KeyPair::to_encrypted_pem`] default is `log_n = 15, r = 8,
+    /// p = 1`, which is deliberately expensive for an interactive
+    /// single-key export. Lower `log_n` (e.g. 14) trades memory cost
+    /// for speed in bulk signing. Subject to scrypt's internal
+    /// `r * p * 2^log_n` limits; invalid combinations return an error.
+    Scrypt { log_n: u8, r: u32, p: u32 },
+    /// PBKDF2-HMAC-SHA256. `iterations` is the loop count (e.g.
+    /// `200_000`+ for long-term keys). Uses far less memory than
+    /// scrypt, so it is the recommended path for CI / high-throughput
+    /// certificate issuance where a strong password is enforced
+    /// out-of-band.
+    Pbkdf2 { iterations: u32 },
+}
 
 /// Version 1 of the versioned SM2 ciphertext format.
 pub const SM2_CIPHER_VERSION_1: u8 = 0x01;
@@ -197,6 +219,71 @@ impl Sm2KeyPair {
             public_key,
             distid,
         })
+    }
+
+    /// Serialize private key to encrypted PKCS#8 PEM string (RFC 1421,
+    /// PBES2 + AES-256-CBC) using an explicit password-based
+    /// key-derivation function.
+    ///
+    /// [`to_encrypted_pem`](Self::to_encrypted_pem) keeps the
+    /// deliberately expensive scrypt defaults, which is right for an
+    /// interactive single-key export but dominates wall-clock cost when
+    /// many keys are encrypted (CI, bulk CA issuance). This variant
+    /// lets the caller pick [`PbeKdf::Pbkdf2`] (cheap memory) or a lower
+    /// scrypt `log_n` for those paths. The output is fully compatible
+    /// with [`from_encrypted_pem`](Self::from_encrypted_pem).
+    ///
+    /// # Arguments
+    /// * `password` - Password for encryption (must be at least 8 characters)
+    /// * `kdf` - Key-derivation function and its parameters
+    pub fn to_encrypted_pem_with_kdf(
+        &self,
+        password: &str,
+        kdf: &PbeKdf,
+    ) -> Result<String, CryptoError> {
+        if password.len() < 8 {
+            return Err(CryptoError::Sm2Error(
+                "Password must be at least 8 characters".to_string(),
+            ));
+        }
+        let doc = self
+            .private_key
+            .to_pkcs8_der()
+            .map_err(|e| CryptoError::Sm2Error(format!("PKCS#8 serialization failed: {}", e)))?;
+        let pk_info = pkcs8::PrivateKeyInfo::from_der(doc.as_bytes())
+            .map_err(|e| CryptoError::Sm2Error(format!("PKCS#8 parse failed: {}", e)))?;
+
+        // Fresh random salt (16 bytes) + AES-256-CBC IV (16 bytes) per
+        // export; re-derivation is deterministic from these + password.
+        let mut salt = [0u8; 16];
+        let mut iv = [0u8; 16];
+        OsRng.fill_bytes(&mut salt);
+        OsRng.fill_bytes(&mut iv);
+
+        let params = match kdf {
+            PbeKdf::Scrypt { log_n, r, p } => {
+                // 32 = AES-256 key size, matching the scrypt defaults
+                // behind `to_encrypted_pem` so both paths round-trip.
+                let scrypt_params =
+                    pkcs8::pkcs5::scrypt::Params::new(*log_n, *r, *p, 32).map_err(|e| {
+                        CryptoError::Sm2Error(format!("invalid scrypt parameters: {}", e))
+                    })?;
+                pkcs8::pkcs5::pbes2::Parameters::scrypt_aes256cbc(scrypt_params, &salt, &iv)
+                    .map_err(|e| CryptoError::Sm2Error(format!("scrypt params failed: {}", e)))?
+            }
+            PbeKdf::Pbkdf2 { iterations } => {
+                pkcs8::pkcs5::pbes2::Parameters::pbkdf2_sha256_aes256cbc(*iterations, &salt, &iv)
+                    .map_err(|e| CryptoError::Sm2Error(format!("pbkdf2 params failed: {}", e)))?
+            }
+        };
+
+        let encrypted_doc = pk_info
+            .encrypt_with_params(params, password.as_bytes())
+            .map_err(|e| CryptoError::Sm2Error(format!("Encryption failed: {}", e)))?;
+        let pem_str = encrypted_doc
+            .to_pem("ENCRYPTED PRIVATE KEY", pkcs8::LineEnding::LF)
+            .map_err(|e| CryptoError::Sm2Error(format!("PEM encoding failed: {}", e)))?;
+        Ok(pem_str.to_string())
     }
 
     /// Get private key bytes
