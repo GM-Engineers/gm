@@ -1035,52 +1035,53 @@ pub fn verify_cert_chain_sm2_chain_with_distid_policy(
                 verify_cert_role(&child_cert, r)?;
             }
 
-            // Check CA BasicConstraints for intermediate CAs
-            let basic_constraints = child_cert
-                .extensions()
-                .iter()
-                .find(|ext| ext.oid == x509_parser::oid_registry::OID_X509_EXT_BASIC_CONSTRAINTS);
-            if let Some(ext) = basic_constraints {
-                if let x509_parser::extensions::ParsedExtension::BasicConstraints(bc) =
-                    ext.parsed_extension()
-                {
-                    if !bc.ca {
-                        return Err(CryptoError::CertificateVerificationFailed(
-                            "CA certificate missing BasicConstraints CA:TRUE".into(),
-                        ));
-                    }
-                    // RFC 5280 §4.2.1.9 pathLenConstraint: the value
-                    // gives the maximum number of non-self-issued
-                    // intermediate CAs that may follow this cert.
-                    // For chain[idx] at depth `idx` (counting from
-                    // the leaf at 0), the intermediates that follow
-                    // toward the root are at indices 1..=idx. So
-                    // `idx` intermediates follow this CA's *issuers*
-                    // — wait, we want those that *this CA may sign
-                    // below it*, which are at indices 1..idx
-                    // (excluding the leaf at 0). The count is
-                    // `idx - 1` for idx >= 1, and 0 for idx = 1.
-                    // Equivalently: `intermediates_below =
-                    // leaf_chain.len() - 2 - (idx + 1)` where idx+1
-                    // is the position of the CA in the chain and
-                    // `len() - 1` is the root position. We need a
-                    // count of intermediates strictly between this
-                    // CA and the leaf.
-                    if let Some(max_pathlen) = bc.path_len_constraint {
-                        let intermediates_below: u32 = (idx - 1) as u32;
-                        if intermediates_below > max_pathlen {
-                            return Err(CryptoError::CertificateVerificationFailed(format!(
-                                "CA certificate pathLenConstraint = {} but {} \
-                                 non-leaf intermediate(s) follow it in the chain",
-                                max_pathlen, intermediates_below
-                            )));
+            // Check CA BasicConstraints — but ONLY for real
+            // intermediates (`idx >= 1`). The element at `idx == 0`
+            // is the leaf: it is verified against `chain[1]` (its
+            // issuer) by signature above and by the caller's role
+            // just now, but it must NOT be required to carry
+            // `BasicConstraints CA:TRUE` (RFC 5280 §4.2.1.9 — leaves
+            // are CA:FALSE or omit the extension). Gating on
+            // `idx >= 1` is what makes a multi-element
+            // `[leaf, intermediate, ...]` chain verify correctly
+            // toward a higher anchor instead of only `[intermediate,
+            // root]` / `[leaf]` two-element shapes.
+            if idx >= 1 {
+                let basic_constraints = child_cert.extensions().iter().find(|ext| {
+                    ext.oid == x509_parser::oid_registry::OID_X509_EXT_BASIC_CONSTRAINTS
+                });
+                if let Some(ext) = basic_constraints {
+                    if let x509_parser::extensions::ParsedExtension::BasicConstraints(bc) =
+                        ext.parsed_extension()
+                    {
+                        if !bc.ca {
+                            return Err(CryptoError::CertificateVerificationFailed(
+                                "CA certificate missing BasicConstraints CA:TRUE".into(),
+                            ));
+                        }
+                        // RFC 5280 §4.2.1.9 pathLenConstraint: the value
+                        // gives the maximum number of non-self-issued
+                        // intermediate CAs that may follow this cert
+                        // toward the leaf. For chain[idx] (idx >= 1),
+                        // the intermediates strictly between this CA and
+                        // the leaf sit at indices 1..idx, a count of
+                        // `idx - 1`.
+                        if let Some(max_pathlen) = bc.path_len_constraint {
+                            let intermediates_below: u32 = (idx - 1) as u32;
+                            if intermediates_below > max_pathlen {
+                                return Err(CryptoError::CertificateVerificationFailed(format!(
+                                    "CA certificate pathLenConstraint = {} but {} \
+                                     non-leaf intermediate(s) follow it in the chain",
+                                    max_pathlen, intermediates_below
+                                )));
+                            }
                         }
                     }
+                } else {
+                    return Err(CryptoError::CertificateVerificationFailed(
+                        "CA certificate missing BasicConstraints extension".into(),
+                    ));
                 }
-            } else {
-                return Err(CryptoError::CertificateVerificationFailed(
-                    "CA certificate missing BasicConstraints extension".into(),
-                ));
             }
         } else {
             // Last entry of leaf_chain.
@@ -1138,23 +1139,25 @@ pub fn verify_cert_chain_sm2_chain_with_distid_policy(
 ///
 /// # Chain layout
 ///
-/// `leaf_chain_der` is the **leaf-only chain** plus, optionally,
-/// the root: `[leaf]` or `[leaf, root]`. The chain depth
+/// `leaf_chain_der` is ordered leaf-first: `[leaf]`, `[leaf, root]`,
+/// or a full `[leaf, intermediate, …, root?]`. The chain depth
 /// (including the root) is bounded by [`MAX_CERT_CHAIN_DEPTH`].
 ///
-/// Callers **must not** include intermediates in the slice — pass
-/// the leaf cert alone and let the verifier reach the CA via
-/// `anchors_der`. (See R1 in `2026-09-18-gm-tlcp-fix-verification-v2.md`:
-/// passing `[leaf, ca]` would route the leaf through the
-/// "intermediate CA" branch, which demands `BasicConstraints CA:TRUE`
-/// — a condition leaf certs by definition do not satisfy. The
-/// public docs of this function previously recommended exactly that
-/// form; that recommendation was wrong and has been corrected here.)
+/// Every element is signature-verified against the one that follows
+/// it, and the last element against a trust anchor. The element at
+/// index 0 is the leaf: it is checked with the caller's `role`
+/// (KU/EKU) but is NOT required to carry `BasicConstraints CA:TRUE`.
+/// Intermediate entries (index >= 1) are held to CA:TRUE plus
+/// pathLenConstraint. This is what lets a peer-forwarded
+/// `[leaf, intermediate]` chain validate toward a higher anchor
+/// (e.g. a root) rather than only a direct issuer.
 ///
-/// For the rare case where a multi-hop chain must be validated
-/// end-to-end without a separate anchor, use
-/// [`verify_cert_chain_sm2_chain`] (PEM path), which already
-/// supports `[leaf, intermediate, ..., root]`.
+/// (Historical note: R1 in
+/// `2026-09-18-gm-tlcp-fix-verification-v2.md` documented that
+/// passing `[leaf, ca]` wrongly routed the leaf through the
+/// intermediate-CA BasicConstraints check and failed. That walk bug
+/// is fixed — the CA:TRUE/pathLen enforcement is now gated to
+/// `idx >= 1` — so multi-element chains are supported directly.)
 ///
 /// # Anchor matching
 ///
