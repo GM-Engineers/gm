@@ -2190,9 +2190,33 @@ impl TlcpConnector {
                 ));
             }
             let expected_domain = self.server_name.as_deref(); // already checked above
+            // Chain-building material: intermediate CA certificates
+            // the server actually sent in its `Certificate` message
+            // (entries after the two leaves). A root-only trust anchor
+            // can now build leaf → intermediate → root.
+            //
+            // TLCP's Certificate message is a single flat cert list, so
+            // a shared intermediate that signs both the sign and enc
+            // leaves can arrive twice (once via `sign_chain`, once via
+            // `enc_chain`). The chain walk is positional
+            // (`chain[i]` verified against `chain[i+1]`), so duplicate
+            // entries would break it; dedup by exact DER while
+            // preserving first-seen order.
+            let mut chain_material: Vec<Vec<u8>> = Vec::new();
+            for c in cert_pair
+                .sign_chain
+                .iter()
+                .chain(cert_pair.enc_chain.iter())
+            {
+                if !chain_material.iter().any(|seen| seen == c) {
+                    chain_material.push(c.clone());
+                }
+            }
             // Sign leaf: hostname check applied (re-runs; the
             // helper is idempotent and the check is cheap).
-            let sign_chain = vec![cert_pair.sign_cert.clone()];
+            let sign_chain: Vec<Vec<u8>> = std::iter::once(cert_pair.sign_cert.clone())
+                .chain(chain_material.iter().cloned())
+                .collect();
             gm_crypto::x509::verify::verify_against_anchors_with_distid_policy(
                 &sign_chain,
                 anchors,
@@ -2215,11 +2239,14 @@ impl TlcpConnector {
             if !self.server_crls.is_empty() {
                 // The CRL signature must verify against the CA
                 // cert (the cert whose subject equals the CRL's
-                // issuer DN). The leaf alone doesn't include the
-                // CA, so we build a 2-element chain [leaf, ...anchors]
-                // for the revocation check.
-                let mut sign_chain_for_crl = Vec::with_capacity(1 + anchors.len());
-                sign_chain_for_crl.push(OwnedCert::from_pem_or_der(&cert_pair.sign_cert));
+                // issuer DN). The verified sign chain already
+                // contains the intermediates the server sent; append
+                // the configured anchors so a CRL issued by a
+                // directly-trusted CA also finds its issuer cert.
+                let mut sign_chain_for_crl: Vec<OwnedCert> = sign_chain
+                    .iter()
+                    .map(|c| OwnedCert::from_pem_or_der(c))
+                    .collect();
                 for a in anchors {
                     sign_chain_for_crl.push(OwnedCert::from_pem_or_der(a));
                 }
@@ -2258,16 +2285,16 @@ impl TlcpConnector {
             }
             // Enc leaf (only for dual-cert layouts; RSA suites leave
             // `enc_cert` empty per `TlcpCertPair::is_single_cert`).
-            // We pass role=None for the enc cert because the
-            // dedicated `CertRole::TlcServer` / `TlcClient` roles
-            // model the SIGN cert's KU/EKU requirements; the enc
-            // cert's KU/EKU is intentionally permissive per GB/T
-            // 38636-2020 §6.4.6.1.2 b) (EKU optional, KU only
-            // needs keyAgreement / keyEncipherment). Tighter enc
-            // cert KU/EKU enforcement is left for a future
-            // release once we see real-world operator feedback.
+            // `role=None` here is intentional and applies to the ENC
+            // cert only: the dedicated `CertRole::TlcServer` /
+            // `TlcClient` roles above model the SIGN cert's KU/EKU
+            // requirements. The enc cert's KU/EKU stays permissive
+            // per GB/T 38636-2020 §6.4.6.1.2 b) (EKU optional, KU
+            // only needs keyAgreement / keyEncipherment).
             if !cert_pair.enc_cert.is_empty() {
-                let enc_chain = vec![cert_pair.enc_cert.clone()];
+                let enc_chain: Vec<Vec<u8>> = std::iter::once(cert_pair.enc_cert.clone())
+                    .chain(chain_material.iter().cloned())
+                    .collect();
                 gm_crypto::x509::verify::verify_against_anchors_with_distid_policy(
                     &enc_chain,
                     anchors,
@@ -2285,11 +2312,14 @@ impl TlcpConnector {
                 })?;
                 // Revocation check for the enc cert (if CRLs configured).
                 if !self.server_crls.is_empty() {
-                    // Build [enc_leaf, ...anchors] so the CRL can
-                    // find its issuer cert in the chain. (Same
-                    // logic as the sign-cert path above.)
-                    let mut enc_chain_for_crl = Vec::with_capacity(1 + anchors.len());
-                    enc_chain_for_crl.push(OwnedCert::from_pem_or_der(&cert_pair.enc_cert));
+                    // Verified enc chain (leaf + received
+                    // intermediates) plus the configured anchors, so
+                    // the CRL can find its issuer cert in the chain.
+                    // (Same logic as the sign-cert path above.)
+                    let mut enc_chain_for_crl: Vec<OwnedCert> = enc_chain
+                        .iter()
+                        .map(|c| OwnedCert::from_pem_or_der(c))
+                        .collect();
                     for a in anchors {
                         enc_chain_for_crl.push(OwnedCert::from_pem_or_der(a));
                     }
@@ -3393,6 +3423,15 @@ pub struct TlcpAcceptor {
     sign_cert: Option<Vec<u8>>,
     /// Server encryption certificate (DER-encoded X.509)
     enc_cert: Option<Vec<u8>>,
+    /// Intermediate CA certificates for the signing cert chain
+    /// (leaf-first, excluding the leaf itself). Sent in the
+    /// `Certificate` message after the two leaf entries so a
+    /// root-only trust anchor can build the chain. Set via
+    /// [`TlcpAcceptor::with_sign_cert_chain`].
+    sign_cert_chain: Vec<Vec<u8>>,
+    /// Intermediate CA certificates for the encryption cert chain
+    /// (leaf-first). See [`TlcpAcceptor::sign_cert_chain`].
+    enc_cert_chain: Vec<Vec<u8>>,
     /// Server signing key pair
     sign_key: Option<Arc<gm_crypto::sm2::Sm2KeyPair>>,
     /// Server encryption key pair (for static ECC cipher suites)
@@ -3500,6 +3539,8 @@ impl TlcpAcceptor {
             session_cache: TlcpSessionCache::new(),
             sign_cert: None,
             enc_cert: None,
+            sign_cert_chain: Vec::new(),
+            enc_cert_chain: Vec::new(),
             sign_key: None,
             enc_key: None,
             server_enc_distid: None,
@@ -3542,6 +3583,30 @@ impl TlcpAcceptor {
         self.enc_cert = Some(enc_cert);
         self.sign_key = Some(Arc::new(sign_key));
         self.enc_key = Some(Arc::new(enc_key));
+        self
+    }
+
+    /// Configure the intermediate CA certificates for the server's
+    /// **signing** certificate (leaf-first, excluding the leaf itself).
+    ///
+    /// Without this, a server issued by a three-level PKI
+    /// (root → intermediate → leaf) can only be validated by peers
+    /// that directly trust the intermediate: the `Certificate`
+    /// message would carry just the two leaves. With it, the
+    /// intermediates are appended after the leaf entries (GmSSL's
+    /// `tlcp.c` chain-blob layout) so root-only peers can build and
+    /// verify the full chain. Entries must be DER-encoded.
+    pub fn with_sign_cert_chain(mut self, chain: Vec<Vec<u8>>) -> Self {
+        self.sign_cert_chain = chain;
+        self
+    }
+
+    /// Configure the intermediate CA certificates for the server's
+    /// **encryption** certificate (leaf-first, excluding the leaf
+    /// itself). See [`TlcpAcceptor::with_sign_cert_chain`] for the
+    /// chain-transmission semantics.
+    pub fn with_enc_cert_chain(mut self, chain: Vec<Vec<u8>>) -> Self {
+        self.enc_cert_chain = chain;
         self
     }
     /// Configure the SM2 distid for the server's **signing** key
@@ -3903,8 +3968,15 @@ impl TlcpAcceptor {
                 // Dual-Cert layout (existing behavior). Used for all
                 // non-RSA suites; for RSA suites when
                 // `with_rsa_certs` (not `with_rsa_certs_single`) was
-                // called.
-                TlcpCertPair::new(sign_cert.clone(), enc_cert.clone())
+                // called. Intermediate CA certificates configured via
+                // `with_sign_cert_chain` / `with_enc_cert_chain` ride
+                // along after the two leaf entries.
+                TlcpCertPair::with_chains(
+                    sign_cert.clone(),
+                    enc_cert.clone(),
+                    self.sign_cert_chain.clone(),
+                    self.enc_cert_chain.clone(),
+                )
             }
         };
         // R-7: capture the actual enc_cert bytes from the emitted
@@ -4316,15 +4388,19 @@ impl TlcpAcceptor {
                     ));
                 }
                 let now = OffsetDateTime::now_utc();
-                for (idx, leaf_der) in client_certs.iter().enumerate() {
-                    let chain = vec![leaf_der.clone()];
-                    // `verify_against_anchors` on a one-element
-                    // chain walks the leaf against each anchor in
-                    // turn, requiring (issuer==subject) +
-                    // signature verify + within-validity. That
-                    // matches the "leaf chains to one of the
-                    // anchors" semantics we want for TLCP.
-                    //
+                // Wire layout mirrors the connector's `Certificate`
+                // emit: entry 0 = sign leaf, entry 1 = enc leaf,
+                // entries 2.. = intermediate CA certificates (chain
+                // material, NOT leaves). Each leaf is walked through
+                // the sent intermediates toward the configured
+                // anchors; extra CA entries are never re-validated
+                // as independent leaves.
+                let chain_material: Vec<Vec<u8>> = client_certs.iter().skip(2).cloned().collect();
+                let leaf_count = client_certs.len().min(2);
+                for (idx, leaf_der) in client_certs.iter().take(leaf_count).enumerate() {
+                    let chain: Vec<Vec<u8>> = std::iter::once(leaf_der.clone())
+                        .chain(chain_material.iter().cloned())
+                        .collect();
                     // For client-side sign-cert validation we pass
                     // CertRole::TlcClient (EKU=clientAuth, KU=
                     // digitalSignature required). The enc cert
@@ -4354,12 +4430,15 @@ impl TlcpAcceptor {
                     // Revocation check against the configured CRLs
                     // (only runs when client_crls is non-empty).
                     if !self.client_crls.is_empty() {
-                        // Build [leaf, ...anchors] so the CRL can
-                        // find its issuer cert in the chain (same
-                        // approach as the connector's server-side
-                        // CRL check).
-                        let mut chain_for_crl = Vec::with_capacity(1 + anchors.len());
-                        chain_for_crl.push(OwnedCert::from_pem_or_der(leaf_der));
+                        // Verified leaf chain (leaf + sent
+                        // intermediates) plus the configured anchors,
+                        // so the CRL can find its issuer cert in the
+                        // chain (same approach as the connector's
+                        // server-side CRL check).
+                        let mut chain_for_crl: Vec<OwnedCert> = chain
+                            .iter()
+                            .map(|c| OwnedCert::from_pem_or_der(c))
+                            .collect();
                         for a in anchors {
                             chain_for_crl.push(OwnedCert::from_pem_or_der(a));
                         }
