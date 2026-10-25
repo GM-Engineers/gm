@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Recognize the GM/T 0024 TLCP certificate extension OIDs
+  `1.2.156.11235.1.1.1` (server cert) and `1.2.156.11235.1.1.2`
+  (client cert) as known extensions, so a certificate carrying them
+  (even marked critical) no longer trips the unknown-critical-extension
+  rejection. They are accepted but their semantics are not enforced.
+- `Sm2KeyPair::to_encrypted_pem_with_kdf` plus a new `PbeKdf` enum
+  (`Scrypt { log_n, r, p }` / `Pbkdf2 { iterations }`): choose the PBES2
+  KDF and its parameters when writing an encrypted PKCS#8 PEM. The
+  default `to_encrypted_pem` is unchanged (it still uses the deliberately
+  expensive scrypt profile; use the PBKDF2 path for bulk issuance).
+- `CertRole::TlcEncServer` / `CertRole::TlcEncClient`: TLCP
+  encryption-certificate KeyUsage enforcement (present-must-match on
+  `keyAgreement` / `keyEncipherment`; a cert with no KeyUsage stays
+  accepted; EKU is never enforced for enc certs).
+- `x509::verify::ensure_crl_coverage`: fail-closed issuer-coverage check
+  that requires every non-self-signed chain certificate to have a
+  matching issuer CRL present (backs `gm-tlcp`'s new strict-CRL mode).
+
+### Fixed
+
+- `verify_cert_chain_sm2_chain_with_distid_policy` no longer applies the
+  `BasicConstraints CA:TRUE` / `pathLenConstraint` check to the leaf at
+  chain index 0. The check is now gated to intermediate positions
+  (`idx >= 1`), so a genuine `[leaf, intermediate]` chain verified
+  against a root anchor succeeds instead of failing with
+  "CA certificate missing BasicConstraints CA:TRUE".
+
 ## [0.3.11] - 2026-10-03
 
 Fix `x509::CertInfo::serial_hex` data-format bug (was decimal, now hex; see `### Fixed` below).

@@ -191,8 +191,73 @@ enforcement.
   运维可直接传 `with_server_name("中国.gov.cn")`，会被自动规范化为
   `xn--fiqs8s.gov.cn` 再与 SAN 比较。SAN/CN 条目始终是 IA5String
   （RFC 5280 §4.2.1.6），无需额外处理。
-- **CRL 检查**尚未实现，依靠上层的 OCSP 或短有效期轮换。
+- **CRL 检查**：`TlcpConnector::with_server_crls` / `TlcpAcceptor::with_client_crls` 提供按 issuer DN 匹配的 CRL 吊销扫描（对每张已提供的 CRL 验签 + 检查有效期 + 扫描吊销序列号）。默认逐条宽松：链中某证书若没有对应 issuer 的 CRL，不会当作错误（部分 CRL 部署照常工作）。需要「每张非自签证书都必须有对应 CRL」的 fail-closed 语义时，打开 `with_strict_crl(true)`。CRL 由运维带外获取（本库不做 HTTP 拉取）。OCSP 尚未实现。
 - **空客户端证书链** + 已设锚时服务端拒绝。但当前 `TlcpConnector::with_client_certs(vec![], ...)` **不会**发送空 `Certificate` 握手消息（应该按 RFC 5246 §7.4.6 发送）。该 wire-format 缺陷是独立的后续项目。
+
+## tonic / gRPC 集成
+
+`TlcpAcceptor` 与 `TlcpConnector` 都以实现 `AsyncRead + AsyncWrite + Unpin` 的传输为输入，握手成功后返回的 `TlcpStream<S>` 同样实现这三个 trait，因此可直接作为 tonic 连接底层的字节流——无需额外的 read/write shim。
+
+两端集成方式的关键差异：
+
+| | 服务端 (`TlcpAcceptor`) | 客户端 (`TlcpConnector`) |
+|---|---|---|
+| 接入点 | 自定义 `MakeTransport` / 预握手后再把连接交给 tonic | 实现一个产出 IO 流的 `tower::Service` 连接器注入 `Channel` |
+| 额外约束 | 需要为包装类型实现 `tonic::transport::server::Connected` 以暴露对端地址 | 无 `Connected` 要求；连接器 `Future::Output` 需 `Send` |
+| IO 流 | `accept_with_certs(tcp)` → `TlcpStream<TcpStream>` | `connect(tcp)` → `TlcpStream<TcpStream>` |
+
+> 完整、可运行的适配器（把 `tonic` 加入 dev-dependency 并给出端到端
+> server/client 示例）留作后续独立 PR，以免本轮引入重依赖。下面的
+> ~20 行 `Connected` 包装骨架不参与编译（`rust,ignore`）。
+
+```rust,ignore
+use std::io;
+use std::net::SocketAddr;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use gm_tlcp::tlcp::{TlcpAcceptor, TlcpStream};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::TcpStream;
+use tonic::transport::server::Connected;
+
+// 1) 先在裸 TCP 套接字上完成 TLCP 握手；握手会消费套接字并返回一个
+//    已实现 AsyncRead/AsyncWrite/Unpin 的 TlcpStream。先抓取对端地址。
+let peer = tcp.peer_addr()?;
+let stream: TlcpStream<TcpStream> = acceptor.accept_with_certs(tcp).await?;
+
+// 2) 把它包装成 tonic 需要的 Connected 流（样板，约 20 行）。
+pub struct TlcpConn {
+    pub stream: TlcpStream<TcpStream>,
+    pub peer: SocketAddr,
+}
+
+impl AsyncRead for TlcpConn {
+    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>,
+                 buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for TlcpConn {
+    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>,
+                  data: &[u8]) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write(cx, data)
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>)
+        -> Poll<io::Result<()>> { Pin::new(&mut self.stream).poll_flush(cx) }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>)
+        -> Poll<io::Result<()>> { Pin::new(&mut self.stream).poll_shutdown(cx) }
+}
+
+impl Connected for TlcpConn {
+    type ConnectInfo = SocketAddr;
+    fn connect_info(&self) -> SocketAddr { self.peer }
+}
+```
+
+客户端侧对称：写一个 `tower::Service<hyper::Uri>`，在 `call` 里
+`TcpStream::connect` 后再 `connector.connect(tcp).await`，把返回的
+`TlcpStream<TcpStream>`（`Unpin + Send`）交给 tonic 的 `Channel` 即可。
 
 ## 特性开关 (Feature flags)
 

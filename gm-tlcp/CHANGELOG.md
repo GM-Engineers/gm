@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Intermediate CA certificate chain transmission & verification.**
+  `TlcpCertPair::to_certificate_message` now serializes the full
+  `[sign_leaf, enc_leaf, ...sign_chain, ...enc_chain]` layout and
+  `from_certificate_message` retains the trailing CA entries instead of
+  truncating to the two leaves. `TlcpAcceptor::with_sign_cert_chain` /
+  `with_enc_cert_chain` let a server send its intermediates; the
+  connector and acceptor feed the received intermediates into chain
+  building and the CRL-issuer lookup, so a root-only trust anchor can
+  now validate `leaf → intermediate → root`.
+- **Encrypted PKCS#8 client keys.** `TlcpConnector` now accepts an
+  encrypted (`-----BEGIN ENCRYPTED PRIVATE KEY-----`) client sign/enc
+  key PEM and decrypts it with the password passed to
+  `with_client_certs` (falling back to the documented `P@ssw0rd`
+  default), wiring up the previously unused `client_sign_key_password`
+  field. A failure reports both the plaintext-parse and decryption
+  causes.
+- **Enc-cert KeyUsage enforcement.** Both the connector and acceptor
+  now validate the TLCP encryption certificate's KeyUsage via the new
+  gm-crypto `CertRole::TlcEncServer` / `TlcEncClient`: when a KeyUsage
+  is present it must assert `keyAgreement` / `keyEncipherment`
+  (GB/T 38636-2020 §6.4.6.1.2 b). Certs that omit KeyUsage stay
+  accepted, preserving GmSSL / Tongsuo interop.
+- **Opt-in strict-CRL issuer coverage.**
+  `TlcpConnector::with_strict_crl` / `TlcpAcceptor::with_strict_crl`
+  fail the handshake closed when any non-self-signed certificate in the
+  verified chain has no matching issuer CRL. Default `false` keeps the
+  existing per-CRL behaviour.
+
+### Changed
+
+- **Breaking:** `TlcpConnector::connect()` no longer silently degrades
+  to the deprecated, no-server-verification `connect_tlcp()` path when
+  no server signing key has been pinned. It now returns an explicit
+  error; callers who genuinely want the unauthenticated legacy
+  behaviour must invoke `connect_tlcp()` directly so the security-
+  critical choice is visible at the call site.
+
+### Added
+
 - **TLCP handshake total counter + duration histogram**
   (PR-4.26 / mirror of gm-tls PR-4.10 + PR-4.25):
   - new `gmtlcp_handshakes_total{role, result}` counter

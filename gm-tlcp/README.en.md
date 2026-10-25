@@ -46,9 +46,30 @@ TLS 1.3 but:
 - ✅ R-10 / external upstream tracking filed + verified (2026-09-10, audit v2-rev13). GmSSL upstream issue [#1920](https://github.com/guanzhi/GmSSL/issues/1920) submitted by EricZHANG1688 (F4 deadlock against `tools/tlcp_server.c::do_send_select`; body trimmed + edited clean via `gh issue create` + `gh issue edit`, final 185-line body verified via WebFetch). Tongsuo [#836](https://github.com/Tongsuo-Project/Tongsuo/issues/836) comment (id 5557341448) verified via GitHub REST API as already submitted by EricZHANG1688 on 2026-09-06 (the 239-line bundled-only repro draft); Tongsuo maintainer pr000000f replied on 2026-09-09 acknowledging the NTLS root cause and committed a fix + sub-issues [#840](https://github.com/Tongsuo-Project/Tongsuo/issues/840) (Path 2) + [#841](https://github.com/Tongsuo-Project/Tongsuo/issues/841) (both currently empty placeholders); gm-tlcp will NOT populate these unsolicited. R-9 + R-10 were doc-only at the time of writing; they were bundled into 0.6.4 together with R-11 (the actual code change). See `interop/R9-4C-SUBMISSION-RECORD.md` + `interop/R10-STATUS-RECORD.md` + `AUDIT-2026-09-06-v2.md` v2-rev13 + `CHANGELOG.md [0.6.4]`.
 - ❌ Tongsuo 8.3.0 round-trip — Tongsuo-side NTLS state-machine rejects `0x0101`, investigation tracked in `interop/tongsuo/upstream/` (see R-10: #836 + #840 + #841 are now filed upstream)
 
+## Versioning & Adoption
+
+This crate is in `0.x`. Per SemVer §4, any release in the `0.x` line may
+contain breaking API changes even when only the MINOR (`0.y`) component
+moves. Therefore:
+
+- **Pin an exact version.** In production use
+  `gm-tlcp = "=0.8.0"` (or at least `~0.8`) in your `Cargo.toml` rather
+  than a permissive `0.8`, so a MINOR bump cannot silently pull in a
+  breaking change.
+- **Per-release dependency audit.** From `0.8.0` each release's
+  CHANGELOG records the sibling-crate versions it was actually tested
+  against (currently just `gm-crypto`, e.g. `0.8.0` ↔ `gm-crypto
+  0.3.12`). Migrate across crates using that mapping; do not assume any
+  `0.3.x` pairs with any `gm-tlcp 0.y`.
+- **Behavioural breaking changes are flagged `Breaking:` in the
+  CHANGELOG.** For example, in `0.8.0` `TlcpConnector::connect()` no
+  longer silently falls back to the unauthenticated legacy
+  `connect_tlcp()` path. Read the `### Changed` entries before upgrading.
+
 ## Documentation
 
 - Module API index: top-level `//!` doc in `src/tlcp/mod.rs`
+- tonic / gRPC integration guide: `docs/gm-tlcp.en.md` (the differing IO traits required by the server-side `TlcpAcceptor` vs the client-side `TlcpConnector`, plus a `Connected` wrapper example)
 - Publishing / package manifest: `PUBLISHING.md`
 - Tongsuo interop investigation: `interop/tongsuo/upstream/`
 

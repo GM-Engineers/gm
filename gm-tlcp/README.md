@@ -78,9 +78,26 @@ TLCP（Transport Layer Cryptographic Protocol，传输层密码协议）是 GB/T
 
 公共 API 未变；仅 feature flag 名变了。详见 `CHANGELOG.md [0.3.0]`。
 
+## 版本策略与采纳 (Versioning & Adoption)
+
+本 crate 处于 `0.x` 阶段。依据 SemVer §4，`0.x` 期间任何版本都可能包含
+不向后兼容的 API 变更，即使 MINOR（`0.y`）号变动亦然。因此：
+
+- **锁定精确版本采纳。** 生产环境请在 `Cargo.toml` 用
+  `gm-tlcp = "=0.8.0"`（或至少 `~0.8`）而非宽松的 `0.8`，
+  以免一次 MINOR 升级静默引入 breaking change。
+- **每个发布审计依赖版本。** 自 `0.8.0` 起，每次发布的 CHANGELOG 会
+  记录该发布实际测试通过的兄弟 crate 版本（当前仅 `gm-crypto`，如
+  `0.8.0` 对应 `gm-crypto 0.3.12`）。跨 crate 迁移请以该映射为准，不要
+  假设任意 `0.3.x` 都可与任意 `gm-tlcp 0.y` 搭配。
+- **行为级 breaking 变更在 CHANGELOG 以 `Breaking:` 显式标注。** 例如
+  `0.8.0` 中 `TlcpConnector::connect()` 不再静默回退到无服务端验证的
+  legacy `connect_tlcp()` 路径。升级前请阅读对应条目的 `### Changed`。
+
 ## 文档
 
 - 模块 API 索引：`src/tlcp/mod.rs` 顶部 `//!` doc
+- tonic / gRPC 集成指引：`docs/gm-tlcp.md`（服务端 `TlcpAcceptor` 与客户端 `TlcpConnector` 所需的 IO trait 差异 + `Connected` 包装示例）
 - 发布/打包清单：`PUBLISHING.md`
 - Tongsuo 互操作调查：`interop/tongsuo/upstream/`
 
