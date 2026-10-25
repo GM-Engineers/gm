@@ -660,6 +660,12 @@ pub enum CertRole {
     /// the acceptor uses `TlcClient` when validating client sign leaves.
     TlcServer,
     TlcClient,
+    /// TLCP ECC encryption cert presented by the server, validated by the
+    /// connector. KU (when present) must assert a key-agreement bit.
+    TlcEncServer,
+    /// TLCP ECC encryption cert presented by the client, validated by the
+    /// acceptor. Same KU rule as [`CertRole::TlcEncServer`].
+    TlcEncClient,
     /// Intermediate / root CA cert.
     Ca,
 }
@@ -801,6 +807,29 @@ pub fn verify_cert_role(cert: &X509Certificate<'_>, role: CertRole) -> Result<()
                     )));
                 }
             }
+        }
+        CertRole::TlcEncServer | CertRole::TlcEncClient => {
+            // GB/T 38636-2020 §6.4.6.1.2 b): the TLCP ECC encryption
+            // cert is used for key agreement, so its KU must carry
+            // `keyAgreement` (SM2 ECDH) or `keyEncipherment` (the
+            // static-RSA-style KEM layout). KU is optional per RFC
+            // 5280 §4.2.1.3 and many CAs omit it on enc certs, so we
+            // enforce only the "present-must-match" rule: when KU is
+            // present it must assert at least one agreement bit. EKU
+            // is deliberately NOT enforced for enc certs (optional and
+            // purpose-agnostic here), matching the previous permissive
+            // behaviour for certs that carry no KU at all.
+            if let Some(ku) = ku {
+                if !(ku.key_agreement() || ku.key_encipherment()) {
+                    return Err(CryptoError::CertificateVerificationFailed(format!(
+                        "enc cert KeyUsage must include keyAgreement or \
+                         keyEncipherment (got KU flags = 0b{:09b})",
+                        ku.flags
+                    )));
+                }
+            }
+            // EKU intentionally unchecked for enc certs.
+            let _ = eku;
         }
         CertRole::Ca => {
             // RFC 5280 §4.2.1.3: a CA cert used to sign other certs
@@ -1653,6 +1682,48 @@ pub fn check_revocations_with_policy(
                     hex::encode(&serial)
                 )));
             }
+        }
+    }
+    Ok(())
+}
+
+/// Fail-closed issuer-coverage check for strict-CRL mode.
+///
+/// [`check_revocations`] only inspects the CRLs that were actually
+/// supplied; a chain cert whose issuer has no CRL in the pool is
+/// silently left unchecked. That is the right default (opt-in CRL
+/// checking must not break deployments that ship partial CRLs), but
+/// some operators need the opposite guarantee: *every* issuing
+/// certificate must be covered. `ensure_crl_coverage` provides it.
+///
+/// Rule: for each certificate in `chain` that is **not** self-signed
+/// (subject DN != issuer DN), there must be at least one CRL in `crls`
+/// whose issuer DN equals that certificate's issuer DN. Self-signed
+/// roots are exempt — they are trust anchors, issued by nobody. An
+/// empty `crls` pool therefore fails for any non-self-signed cert.
+///
+/// This is orthogonal to (and must run in addition to)
+/// [`check_revocations`]: coverage answers "do we have the CRL?",
+/// revocation answers "does the CRL list this serial?".
+pub fn ensure_crl_coverage(chain: &[OwnedCert], crls: &[Vec<u8>]) -> Result<(), CryptoError> {
+    let mut crl_issuers: Vec<Vec<u8>> = Vec::with_capacity(crls.len());
+    for crl_der in crls {
+        let crl = CrlInfo::from_der(crl_der)?;
+        crl_issuers.push(crl.issuer_der()?.to_vec());
+    }
+    for cert_owned in chain {
+        let cert = cert_owned.as_x509()?;
+        let subject = cert.subject().as_raw();
+        let issuer = cert.issuer().as_raw();
+        if subject == issuer {
+            // Self-signed root / trust anchor: nobody issues a CRL for it.
+            continue;
+        }
+        if !crl_issuers.iter().any(|di| di.as_slice() == issuer) {
+            return Err(CryptoError::CrlVerificationFailed(format!(
+                "strict CRL mode: no CRL covers the issuer of chain certificate serial 0x{}",
+                hex::encode(cert.serial.to_bytes_be())
+            )));
         }
     }
     Ok(())
