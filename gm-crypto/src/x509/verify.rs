@@ -31,6 +31,7 @@
 
 use crate::error::CryptoError;
 use crate::sm2::{Sm2Verifier, decompress_sm2_pubkey};
+use std::borrow::Cow;
 use std::sync::Arc;
 use time::OffsetDateTime;
 use x509_parser::oid_registry::{
@@ -46,6 +47,33 @@ use x509_parser::pem::Pem;
 use x509_parser::prelude::FromDer;
 use x509_parser::prelude::X509Certificate;
 use x509_parser::revocation_list::CertificateRevocationList;
+
+/// GM/T 0024-2012 (《信息安全技术 GM/T 0024-2012 SSL VPN技术规范》)
+/// TLCP certificate extension OIDs, present on TLCP sign/enc certs
+/// issued by Chinese CAs (and by GmSSL/Tongsuo in some configs):
+///   * `1.2.156.11235.1.1.1` — TLCP **server** (sign) certificate marker
+///   * `1.2.156.11235.1.1.2` — TLCP **client** certificate marker
+///
+/// These are frequently marked `critical`, so RFC 5280 §4.2 requires a
+/// conforming verifier to *recognize* them (otherwise it must reject the
+/// cert). gm-crypto recognizes them here but does **not** enforce their
+/// semantics — the sign/enc role distinction is already enforced through
+/// the `CertRole` KU/EKU checks — so the treatment matches
+/// `nameConstraints` / `policyConstraints` above ("accepted, semantics
+/// not enforced"). The `cryptblock` namespace OIDs
+/// (`1.2.156.11235.1.1.6` / `.1.1.7`) are intentionally NOT added: they
+/// live in the PKCS#7 cryptblock domain, never on X.509 certificates.
+///
+/// DER base-128 content bytes: `0x2A` (arcs 1.2), `0x81 0x1C` (156),
+/// `0xD7 0x63` (11235), then `0x01 0x01 0x01` / `0x01 0x01 0x02`.
+const GMTLS_TLCP_SERVER_CERT_EXT_OID: x509_parser::oid_registry::Oid<'static> =
+    x509_parser::oid_registry::Oid::new(Cow::Borrowed(&[
+        0x2A, 0x81, 0x1C, 0xD7, 0x63, 0x01, 0x01, 0x01,
+    ]));
+const GMTLS_TLCP_CLIENT_CERT_EXT_OID: x509_parser::oid_registry::Oid<'static> =
+    x509_parser::oid_registry::Oid::new(Cow::Borrowed(&[
+        0x2A, 0x81, 0x1C, 0xD7, 0x63, 0x01, 0x01, 0x02,
+    ]));
 
 /// RFC 5280 §4.2 — extensions that gm-crypto **recognizes** when
 /// verifying a certificate.
@@ -84,6 +112,8 @@ pub const KNOWN_X509_EXTENSIONS: &[x509_parser::oid_registry::Oid<'static>] = &[
     OID_X509_EXT_CERTIFICATE_POLICIES,      // 2.5.29.32
     OID_X509_EXT_POLICY_CONSTRAINTS,        // 2.5.29.36 — accepted, semantics deferred
     OID_X509_EXT_POLICY_MAPPINGS,           // 2.5.29.33
+    GMTLS_TLCP_SERVER_CERT_EXT_OID, // 1.2.156.11235.1.1.1 — accepted, semantics not enforced
+    GMTLS_TLCP_CLIENT_CERT_EXT_OID, // 1.2.156.11235.1.1.2 — accepted, semantics not enforced
 ];
 
 /// RFC 5280 §4.2: reject certificates that carry `critical = TRUE`
@@ -630,6 +660,12 @@ pub enum CertRole {
     /// the acceptor uses `TlcClient` when validating client sign leaves.
     TlcServer,
     TlcClient,
+    /// TLCP ECC encryption cert presented by the server, validated by the
+    /// connector. KU (when present) must assert a key-agreement bit.
+    TlcEncServer,
+    /// TLCP ECC encryption cert presented by the client, validated by the
+    /// acceptor. Same KU rule as [`CertRole::TlcEncServer`].
+    TlcEncClient,
     /// Intermediate / root CA cert.
     Ca,
 }
@@ -771,6 +807,29 @@ pub fn verify_cert_role(cert: &X509Certificate<'_>, role: CertRole) -> Result<()
                     )));
                 }
             }
+        }
+        CertRole::TlcEncServer | CertRole::TlcEncClient => {
+            // GB/T 38636-2020 §6.4.6.1.2 b): the TLCP ECC encryption
+            // cert is used for key agreement, so its KU must carry
+            // `keyAgreement` (SM2 ECDH) or `keyEncipherment` (the
+            // static-RSA-style KEM layout). KU is optional per RFC
+            // 5280 §4.2.1.3 and many CAs omit it on enc certs, so we
+            // enforce only the "present-must-match" rule: when KU is
+            // present it must assert at least one agreement bit. EKU
+            // is deliberately NOT enforced for enc certs (optional and
+            // purpose-agnostic here), matching the previous permissive
+            // behaviour for certs that carry no KU at all.
+            if let Some(ku) = ku {
+                if !(ku.key_agreement() || ku.key_encipherment()) {
+                    return Err(CryptoError::CertificateVerificationFailed(format!(
+                        "enc cert KeyUsage must include keyAgreement or \
+                         keyEncipherment (got KU flags = 0b{:09b})",
+                        ku.flags
+                    )));
+                }
+            }
+            // EKU intentionally unchecked for enc certs.
+            let _ = eku;
         }
         CertRole::Ca => {
             // RFC 5280 §4.2.1.3: a CA cert used to sign other certs
@@ -1035,52 +1094,53 @@ pub fn verify_cert_chain_sm2_chain_with_distid_policy(
                 verify_cert_role(&child_cert, r)?;
             }
 
-            // Check CA BasicConstraints for intermediate CAs
-            let basic_constraints = child_cert
-                .extensions()
-                .iter()
-                .find(|ext| ext.oid == x509_parser::oid_registry::OID_X509_EXT_BASIC_CONSTRAINTS);
-            if let Some(ext) = basic_constraints {
-                if let x509_parser::extensions::ParsedExtension::BasicConstraints(bc) =
-                    ext.parsed_extension()
-                {
-                    if !bc.ca {
-                        return Err(CryptoError::CertificateVerificationFailed(
-                            "CA certificate missing BasicConstraints CA:TRUE".into(),
-                        ));
-                    }
-                    // RFC 5280 §4.2.1.9 pathLenConstraint: the value
-                    // gives the maximum number of non-self-issued
-                    // intermediate CAs that may follow this cert.
-                    // For chain[idx] at depth `idx` (counting from
-                    // the leaf at 0), the intermediates that follow
-                    // toward the root are at indices 1..=idx. So
-                    // `idx` intermediates follow this CA's *issuers*
-                    // — wait, we want those that *this CA may sign
-                    // below it*, which are at indices 1..idx
-                    // (excluding the leaf at 0). The count is
-                    // `idx - 1` for idx >= 1, and 0 for idx = 1.
-                    // Equivalently: `intermediates_below =
-                    // leaf_chain.len() - 2 - (idx + 1)` where idx+1
-                    // is the position of the CA in the chain and
-                    // `len() - 1` is the root position. We need a
-                    // count of intermediates strictly between this
-                    // CA and the leaf.
-                    if let Some(max_pathlen) = bc.path_len_constraint {
-                        let intermediates_below: u32 = (idx - 1) as u32;
-                        if intermediates_below > max_pathlen {
-                            return Err(CryptoError::CertificateVerificationFailed(format!(
-                                "CA certificate pathLenConstraint = {} but {} \
-                                 non-leaf intermediate(s) follow it in the chain",
-                                max_pathlen, intermediates_below
-                            )));
+            // Check CA BasicConstraints — but ONLY for real
+            // intermediates (`idx >= 1`). The element at `idx == 0`
+            // is the leaf: it is verified against `chain[1]` (its
+            // issuer) by signature above and by the caller's role
+            // just now, but it must NOT be required to carry
+            // `BasicConstraints CA:TRUE` (RFC 5280 §4.2.1.9 — leaves
+            // are CA:FALSE or omit the extension). Gating on
+            // `idx >= 1` is what makes a multi-element
+            // `[leaf, intermediate, ...]` chain verify correctly
+            // toward a higher anchor instead of only `[intermediate,
+            // root]` / `[leaf]` two-element shapes.
+            if idx >= 1 {
+                let basic_constraints = child_cert.extensions().iter().find(|ext| {
+                    ext.oid == x509_parser::oid_registry::OID_X509_EXT_BASIC_CONSTRAINTS
+                });
+                if let Some(ext) = basic_constraints {
+                    if let x509_parser::extensions::ParsedExtension::BasicConstraints(bc) =
+                        ext.parsed_extension()
+                    {
+                        if !bc.ca {
+                            return Err(CryptoError::CertificateVerificationFailed(
+                                "CA certificate missing BasicConstraints CA:TRUE".into(),
+                            ));
+                        }
+                        // RFC 5280 §4.2.1.9 pathLenConstraint: the value
+                        // gives the maximum number of non-self-issued
+                        // intermediate CAs that may follow this cert
+                        // toward the leaf. For chain[idx] (idx >= 1),
+                        // the intermediates strictly between this CA and
+                        // the leaf sit at indices 1..idx, a count of
+                        // `idx - 1`.
+                        if let Some(max_pathlen) = bc.path_len_constraint {
+                            let intermediates_below: u32 = (idx - 1) as u32;
+                            if intermediates_below > max_pathlen {
+                                return Err(CryptoError::CertificateVerificationFailed(format!(
+                                    "CA certificate pathLenConstraint = {} but {} \
+                                     non-leaf intermediate(s) follow it in the chain",
+                                    max_pathlen, intermediates_below
+                                )));
+                            }
                         }
                     }
+                } else {
+                    return Err(CryptoError::CertificateVerificationFailed(
+                        "CA certificate missing BasicConstraints extension".into(),
+                    ));
                 }
-            } else {
-                return Err(CryptoError::CertificateVerificationFailed(
-                    "CA certificate missing BasicConstraints extension".into(),
-                ));
             }
         } else {
             // Last entry of leaf_chain.
@@ -1138,23 +1198,25 @@ pub fn verify_cert_chain_sm2_chain_with_distid_policy(
 ///
 /// # Chain layout
 ///
-/// `leaf_chain_der` is the **leaf-only chain** plus, optionally,
-/// the root: `[leaf]` or `[leaf, root]`. The chain depth
+/// `leaf_chain_der` is ordered leaf-first: `[leaf]`, `[leaf, root]`,
+/// or a full `[leaf, intermediate, …, root?]`. The chain depth
 /// (including the root) is bounded by [`MAX_CERT_CHAIN_DEPTH`].
 ///
-/// Callers **must not** include intermediates in the slice — pass
-/// the leaf cert alone and let the verifier reach the CA via
-/// `anchors_der`. (See R1 in `2026-09-18-gm-tlcp-fix-verification-v2.md`:
-/// passing `[leaf, ca]` would route the leaf through the
-/// "intermediate CA" branch, which demands `BasicConstraints CA:TRUE`
-/// — a condition leaf certs by definition do not satisfy. The
-/// public docs of this function previously recommended exactly that
-/// form; that recommendation was wrong and has been corrected here.)
+/// Every element is signature-verified against the one that follows
+/// it, and the last element against a trust anchor. The element at
+/// index 0 is the leaf: it is checked with the caller's `role`
+/// (KU/EKU) but is NOT required to carry `BasicConstraints CA:TRUE`.
+/// Intermediate entries (index >= 1) are held to CA:TRUE plus
+/// pathLenConstraint. This is what lets a peer-forwarded
+/// `[leaf, intermediate]` chain validate toward a higher anchor
+/// (e.g. a root) rather than only a direct issuer.
 ///
-/// For the rare case where a multi-hop chain must be validated
-/// end-to-end without a separate anchor, use
-/// [`verify_cert_chain_sm2_chain`] (PEM path), which already
-/// supports `[leaf, intermediate, ..., root]`.
+/// (Historical note: R1 in
+/// `2026-09-18-gm-tlcp-fix-verification-v2.md` documented that
+/// passing `[leaf, ca]` wrongly routed the leaf through the
+/// intermediate-CA BasicConstraints check and failed. That walk bug
+/// is fixed — the CA:TRUE/pathLen enforcement is now gated to
+/// `idx >= 1` — so multi-element chains are supported directly.)
 ///
 /// # Anchor matching
 ///
@@ -1620,6 +1682,48 @@ pub fn check_revocations_with_policy(
                     hex::encode(&serial)
                 )));
             }
+        }
+    }
+    Ok(())
+}
+
+/// Fail-closed issuer-coverage check for strict-CRL mode.
+///
+/// [`check_revocations`] only inspects the CRLs that were actually
+/// supplied; a chain cert whose issuer has no CRL in the pool is
+/// silently left unchecked. That is the right default (opt-in CRL
+/// checking must not break deployments that ship partial CRLs), but
+/// some operators need the opposite guarantee: *every* issuing
+/// certificate must be covered. `ensure_crl_coverage` provides it.
+///
+/// Rule: for each certificate in `chain` that is **not** self-signed
+/// (subject DN != issuer DN), there must be at least one CRL in `crls`
+/// whose issuer DN equals that certificate's issuer DN. Self-signed
+/// roots are exempt — they are trust anchors, issued by nobody. An
+/// empty `crls` pool therefore fails for any non-self-signed cert.
+///
+/// This is orthogonal to (and must run in addition to)
+/// [`check_revocations`]: coverage answers "do we have the CRL?",
+/// revocation answers "does the CRL list this serial?".
+pub fn ensure_crl_coverage(chain: &[OwnedCert], crls: &[Vec<u8>]) -> Result<(), CryptoError> {
+    let mut crl_issuers: Vec<Vec<u8>> = Vec::with_capacity(crls.len());
+    for crl_der in crls {
+        let crl = CrlInfo::from_der(crl_der)?;
+        crl_issuers.push(crl.issuer_der()?.to_vec());
+    }
+    for cert_owned in chain {
+        let cert = cert_owned.as_x509()?;
+        let subject = cert.subject().as_raw();
+        let issuer = cert.issuer().as_raw();
+        if subject == issuer {
+            // Self-signed root / trust anchor: nobody issues a CRL for it.
+            continue;
+        }
+        if !crl_issuers.iter().any(|di| di.as_slice() == issuer) {
+            return Err(CryptoError::CrlVerificationFailed(format!(
+                "strict CRL mode: no CRL covers the issuer of chain certificate serial 0x{}",
+                hex::encode(cert.serial.to_bytes_be())
+            )));
         }
     }
     Ok(())

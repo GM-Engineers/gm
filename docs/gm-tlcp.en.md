@@ -198,8 +198,78 @@ enforcement.
   to `xn--fiqs8s.gov.cn` before SAN comparison. SAN/CN entries are
   always IA5String per RFC 5280 §4.2.1.6 so they pass through
   unchanged.
-- **CRL checking is not yet implemented** — operators should rely on OCSP at a higher layer or use short-validity rotation.
+- **CRL checking**: `TlcpConnector::with_server_crls` / `TlcpAcceptor::with_client_crls` provide issuer-DN-matched revocation scanning (each supplied CRL is signature-verified, checked for freshness, and scanned for revoked serials). The default is per-CRL and lenient: a chain cert whose issuer has no CRL in the pool is not an error (partial-CRL deployments keep working). To get fail-closed semantics where *every* non-self-signed chain cert must have a covering CRL, enable `with_strict_crl(true)`. CRLs are fetched out-of-band by operators (this crate does not perform HTTP fetches). OCSP is not implemented.
 - **Empty client chain + configured anchor** → rejected on the server. However, the current `TlcpConnector::with_client_certs(vec![], ...)` does NOT emit an empty `Certificate` handshake message (RFC 5246 §7.4.6 requires one); this wire-format gap is a separate work item.
+
+## tonic / gRPC integration
+
+`TlcpAcceptor` and `TlcpConnector` both take a transport implementing `AsyncRead + AsyncWrite + Unpin`, and the `TlcpStream<S>` they return after a successful handshake implements the same three traits — so it drops straight in as the byte stream under a tonic connection with no read/write shim.
+
+The integration differs slightly per side:
+
+| | Server (`TlcpAcceptor`) | Client (`TlcpConnector`) |
+|---|---|---|
+| Hook point | a custom `MakeTransport` / pre-handshake before handing the connection to tonic | a `tower::Service` connector that yields the IO stream, injected into the `Channel` |
+| Extra bound | wrap the stream in a type implementing `tonic::transport::server::Connected` to expose the peer address | no `Connected` requirement; the connector `Future::Output` must be `Send` |
+| IO stream | `accept_with_certs(tcp)` → `TlcpStream<TcpStream>` | `connect(tcp)` → `TlcpStream<TcpStream>` |
+
+> A full, runnable adapter (adding `tonic` as a dev-dependency plus an
+> end-to-end server/client example) is deferred to a separate PR to
+> avoid pulling a heavyweight dependency into this round. The ~20-line
+> `Connected` wrapper skeleton below is intentionally non-compiling
+> (`rust,ignore`).
+
+```rust,ignore
+use std::io;
+use std::net::SocketAddr;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use gm_tlcp::tlcp::{TlcpAcceptor, TlcpStream};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::TcpStream;
+use tonic::transport::server::Connected;
+
+// 1) Complete the TLCP handshake on the raw TCP socket first; the
+//    handshake consumes the socket and returns a TlcpStream that
+//    already implements AsyncRead/AsyncWrite/Unpin. Capture the peer
+//    address before moving the socket in.
+let peer = tcp.peer_addr()?;
+let stream: TlcpStream<TcpStream> = acceptor.accept_with_certs(tcp).await?;
+
+// 2) Wrap it in the Connected stream tonic needs (boilerplate, ~20 lines).
+pub struct TlcpConn {
+    pub stream: TlcpStream<TcpStream>,
+    pub peer: SocketAddr,
+}
+
+impl AsyncRead for TlcpConn {
+    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>,
+                 buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for TlcpConn {
+    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>,
+                  data: &[u8]) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write(cx, data)
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>)
+        -> Poll<io::Result<()>> { Pin::new(&mut self.stream).poll_flush(cx) }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>)
+        -> Poll<io::Result<()>> { Pin::new(&mut self.stream).poll_shutdown(cx) }
+}
+
+impl Connected for TlcpConn {
+    type ConnectInfo = SocketAddr;
+    fn connect_info(&self) -> SocketAddr { self.peer }
+}
+```
+
+The client side is symmetric: write a `tower::Service<hyper::Uri>` whose
+`call` does `TcpStream::connect`, then `connector.connect(tcp).await`, and
+hand the returned `TlcpStream<TcpStream>` (`Unpin + Send`) to tonic's
+`Channel`.
 
 ## Feature flags
 

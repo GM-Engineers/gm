@@ -14,11 +14,23 @@
 //!
 //! The wire format for the `Certificate` handshake message is the
 //! dual-cert list
-//! `[total_length(3) | sign_entry(3+N) | enc_entry(3+M)]` matching
-//! GmSSL's `tls_send_certificate` byte layout.
+//! `[total_length(3) | sign_entry(3+N) | enc_entry(3+M) | chain_entry*]`
+//! matching GmSSL's `tls_send_certificate` byte layout. Intermediate
+//! CA certificates (when configured) are appended after the two leaf
+//! entries — the same blob layout GmSSL's `tlcp.c` addresses via
+//! `x509_certs_get_cert_by_index(chain, 0|1, …)`.
 
 use crate::error::TlcpError;
 use crate::tlcp::HandshakeType;
+
+/// Append one `3-byte length || cert` entry to a handshake body.
+fn push_cert_entry(body: &mut Vec<u8>, cert: &[u8]) {
+    let len = cert.len() as u32;
+    body.push((len >> 16) as u8);
+    body.push((len >> 8) as u8);
+    body.push(len as u8);
+    body.extend_from_slice(cert);
+}
 
 /// Certificate layout mode for a [`TlcpCertPair`].
 ///
@@ -125,9 +137,14 @@ impl TlcpCertPair {
     /// Serialize as TLCP Certificate message
     ///
     /// Layout depends on the internal `CertMode` (see [`Self::is_single_cert`]):
-    /// - Dual: `total_length(3) | sign_entry(3+N) | enc_entry(3+M)`
+    /// - Dual: `total_length(3) | sign_entry(3+N) | enc_entry(3+M) | chain_entry*`
     /// - Single: `total_length(3) | sign_entry(3+N)` (RSA suites per
     ///   §6.4.5.5)
+    ///
+    /// In Dual mode the `sign_chain` / `enc_chain` intermediate CA
+    /// certificates are appended after the two leaf entries so a peer
+    /// that only trusts the root can build the chain. Entries appear
+    /// leaf-first per sign chain then enc chain.
     pub fn to_certificate_message(&self) -> Vec<u8> {
         let mut body = Vec::new();
 
@@ -137,27 +154,35 @@ impl TlcpCertPair {
         // by 16 MiB-2 which fits u32). Using usize here would give
         // 8-byte big-endian encoding on 64-bit platforms and break the
         // total_length field for any cert-list > 256 bytes.
+        let chain_len: usize = self
+            .sign_chain
+            .iter()
+            .map(|c| 3 + c.len())
+            .chain(self.enc_chain.iter().map(|c| 3 + c.len()))
+            .sum();
         let total_len_u32: u32 = match self.mode {
-            CertMode::Dual => (sign_entry_len + 3 + self.enc_cert.len()) as u32,
+            CertMode::Dual => (sign_entry_len + 3 + self.enc_cert.len() + chain_len) as u32,
             CertMode::Single => sign_entry_len as u32,
         };
 
         body.extend_from_slice(&total_len_u32.to_be_bytes()[1..4]); // 3-byte length
 
         // Signing certificate (always present in both modes)
-        let sign_cert_len = self.sign_cert.len() as u32;
-        body.push((sign_cert_len >> 16) as u8);
-        body.push((sign_cert_len >> 8) as u8);
-        body.push(sign_cert_len as u8);
-        body.extend_from_slice(&self.sign_cert);
+        push_cert_entry(&mut body, &self.sign_cert);
 
         // Encryption certificate (only in Dual mode)
         if self.mode == CertMode::Dual {
-            let enc_cert_len = self.enc_cert.len() as u32;
-            body.push((enc_cert_len >> 16) as u8);
-            body.push((enc_cert_len >> 8) as u8);
-            body.push(enc_cert_len as u8);
-            body.extend_from_slice(&self.enc_cert);
+            push_cert_entry(&mut body, &self.enc_cert);
+            // Intermediate CA certificates, leaf-first: sign chain
+            // then enc chain. A three-level PKI (root → intermediate
+            // → leaf) must transmit the intermediate so a root-only
+            // peer can build the chain.
+            for cert in &self.sign_chain {
+                push_cert_entry(&mut body, cert);
+            }
+            for cert in &self.enc_chain {
+                push_cert_entry(&mut body, cert);
+            }
         }
 
         // Wrap in handshake message header
@@ -195,15 +220,11 @@ impl TlcpCertPair {
             }
             certs.push(body[p..p + len].to_vec());
             p += len;
-            // R-7: accept either 1 cert (RSA suites) or 2 certs (other
-            // suites). Previously the parser hard-required 2 certs, which
-            // blocked strict-spec RSA peers that send a single cert entry
-            // per GB/T 38636-2020 §6.4.5.5.
-            if certs.len() >= 2 {
-                break;
-            }
         }
         match certs.len() {
+            0 => Err(TlcpError::InvalidMessage(
+                "Certificate message contains no cert entries".to_string(),
+            )),
             1 => {
                 // Single-Cert layout (RSA suites per §6.4.5.5).
                 let sign_cert = certs.remove(0);
@@ -215,22 +236,24 @@ impl TlcpCertPair {
                     mode: CertMode::Single,
                 })
             }
-            2 => {
+            _ => {
                 // Dual-Cert layout (static-ECC / ECDHE / SM9 suites).
+                // Entries beyond the two leaves are intermediate CA
+                // certificates; they are preserved in `sign_chain` as
+                // chain-building material for the receiver (single
+                // pool — the verifier walks each leaf's chain against
+                // this material regardless of which side signed the
+                // intermediate).
                 let sign_cert = certs.remove(0);
                 let enc_cert = certs.remove(0);
                 Ok(Self {
                     sign_cert,
                     enc_cert,
-                    sign_chain: Vec::new(),
+                    sign_chain: certs,
                     enc_chain: Vec::new(),
                     mode: CertMode::Dual,
                 })
             }
-            n => Err(TlcpError::InvalidMessage(format!(
-                "expected 1 (RSA) or 2 (SM2/SM9) certs, got {}",
-                n
-            ))),
         }
     }
 }
@@ -364,12 +387,10 @@ mod tests {
     }
 
     #[test]
-    fn from_certificate_message_silently_truncates_after_two_certs() {
-        // R-7: parser behavior preserved from pre-R-7. A peer sending 3+
-        // cert entries is a protocol violation but the parser breaks
-        // after the 2nd entry (existing behavior). New peers should
-        // never send >2 certs; the leniency here is for wire-noise
-        // tolerance only.
+    fn from_certificate_message_preserves_chain_entries() {
+        // A peer sending 3+ cert entries carries intermediate CA
+        // certificates after the two leaves. They must be preserved
+        // in `sign_chain` (chain-building material), not dropped.
         let three_cert_body: Vec<u8> = {
             let cert = vec![0x03u8; 10];
             let mut body = vec![0u8; 3];
@@ -386,9 +407,44 @@ mod tests {
             body
         };
         let parsed = TlcpCertPair::from_certificate_message(&three_cert_body)
-            .expect("3-cert body parses as 2-cert (truncation leniency)");
+            .expect("3-cert body parses as dual-cert + 1 chain entry");
         assert!(!parsed.is_single_cert(), "parsed should be dual-cert");
         assert_eq!(parsed.sign_cert.len(), 10);
         assert_eq!(parsed.enc_cert.len(), 10);
+        assert_eq!(parsed.sign_chain.len(), 1, "extra entry kept in sign_chain");
+        assert_eq!(parsed.sign_chain[0], vec![0x03u8; 10]);
+    }
+
+    #[test]
+    fn chain_roundtrip_wire_layout() {
+        // sign_chain / enc_chain entries are serialized after the two
+        // leaves and survive a round-trip as chain material; the
+        // total_length field covers every entry.
+        let sign = vec![0x11u8; 60];
+        let enc = vec![0x22u8; 70];
+        let sign_chain = vec![vec![0x33u8; 40], vec![0x44u8; 50]];
+        let enc_chain = vec![vec![0x55u8; 30]];
+        let pair = TlcpCertPair::with_chains(sign.clone(), enc.clone(), sign_chain, enc_chain);
+        let msg = pair.to_certificate_message();
+        let body = &msg[4..];
+
+        let total_len = ((body[0] as usize) << 16) | ((body[1] as usize) << 8) | (body[2] as usize);
+        assert_eq!(
+            total_len,
+            (3 + sign.len()) + (3 + enc.len()) + (3 + 40) + (3 + 50) + (3 + 30),
+            "total_length must cover leaves and chain entries"
+        );
+        assert_eq!(body.len(), 3 + total_len);
+
+        let parsed = TlcpCertPair::from_certificate_message(body).expect("parse chained body");
+        assert_eq!(parsed.sign_cert, sign);
+        assert_eq!(parsed.enc_cert, enc);
+        // Both chains are preserved (sign first, then enc) as a single
+        // chain-material pool on the parsing side.
+        assert_eq!(
+            parsed.sign_chain,
+            vec![vec![0x33u8; 40], vec![0x44u8; 50], vec![0x55u8; 30]]
+        );
+        assert!(parsed.enc_chain.is_empty());
     }
 }

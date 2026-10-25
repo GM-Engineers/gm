@@ -1550,6 +1550,17 @@ pub struct TlcpConnector {
     /// Points extension URL); we do not perform HTTP fetches
     /// internally.
     server_crls: Vec<Vec<u8>>,
+    /// Strict-CRL mode. When `true`, in addition to checking the
+    /// supplied CRLs for revoked serials, the connector requires that
+    /// **every** non-self-signed certificate in the verified server
+    /// chain have a matching issuer CRL present in `server_crls`; a
+    /// chain cert whose issuer has no CRL fails closed. Default
+    /// `false` preserves the existing behaviour where CRL checking is
+    /// per-CRL and a missing CRL is not an error (partial-CRL
+    /// deployments keep working). Set via
+    /// [`TlcpConnector::with_strict_crl`]; only meaningful alongside
+    /// [`TlcpConnector::with_server_ca_chain`].
+    strict_crl: bool,
     /// PR-2.3 SPIFFE ID verification (gm-crypto 0.3.6+). When `Some`,
     /// the connector additionally calls
     /// `gm_crypto::x509::verify::validate_uri_only` on the server's
@@ -1622,6 +1633,7 @@ impl TlcpConnector {
             server_ca_anchors: None,
             server_name: None,
             server_crls: Vec::new(),
+            strict_crl: false,
             expected_uri: None,
             distid_policy: None,
             handshake_timeout: Duration::from_secs(30),
@@ -1689,6 +1701,39 @@ impl TlcpConnector {
         self.client_sign_key_password = password;
         self
     }
+    /// Load a client SM2 key pair from a PEM that may be either a
+    /// plaintext key (SEC1 / unencrypted PKCS#8) or an encrypted
+    /// PKCS#8 (`-----BEGIN ENCRYPTED PRIVATE KEY-----`).
+    ///
+    /// The plaintext form is tried first; only on failure do we attempt
+    /// encrypted-PKCS#8 decryption, so the common unencrypted case never
+    /// needs a password. Decryption uses the password passed to
+    /// [`with_client_certs`](Self::with_client_certs) — the same value
+    /// for the sign and enc keys — falling back to the documented
+    /// `"P@ssw0rd"` default when none was configured (matching the
+    /// gmssl test-cert convention promised in the README). If both
+    /// attempts fail the error reports BOTH the plaintext-parse and the
+    /// decryption reasons, so operators can distinguish "not a valid
+    /// PEM at all" from "wrong password".
+    fn load_client_key(&self, pem: &str) -> Result<gm_crypto::sm2::Sm2KeyPair, TlcpError> {
+        match gm_crypto::sm2::Sm2KeyPair::from_private_key_pem(pem) {
+            Ok(kp) => Ok(kp),
+            Err(plain_err) => {
+                let password = self
+                    .client_sign_key_password
+                    .as_deref()
+                    .unwrap_or("P@ssw0rd");
+                match gm_crypto::sm2::Sm2KeyPair::from_encrypted_pem(pem, password) {
+                    Ok(kp) => Ok(kp),
+                    Err(dec_err) => Err(TlcpError::HandshakeFailed(format!(
+                        "client key is neither a plaintext PEM ({plain_err}) nor a \
+                         decryptable encrypted PKCS#8 PEM with the configured password \
+                         ({dec_err})"
+                    ))),
+                }
+            }
+        }
+    }
     /// Configure the SM2 distid for the server encryption certificate
     /// used in ECDHE PMS derivation (Z_server per GB/T 32918.2-2016 §6.1).
     ///
@@ -1741,8 +1786,17 @@ impl TlcpConnector {
     }
     /// Connect to a TLCP server over the given transport.
     ///
-    /// If `server_sign_pubkey` is configured, performs a production ECDHE handshake
-    /// with ServerKeyExchange verification. Otherwise falls back to simulated handshake.
+    /// Requires a server signing public key pinned via
+    /// [`with_server_sign_key`](Self::with_server_sign_key): the handshake
+    /// then runs the production ECDHE path with ServerKeyExchange
+    /// verification (and, when configured, trust-anchor / CRL checks).
+    ///
+    /// If no pin is configured this returns an explicit error rather than
+    /// silently degrading to the deprecated, **no server-verification**
+    /// [`connect_tlcp`] path. Callers who genuinely want that unauthenticated
+    /// legacy behaviour (e.g. a throwaway test harness) must invoke
+    /// [`connect_tlcp`] directly so the security-critical choice is visible
+    /// at the call site.
     pub async fn connect<S>(&self, transport: S) -> Result<TlcpStream<S>, TlcpError>
     where
         S: AsyncRead + AsyncWrite + Unpin,
@@ -1752,14 +1806,16 @@ impl TlcpConnector {
         // emitted.
         let timer = crate::metrics::HandshakeTimer::new("client");
         let timeout = self.handshake_timeout;
-        let inner = async {
-            if self.server_sign_pubkey.is_some() {
-                self.connect_with_certs(transport).await
-            } else {
-                #[allow(deprecated)]
-                connect_tlcp(transport, &self.session_cache).await
-            }
-        };
+        if self.server_sign_pubkey.is_none() {
+            return Err(TlcpError::HandshakeFailed(
+                "TlcpConnector::connect() requires a pinned server signing key; \
+                 call with_server_sign_key() (with with_server_ca_chain() for full \
+                 PKI validation), or use connect_tlcp() explicitly for the legacy \
+                 no-verification path."
+                    .to_string(),
+            ));
+        }
+        let inner = async { self.connect_with_certs(transport).await };
         let result = with_handshake_timeout(timeout, "client", inner).await;
         match &result {
             Ok(_) => {
@@ -2073,6 +2129,28 @@ impl TlcpConnector {
         &self.server_crls
     }
 
+    /// Enable strict-CRL issuer coverage (default `false`).
+    ///
+    /// When enabled, every non-self-signed certificate in the verified
+    /// server chain (sign and enc leaves plus any intermediates they
+    /// were sent with) must have a matching issuer CRL present in
+    /// [`with_server_crls`](Self::with_server_crls); a chain cert whose
+    /// issuer has no CRL fails the handshake closed. Trust anchors
+    /// (self-signed roots) are exempt. This guards against the
+    /// "CRL checking enabled but a CRL was forgotten for some
+    /// intermediate" gap, which the default per-CRL behaviour
+    /// silently tolerates. Only takes effect when trust anchors are
+    /// configured via [`with_server_ca_chain`](Self::with_server_ca_chain).
+    pub fn with_strict_crl(mut self, strict: bool) -> Self {
+        self.strict_crl = strict;
+        self
+    }
+
+    /// Read-only access to the strict-CRL flag.
+    pub fn strict_crl(&self) -> bool {
+        self.strict_crl
+    }
+
     pub async fn connect_with_certs<S>(&self, transport: S) -> Result<TlcpStream<S>, TlcpError>
     where
         S: AsyncRead + AsyncWrite + Unpin,
@@ -2190,9 +2268,33 @@ impl TlcpConnector {
                 ));
             }
             let expected_domain = self.server_name.as_deref(); // already checked above
+            // Chain-building material: intermediate CA certificates
+            // the server actually sent in its `Certificate` message
+            // (entries after the two leaves). A root-only trust anchor
+            // can now build leaf → intermediate → root.
+            //
+            // TLCP's Certificate message is a single flat cert list, so
+            // a shared intermediate that signs both the sign and enc
+            // leaves can arrive twice (once via `sign_chain`, once via
+            // `enc_chain`). The chain walk is positional
+            // (`chain[i]` verified against `chain[i+1]`), so duplicate
+            // entries would break it; dedup by exact DER while
+            // preserving first-seen order.
+            let mut chain_material: Vec<Vec<u8>> = Vec::new();
+            for c in cert_pair
+                .sign_chain
+                .iter()
+                .chain(cert_pair.enc_chain.iter())
+            {
+                if !chain_material.iter().any(|seen| seen == c) {
+                    chain_material.push(c.clone());
+                }
+            }
             // Sign leaf: hostname check applied (re-runs; the
             // helper is idempotent and the check is cheap).
-            let sign_chain = vec![cert_pair.sign_cert.clone()];
+            let sign_chain: Vec<Vec<u8>> = std::iter::once(cert_pair.sign_cert.clone())
+                .chain(chain_material.iter().cloned())
+                .collect();
             gm_crypto::x509::verify::verify_against_anchors_with_distid_policy(
                 &sign_chain,
                 anchors,
@@ -2207,33 +2309,50 @@ impl TlcpConnector {
                     e
                 ))
             })?;
-            // Revocation check against the configured CRLs. Only
-            // runs when CRLs are configured (server_crls non-empty).
-            // The sign cert + its chain are checked; the enc cert
-            // chain is checked separately below. CRL signatures
-            // verify against the matching issuer cert in the chain.
-            if !self.server_crls.is_empty() {
-                // The CRL signature must verify against the CA
-                // cert (the cert whose subject equals the CRL's
-                // issuer DN). The leaf alone doesn't include the
-                // CA, so we build a 2-element chain [leaf, ...anchors]
-                // for the revocation check.
-                let mut sign_chain_for_crl = Vec::with_capacity(1 + anchors.len());
-                sign_chain_for_crl.push(OwnedCert::from_pem_or_der(&cert_pair.sign_cert));
+            // Revocation / CRL-coverage check. The verified sign chain
+            // already contains the intermediates the server sent; we
+            // append the configured anchors so a CRL issued by a
+            // directly-trusted CA (and the coverage walk under
+            // strict-CRL mode) finds its issuer cert. Two independent
+            // gates run over this chain:
+            //   - `ensure_crl_coverage` (only when `strict_crl`): every
+            //     non-self-signed chain cert must have an issuer CRL
+            //     present, else fail closed.
+            //   - `check_revocations` (only when CRLs were supplied):
+            //     per-CRL revoked-serial scan, unchanged default.
+            if self.strict_crl || !self.server_crls.is_empty() {
+                let mut sign_chain_for_crl: Vec<OwnedCert> = sign_chain
+                    .iter()
+                    .map(|c| OwnedCert::from_pem_or_der(c))
+                    .collect();
                 for a in anchors {
                     sign_chain_for_crl.push(OwnedCert::from_pem_or_der(a));
                 }
-                gm_crypto::x509::verify::check_revocations(
-                    &sign_chain_for_crl,
-                    &self.server_crls,
-                    now,
-                )
-                .map_err(|e| {
-                    TlcpError::HandshakeFailed(format!(
-                        "server signing certificate revocation check failed: {}",
-                        e
-                    ))
-                })?;
+                if self.strict_crl {
+                    gm_crypto::x509::verify::ensure_crl_coverage(
+                        &sign_chain_for_crl,
+                        &self.server_crls,
+                    )
+                    .map_err(|e| {
+                        TlcpError::HandshakeFailed(format!(
+                            "server signing certificate strict-CRL coverage failed: {}",
+                            e
+                        ))
+                    })?;
+                }
+                if !self.server_crls.is_empty() {
+                    gm_crypto::x509::verify::check_revocations(
+                        &sign_chain_for_crl,
+                        &self.server_crls,
+                        now,
+                    )
+                    .map_err(|e| {
+                        TlcpError::HandshakeFailed(format!(
+                            "server signing certificate revocation check failed: {}",
+                            e
+                        ))
+                    })?;
+                }
             }
             // PR-2.3 SPIFFE ID matching: when the operator configured
             // `with_expected_uri`, the sign leaf must additionally
@@ -2258,22 +2377,22 @@ impl TlcpConnector {
             }
             // Enc leaf (only for dual-cert layouts; RSA suites leave
             // `enc_cert` empty per `TlcpCertPair::is_single_cert`).
-            // We pass role=None for the enc cert because the
-            // dedicated `CertRole::TlcServer` / `TlcClient` roles
-            // model the SIGN cert's KU/EKU requirements; the enc
-            // cert's KU/EKU is intentionally permissive per GB/T
-            // 38636-2020 §6.4.6.1.2 b) (EKU optional, KU only
-            // needs keyAgreement / keyEncipherment). Tighter enc
-            // cert KU/EKU enforcement is left for a future
-            // release once we see real-world operator feedback.
+            // `CertRole::TlcEncServer` applies the enc-cert KU rule
+            // from GB/T 38636-2020 §6.4.6.1.2 b): when a KeyUsage is
+            // present it must assert keyAgreement / keyEncipherment;
+            // a cert with no KU stays accepted (KU is optional and EKU
+            // is not enforced for enc certs), so existing GmSSL /
+            // Tongsuo certs that omit KU interoperate unchanged.
             if !cert_pair.enc_cert.is_empty() {
-                let enc_chain = vec![cert_pair.enc_cert.clone()];
+                let enc_chain: Vec<Vec<u8>> = std::iter::once(cert_pair.enc_cert.clone())
+                    .chain(chain_material.iter().cloned())
+                    .collect();
                 gm_crypto::x509::verify::verify_against_anchors_with_distid_policy(
                     &enc_chain,
                     anchors,
                     now,
                     None, // hostname check is sign-only
-                    None, // role=None: enc cert KU/EKU is permissive
+                    Some(gm_crypto::x509::verify::CertRole::TlcEncServer),
                     self.distid_policy.clone().unwrap_or(DistidPolicy::Strict),
                 )
                 .map_err(|e| {
@@ -2283,27 +2402,45 @@ impl TlcpConnector {
                         e
                     ))
                 })?;
-                // Revocation check for the enc cert (if CRLs configured).
-                if !self.server_crls.is_empty() {
-                    // Build [enc_leaf, ...anchors] so the CRL can
-                    // find its issuer cert in the chain. (Same
-                    // logic as the sign-cert path above.)
-                    let mut enc_chain_for_crl = Vec::with_capacity(1 + anchors.len());
-                    enc_chain_for_crl.push(OwnedCert::from_pem_or_der(&cert_pair.enc_cert));
+                // CRL coverage / revocation for the enc chain (same
+                // two-gate logic as the sign path above).
+                if self.strict_crl || !self.server_crls.is_empty() {
+                    // Verified enc chain (leaf + received
+                    // intermediates) plus the configured anchors, so
+                    // the CRL can find its issuer cert in the chain.
+                    // (Same logic as the sign-cert path above.)
+                    let mut enc_chain_for_crl: Vec<OwnedCert> = enc_chain
+                        .iter()
+                        .map(|c| OwnedCert::from_pem_or_der(c))
+                        .collect();
                     for a in anchors {
                         enc_chain_for_crl.push(OwnedCert::from_pem_or_der(a));
                     }
-                    gm_crypto::x509::verify::check_revocations(
-                        &enc_chain_for_crl,
-                        &self.server_crls,
-                        now,
-                    )
-                    .map_err(|e| {
-                        TlcpError::HandshakeFailed(format!(
-                            "server encryption certificate revocation check failed: {}",
-                            e
-                        ))
-                    })?;
+                    if self.strict_crl {
+                        gm_crypto::x509::verify::ensure_crl_coverage(
+                            &enc_chain_for_crl,
+                            &self.server_crls,
+                        )
+                        .map_err(|e| {
+                            TlcpError::HandshakeFailed(format!(
+                                "server encryption certificate strict-CRL coverage failed: {}",
+                                e
+                            ))
+                        })?;
+                    }
+                    if !self.server_crls.is_empty() {
+                        gm_crypto::x509::verify::check_revocations(
+                            &enc_chain_for_crl,
+                            &self.server_crls,
+                            now,
+                        )
+                        .map_err(|e| {
+                            TlcpError::HandshakeFailed(format!(
+                                "server encryption certificate revocation check failed: {}",
+                                e
+                            ))
+                        })?;
+                    }
                 }
             }
         } else {
@@ -2928,14 +3065,8 @@ impl TlcpConnector {
                             .to_string(),
                     )
                 })?;
-                let client_enc_kp = gm_crypto::sm2::Sm2KeyPair::from_private_key_pem(
-                    client_enc_pem,
-                )
-                .map_err(|e| {
-                    TlcpError::HandshakeFailed(format!(
-                        "client enc key load (PKCS#8/SEC1 PEM): {}",
-                        e
-                    ))
+                let client_enc_kp = self.load_client_key(client_enc_pem).map_err(|e| {
+                    TlcpError::HandshakeFailed(format!("client enc key load: {}", e))
                 })?;
                 let client_enc_pub_sec1 = client_enc_kp.public_key_bytes_uncompressed();
                 if client_enc_pub_sec1.len() != 65 || client_enc_pub_sec1[0] != 0x04 {
@@ -3185,8 +3316,7 @@ impl TlcpConnector {
             let pem = client_sign_key_pem.as_deref().ok_or_else(|| {
                 TlcpError::HandshakeFailed("client signing key disappeared mid-handshake".into())
             })?;
-            let client_kp = gm_crypto::sm2::Sm2KeyPair::from_private_key_pem(pem)
-                .map_err(|e| TlcpError::Sm2KeyError(format!("client key load: {:?}", e)))?;
+            let client_kp = self.load_client_key(pem)?;
             // CV signing must use the SAME distid the peer uses to verify
             // the SM2 signature. The peer's verify path is
             // `SM3(Z || transcript)` with Z computed over OUR sign cert's
@@ -3393,6 +3523,15 @@ pub struct TlcpAcceptor {
     sign_cert: Option<Vec<u8>>,
     /// Server encryption certificate (DER-encoded X.509)
     enc_cert: Option<Vec<u8>>,
+    /// Intermediate CA certificates for the signing cert chain
+    /// (leaf-first, excluding the leaf itself). Sent in the
+    /// `Certificate` message after the two leaf entries so a
+    /// root-only trust anchor can build the chain. Set via
+    /// [`TlcpAcceptor::with_sign_cert_chain`].
+    sign_cert_chain: Vec<Vec<u8>>,
+    /// Intermediate CA certificates for the encryption cert chain
+    /// (leaf-first). See [`TlcpAcceptor::sign_cert_chain`].
+    enc_cert_chain: Vec<Vec<u8>>,
     /// Server signing key pair
     sign_key: Option<Arc<gm_crypto::sm2::Sm2KeyPair>>,
     /// Server encryption key pair (for static ECC cipher suites)
@@ -3471,6 +3610,14 @@ pub struct TlcpAcceptor {
     /// Matched against certs in the chain by issuer DN; CRL signature
     /// verified against the matching issuer cert in the chain.
     client_crls: Vec<Vec<u8>>,
+    /// Strict-CRL mode for client-certificate validation. When `true`,
+    /// every non-self-signed certificate in a verified client chain
+    /// must have a matching issuer CRL present in `client_crls`; a
+    /// chain cert whose issuer has no CRL fails closed. Default
+    /// `false` keeps the per-CRL behaviour (a missing CRL is not an
+    /// error). Set via [`TlcpAcceptor::with_strict_crl`]; only
+    /// meaningful alongside [`TlcpAcceptor::with_client_ca_chain`].
+    strict_crl: bool,
     /// PR-2.2 distid policy override (gm-crypto 0.3.5+). `None`
     /// (the default) uses `DistidPolicy::Strict` (fail-closed).
     /// Set via [`TlcpAcceptor::with_distid_policy`] for OpenSSL 3.x
@@ -3500,6 +3647,8 @@ impl TlcpAcceptor {
             session_cache: TlcpSessionCache::new(),
             sign_cert: None,
             enc_cert: None,
+            sign_cert_chain: Vec::new(),
+            enc_cert_chain: Vec::new(),
             sign_key: None,
             enc_key: None,
             server_enc_distid: None,
@@ -3515,6 +3664,7 @@ impl TlcpAcceptor {
             rsa_single_cert_mode: false,
             client_ca_anchors: None,
             client_crls: Vec::new(),
+            strict_crl: false,
             distid_policy: None,
             handshake_timeout: Duration::from_secs(30),
         }
@@ -3542,6 +3692,30 @@ impl TlcpAcceptor {
         self.enc_cert = Some(enc_cert);
         self.sign_key = Some(Arc::new(sign_key));
         self.enc_key = Some(Arc::new(enc_key));
+        self
+    }
+
+    /// Configure the intermediate CA certificates for the server's
+    /// **signing** certificate (leaf-first, excluding the leaf itself).
+    ///
+    /// Without this, a server issued by a three-level PKI
+    /// (root → intermediate → leaf) can only be validated by peers
+    /// that directly trust the intermediate: the `Certificate`
+    /// message would carry just the two leaves. With it, the
+    /// intermediates are appended after the leaf entries (GmSSL's
+    /// `tlcp.c` chain-blob layout) so root-only peers can build and
+    /// verify the full chain. Entries must be DER-encoded.
+    pub fn with_sign_cert_chain(mut self, chain: Vec<Vec<u8>>) -> Self {
+        self.sign_cert_chain = chain;
+        self
+    }
+
+    /// Configure the intermediate CA certificates for the server's
+    /// **encryption** certificate (leaf-first, excluding the leaf
+    /// itself). See [`TlcpAcceptor::with_sign_cert_chain`] for the
+    /// chain-transmission semantics.
+    pub fn with_enc_cert_chain(mut self, chain: Vec<Vec<u8>>) -> Self {
+        self.enc_cert_chain = chain;
         self
     }
     /// Configure the SM2 distid for the server's **signing** key
@@ -3726,6 +3900,26 @@ impl TlcpAcceptor {
         &self.client_crls
     }
 
+    /// Enable strict-CRL issuer coverage for client-certificate
+    /// validation (default `false`).
+    ///
+    /// Mirrors [`TlcpConnector::with_strict_crl`] on the server side:
+    /// when enabled, every non-self-signed certificate in a verified
+    /// client chain must have a matching issuer CRL present in
+    /// [`with_client_crls`](Self::with_client_crls), else the handshake
+    /// fails closed. Trust anchors (self-signed roots) are exempt. Only
+    /// takes effect when client anchors are configured via
+    /// [`with_client_ca_chain`](Self::with_client_ca_chain).
+    pub fn with_strict_crl(mut self, strict: bool) -> Self {
+        self.strict_crl = strict;
+        self
+    }
+
+    /// Read-only access to the strict-CRL flag.
+    pub fn strict_crl(&self) -> bool {
+        self.strict_crl
+    }
+
     /// Override the SM2 signature distid policy for client-cert chain
     /// verification.
     ///
@@ -3903,8 +4097,15 @@ impl TlcpAcceptor {
                 // Dual-Cert layout (existing behavior). Used for all
                 // non-RSA suites; for RSA suites when
                 // `with_rsa_certs` (not `with_rsa_certs_single`) was
-                // called.
-                TlcpCertPair::new(sign_cert.clone(), enc_cert.clone())
+                // called. Intermediate CA certificates configured via
+                // `with_sign_cert_chain` / `with_enc_cert_chain` ride
+                // along after the two leaf entries.
+                TlcpCertPair::with_chains(
+                    sign_cert.clone(),
+                    enc_cert.clone(),
+                    self.sign_cert_chain.clone(),
+                    self.enc_cert_chain.clone(),
+                )
             }
         };
         // R-7: capture the actual enc_cert bytes from the emitted
@@ -4316,25 +4517,31 @@ impl TlcpAcceptor {
                     ));
                 }
                 let now = OffsetDateTime::now_utc();
-                for (idx, leaf_der) in client_certs.iter().enumerate() {
-                    let chain = vec![leaf_der.clone()];
-                    // `verify_against_anchors` on a one-element
-                    // chain walks the leaf against each anchor in
-                    // turn, requiring (issuer==subject) +
-                    // signature verify + within-validity. That
-                    // matches the "leaf chains to one of the
-                    // anchors" semantics we want for TLCP.
-                    //
+                // Wire layout mirrors the connector's `Certificate`
+                // emit: entry 0 = sign leaf, entry 1 = enc leaf,
+                // entries 2.. = intermediate CA certificates (chain
+                // material, NOT leaves). Each leaf is walked through
+                // the sent intermediates toward the configured
+                // anchors; extra CA entries are never re-validated
+                // as independent leaves.
+                let chain_material: Vec<Vec<u8>> = client_certs.iter().skip(2).cloned().collect();
+                let leaf_count = client_certs.len().min(2);
+                for (idx, leaf_der) in client_certs.iter().take(leaf_count).enumerate() {
+                    let chain: Vec<Vec<u8>> = std::iter::once(leaf_der.clone())
+                        .chain(chain_material.iter().cloned())
+                        .collect();
                     // For client-side sign-cert validation we pass
                     // CertRole::TlcClient (EKU=clientAuth, KU=
-                    // digitalSignature required). The enc cert
-                    // gets role=None because TLCP's enc cert KU/EKU
-                    // is intentionally permissive per
-                    // GB/T 38636-2020 §6.4.6.1.2 b).
+                    // digitalSignature required). The enc cert gets
+                    // CertRole::TlcEncClient, which enforces the
+                    // enc-cert KU rule from GB/T 38636-2020
+                    // §6.4.6.1.2 b) (when KU is present it must assert
+                    // keyAgreement / keyEncipherment; a cert with no KU
+                    // stays accepted).
                     let role = if idx == 0 {
                         Some(gm_crypto::x509::verify::CertRole::TlcClient)
                     } else {
-                        None
+                        Some(gm_crypto::x509::verify::CertRole::TlcEncClient)
                     };
                     gm_crypto::x509::verify::verify_against_anchors_with_distid_policy(
                         &chain,
@@ -4351,30 +4558,51 @@ impl TlcpAcceptor {
                             idx, e
                         ))
                     })?;
-                    // Revocation check against the configured CRLs
-                    // (only runs when client_crls is non-empty).
-                    if !self.client_crls.is_empty() {
-                        // Build [leaf, ...anchors] so the CRL can
-                        // find its issuer cert in the chain (same
-                        // approach as the connector's server-side
-                        // CRL check).
-                        let mut chain_for_crl = Vec::with_capacity(1 + anchors.len());
-                        chain_for_crl.push(OwnedCert::from_pem_or_der(leaf_der));
+                    // CRL coverage / revocation for this client leaf
+                    // chain (two independent gates, mirroring the
+                    // connector's server-side CRL check):
+                    //   - `ensure_crl_coverage` (only when `strict_crl`)
+                    //   - `check_revocations` (only when CRLs supplied)
+                    if self.strict_crl || !self.client_crls.is_empty() {
+                        // Verified leaf chain (leaf + sent
+                        // intermediates) plus the configured anchors,
+                        // so the CRL can find its issuer cert in the
+                        // chain (same approach as the connector's
+                        // server-side CRL check).
+                        let mut chain_for_crl: Vec<OwnedCert> = chain
+                            .iter()
+                            .map(|c| OwnedCert::from_pem_or_der(c))
+                            .collect();
                         for a in anchors {
                             chain_for_crl.push(OwnedCert::from_pem_or_der(a));
                         }
-                        gm_crypto::x509::verify::check_revocations(
-                            &chain_for_crl,
-                            &self.client_crls,
-                            now,
-                        )
-                        .map_err(|e| {
-                            TlcpError::HandshakeFailed(format!(
-                                "client cert chain entry {} revocation \
-                                 check failed: {}",
-                                idx, e
-                            ))
-                        })?;
+                        if self.strict_crl {
+                            gm_crypto::x509::verify::ensure_crl_coverage(
+                                &chain_for_crl,
+                                &self.client_crls,
+                            )
+                            .map_err(|e| {
+                                TlcpError::HandshakeFailed(format!(
+                                    "client cert chain entry {} strict-CRL \
+                                     coverage failed: {}",
+                                    idx, e
+                                ))
+                            })?;
+                        }
+                        if !self.client_crls.is_empty() {
+                            gm_crypto::x509::verify::check_revocations(
+                                &chain_for_crl,
+                                &self.client_crls,
+                                now,
+                            )
+                            .map_err(|e| {
+                                TlcpError::HandshakeFailed(format!(
+                                    "client cert chain entry {} revocation \
+                                     check failed: {}",
+                                    idx, e
+                                ))
+                            })?;
+                        }
                     }
                 }
             } else if !client_certs.is_empty() {

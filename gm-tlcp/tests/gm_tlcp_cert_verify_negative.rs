@@ -1314,3 +1314,180 @@ async fn j05_revoked_client_sign_cert_rejected() {
         combined
     );
 }
+
+// ---------------------------------------------------------------------------
+// j06 / j07 / j08 — strict-CRL issuer-coverage mode.
+//
+// `with_strict_crl(true)` adds a *coverage* gate on top of the existing
+// per-CRL revocation scan: every non-self-signed cert in the verified
+// chain must have an issuer CRL present. Default (`false`) keeps the
+// j03 "no CRL configured = nothing enforced" behaviour.
+// ---------------------------------------------------------------------------
+
+/// Build a standard ECDHE mTLS acceptor with client anchors for the
+/// client-side strict-CRL test, applying `extra` last.
+fn strict_client_acceptor(
+    certs: &GmcaCerts,
+    extra: impl FnOnce(TlcpAcceptor) -> TlcpAcceptor,
+) -> TlcpAcceptor {
+    let sign_kp =
+        Sm2KeyPair::from_private_key_pem(&certs.server_sign_key_pem).expect("server sign key");
+    let enc_kp =
+        Sm2KeyPair::from_private_key_pem(&certs.server_enc_key_pem).expect("server enc key");
+    extra(
+        TlcpAcceptor::new()
+            .with_dual_certs(
+                certs.server_sign_cert_der.clone(),
+                certs.server_enc_cert_der.clone(),
+                sign_kp,
+                enc_kp,
+            )
+            .with_client_ca_chain(vec![certs.ca_cert_der.clone()]),
+    )
+}
+
+/// j06 — strict-CRL on the connector with NO CRLs configured must fail
+/// closed: the server's sign/enc leaves are non-self-signed but have no
+/// covering issuer CRL. The default (non-strict) path would accept.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn j06_strict_crl_server_no_crl_fails_closed() {
+    let tmp = std::env::temp_dir().join(format!("gm-tlcp-j06-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    let certs = generate_gmca_test_certs(&tmp).expect("hierarchy");
+    let sign_kp =
+        Sm2KeyPair::from_private_key_pem(&certs.server_sign_key_pem).expect("server sign key");
+    let enc_kp =
+        Sm2KeyPair::from_private_key_pem(&certs.server_enc_key_pem).expect("server enc key");
+    let acceptor = TlcpAcceptor::new().with_dual_certs(
+        certs.server_sign_cert_der.clone(),
+        certs.server_enc_cert_der.clone(),
+        sign_kp,
+        enc_kp,
+    );
+
+    let connector = TlcpConnector::new()
+        .with_cipher_suites(vec![[0xE0, 0x51]])
+        .with_server_sign_key(
+            certs.server_sign_pub_65.clone(),
+            support::gmca_cert_setup::DEFAULT_DISTID.to_string(),
+        )
+        .with_server_ca_chain(vec![certs.ca_cert_der.clone()])
+        .with_strict_crl(true)
+        // Deliberately NO `with_server_crls` call → coverage cannot be
+        // satisfied → fail closed.
+        .with_client_certs(
+            vec![
+                certs.client_sign_cert_der.clone(),
+                certs.client_enc_cert_der.clone(),
+            ],
+            certs.client_sign_key_pem.clone(),
+            Some(certs.client_enc_key_pem.clone()),
+            None,
+        );
+
+    let (server_res, client_res) = attempt_handshake(acceptor, connector).await;
+    let combined = format!("{:?} {:?}", server_res, client_res);
+    assert!(
+        client_res.is_err(),
+        "strict-CRL with no covering CRL must reject; got: {}",
+        combined
+    );
+    assert!(
+        combined.contains("strict-CRL coverage"),
+        "rejection must mention strict-CRL coverage; got: {}",
+        combined
+    );
+}
+
+/// j07 — strict-CRL with a covering (empty) CRL for the issuing CA must
+/// SUCCEED: coverage is satisfied for both sign and enc leaves (same CA)
+/// and no serial is revoked. Guards against a strict-mode false-positive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn j07_strict_crl_server_covered_by_crl_succeeds() {
+    let tmp = std::env::temp_dir().join(format!("gm-tlcp-j07-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    let (certs, ca_signer) = generate_gmca_with_signer(&tmp).expect("hierarchy + signer");
+    let empty_crl = generate_test_crl(&ca_signer, &[]).expect("empty covering CRL");
+
+    let sign_kp =
+        Sm2KeyPair::from_private_key_pem(&certs.server_sign_key_pem).expect("server sign key");
+    let enc_kp =
+        Sm2KeyPair::from_private_key_pem(&certs.server_enc_key_pem).expect("server enc key");
+    let acceptor = TlcpAcceptor::new().with_dual_certs(
+        certs.server_sign_cert_der.clone(),
+        certs.server_enc_cert_der.clone(),
+        sign_kp,
+        enc_kp,
+    );
+
+    let connector = TlcpConnector::new()
+        .with_cipher_suites(vec![[0xE0, 0x51]])
+        .with_server_sign_key(
+            certs.server_sign_pub_65.clone(),
+            support::gmca_cert_setup::DEFAULT_DISTID.to_string(),
+        )
+        .with_server_ca_chain(vec![certs.ca_cert_der.clone()])
+        .with_strict_crl(true)
+        .with_server_crls(vec![empty_crl])
+        .with_client_certs(
+            vec![
+                certs.client_sign_cert_der.clone(),
+                certs.client_enc_cert_der.clone(),
+            ],
+            certs.client_sign_key_pem.clone(),
+            Some(certs.client_enc_key_pem.clone()),
+            None,
+        );
+
+    let (server_res, client_res) = attempt_handshake(acceptor, connector).await;
+    assert!(
+        client_res.is_ok(),
+        "strict-CRL with a covering CRL must accept; got server={:?} client={:?}",
+        server_res,
+        client_res
+    );
+}
+
+/// j08 — the acceptor-side strict-CRL gate: with client anchors +
+/// `with_strict_crl(true)` but no client CRLs, the server must fail the
+/// handshake once the client presents its (valid) chain, because the
+/// client sign/enc leaves have no covering issuer CRL.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn j08_strict_crl_client_no_crl_fails_closed() {
+    let tmp = std::env::temp_dir().join(format!("gm-tlcp-j08-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    let certs = generate_gmca_test_certs(&tmp).expect("hierarchy");
+    let acceptor = strict_client_acceptor(&certs, |a| a.with_strict_crl(true)); // no with_client_crls
+
+    let connector = TlcpConnector::new()
+        .with_cipher_suites(vec![[0xE0, 0x51]])
+        .with_server_sign_key(
+            certs.server_sign_pub_65.clone(),
+            support::gmca_cert_setup::DEFAULT_DISTID.to_string(),
+        )
+        .with_client_certs(
+            vec![
+                certs.client_sign_cert_der.clone(),
+                certs.client_enc_cert_der.clone(),
+            ],
+            certs.client_sign_key_pem.clone(),
+            Some(certs.client_enc_key_pem.clone()),
+            None,
+        );
+
+    let (server_res, client_res) = attempt_handshake(acceptor, connector).await;
+    let combined = format!("{:?} {:?}", server_res, client_res);
+    assert!(
+        server_res.is_err(),
+        "acceptor strict-CRL with no covering CRL must reject; got: {}",
+        combined
+    );
+    assert!(
+        combined.contains("strict-CRL coverage"),
+        "rejection must mention strict-CRL coverage; got: {}",
+        combined
+    );
+}
