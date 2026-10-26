@@ -128,13 +128,22 @@ TLCP SM2/SM9 套件要求每个对端拥有**两张独立的 SM2 证书**：
 
 ## 证书校验与 PKI 策略 (0.6.4+)
 
-从 `gm-tlcp 0.6.4` 起，证书链校验**默认为关闭**以保持与 0.6.x 兼容， 但提供两个**选择加入** (opt-in) 的构建器：
+从 `gm-tlcp 0.6.4` 起，证书链校验**默认为关闭**以保持与 0.6.x 兼容， 但提供三个**选择加入** (opt-in) 的构建器：
 
 | 方法 | 作用 |
 |------|------|
 | `TlcpConnector::with_server_ca_chain(Vec<Vec<u8>>)` | 配置服务端证书链**信任锚**。握手时验证服务端的 sign + enc 两张叶子证书都直接或间接锚定到其中一个。 |
 | `TlcpConnector::with_server_name(&str)` | 配置预期的服务端主机名。握手时验证服务端 sign 证书的 **SAN / CN** 与此字符串不区分大小写相等。 |
 | `TlcpAcceptor::with_client_ca_chain(Vec<Vec<u8>>)` | 配置客户端证书链**信任锚**。TLS 双向认证下要求客户端也提供可验证的叶子证书。 |
+
+自 `0.8.0` 起，另有**中间 CA 证书上送**构建器（与上面的信任锚相互独立）：
+
+| 方法 | 作用 |
+|------|------|
+| `TlcpAcceptor::with_sign_cert_chain(Vec<Vec<u8>>)` | 配置服务端 **sign** 证书的中间 CA 证书（DER，按 leaf-first 顺序，不含叶子本身）。握手时随 `Certificate` 消息一并发送，使只信任根 CA 的对端也能构建并校验完整链路。 |
+| `TlcpAcceptor::with_enc_cert_chain(Vec<Vec<u8>>)` | 配置服务端 **enc** 证书的中间 CA 证书（DER，按 leaf-first 顺序，不含叶子本身）。语义同上。 |
+
+对端（`TlcpConnector` / `TlcpAcceptor`）会自动把收到的中间证书并入链构建与 CRL issuer 查找。
 
 这些设置**彼此独立**：仅配主机名导致上一份报告中的 T3 / T4 问题中的部分检查仍由证书本身的 `CertificateVerify` 负责。主机名检查可以**独立于 PKI 信任锚**运行。
 

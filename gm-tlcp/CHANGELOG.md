@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-26
+
+### Changed
+
+- The `gm-crypto` dependency requirement moves from `^0.3.12` to
+  `^0.3.13` (still a caret range inside `0.3.x`). `gm-crypto 0.3.13` is
+  a documentation-only release, so no code change is required on the
+  consumer side.
+
+### Documentation
+
+- The `0.8.0` release notes are filed under their own version heading
+  instead of `[Unreleased]`, and every release now records the sibling
+  crate version it was tested against — as the README promises.
+
+### Tested against
+
+- `gm-crypto 0.3.13` — the sibling-crate version this release was built
+  and tested against (the dependency requirement is `^0.3.13`).
+
+## [0.8.0] - 2026-10-26
+
+### Tested against
+
+- `gm-crypto 0.3.12` — the sibling-crate version this release was built
+  and tested against (the dependency requirement is `^0.3.12`).
+
 ### Added
 
 - **Intermediate CA certificate chain transmission & verification.**
@@ -45,6 +72,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error; callers who genuinely want the unauthenticated legacy
   behaviour must invoke `connect_tlcp()` directly so the security-
   critical choice is visible at the call site.
+
+## [0.7.4] - 2026-09-26
 
 ### Added
 

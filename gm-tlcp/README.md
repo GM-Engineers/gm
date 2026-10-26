@@ -84,11 +84,11 @@ TLCP（Transport Layer Cryptographic Protocol，传输层密码协议）是 GB/T
 不向后兼容的 API 变更，即使 MINOR（`0.y`）号变动亦然。因此：
 
 - **锁定精确版本采纳。** 生产环境请在 `Cargo.toml` 用
-  `gm-tlcp = "=0.8.0"`（或至少 `~0.8`）而非宽松的 `0.8`，
+  `gm-tlcp = "=0.8.1"`（或至少 `~0.8`）而非宽松的 `0.8`，
   以免一次 MINOR 升级静默引入 breaking change。
 - **每个发布审计依赖版本。** 自 `0.8.0` 起，每次发布的 CHANGELOG 会
   记录该发布实际测试通过的兄弟 crate 版本（当前仅 `gm-crypto`，如
-  `0.8.0` 对应 `gm-crypto 0.3.12`）。跨 crate 迁移请以该映射为准，不要
+  `0.8.1` 对应 `gm-crypto 0.3.13`）。跨 crate 迁移请以该 映射为准，不要
   假设任意 `0.3.x` 都可与任意 `gm-tlcp 0.y` 搭配。
 - **行为级 breaking 变更在 CHANGELOG 以 `Breaking:` 显式标注。** 例如
   `0.8.0` 中 `TlcpConnector::connect()` 不再静默回退到无服务端验证的

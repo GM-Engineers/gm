@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.13] - 2026-10-26
+
+### Documentation
+
+- The `0.3.12` release notes are filed under their own version heading
+  instead of `[Unreleased]`, so the changelog that ships inside the
+  crate matches what was actually released.
+
+### Tested against
+
+- `gm-der 0.1.0` — the sibling-crate version this release was built and
+  tested against (the dependency requirement is `^0.1.0`).
+
+## [0.3.12] - 2026-10-26
+
+### Tested against
+
+- `gm-der 0.1.0` — the sibling-crate version this release was built and
+  tested against (the dependency requirement is `^0.1.0`).
+
 ### Added
 
 - Recognize the GM/T 0024 TLCP certificate extension OIDs

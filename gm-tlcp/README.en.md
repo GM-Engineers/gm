@@ -53,13 +53,13 @@ contain breaking API changes even when only the MINOR (`0.y`) component
 moves. Therefore:
 
 - **Pin an exact version.** In production use
-  `gm-tlcp = "=0.8.0"` (or at least `~0.8`) in your `Cargo.toml` rather
+  `gm-tlcp = "=0.8.1"` (or at least `~0.8`) in your `Cargo.toml` rather
   than a permissive `0.8`, so a MINOR bump cannot silently pull in a
   breaking change.
 - **Per-release dependency audit.** From `0.8.0` each release's
   CHANGELOG records the sibling-crate versions it was actually tested
-  against (currently just `gm-crypto`, e.g. `0.8.0` ↔ `gm-crypto
-  0.3.12`). Migrate across crates using that mapping; do not assume any
+  against (currently just `gm-crypto`, e.g. `0.8.1` ↔ `gm-crypto
+  0.3.13`). Migrate across crates using that mapping; do not assume any
   `0.3.x` pairs with any `gm-tlcp 0.y`.
 - **Behavioural breaking changes are flagged `Breaking:` in the
   CHANGELOG.** For example, in `0.8.0` `TlcpConnector::connect()` no

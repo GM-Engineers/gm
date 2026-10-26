@@ -137,6 +137,15 @@ Starting with `gm-tlcp 0.6.4`, certificate chain validation is **off by default*
 | `TlcpConnector::with_server_name(&str)` | Configure the expected server hostname. Handshake verifies the server's sign certificate **SAN / CN** equals this string (case-insensitive). |
 | `TlcpAcceptor::with_client_ca_chain(Vec<Vec<u8>>)` | Configure **trust anchors** for the client's certificate chain. Mutual-auth setups require the client to provide a leaf anchored to one of these. |
 
+Since `0.8.0` there are additional **intermediate-CA chain-transmission** builders (independent of the trust anchors above):
+
+| Method | Effect |
+|--------|--------|
+| `TlcpAcceptor::with_sign_cert_chain(Vec<Vec<u8>>)` | Configure the intermediate CA certificates for the server's **signing** certificate (DER, leaf-first, excluding the leaf). They are sent in the `Certificate` handshake message so that root-only peers can build and verify the full chain. |
+| `TlcpAcceptor::with_enc_cert_chain(Vec<Vec<u8>>)` | Configure the intermediate CA certificates for the server's **encryption** certificate (DER, leaf-first, excluding the leaf). Same semantics. |
+
+Peers (`TlcpConnector` / `TlcpAcceptor`) automatically fold the received intermediates into chain building and the CRL issuer lookup.
+
 These settings are **independent**: configuring only hostname (no anchors) still gets hostname validation. Operators who configure only PKI anchors (no hostname) still get PKI validation. The connector and acceptor enforce their own half independently.
 
 ### Loading anchors from a PEM bundle

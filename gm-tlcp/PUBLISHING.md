@@ -127,7 +127,7 @@ gm-tlcp follows SemVer 2.0:
 - **PATCH** bump for bug fixes, performance work, internal refactors
   with no public surface change.
 
-The current version is `0.1.0`. We will not push to 1.0 until:
+The current version is `0.8.1`. We will not push to 1.0 until:
 
 1. All four TLCP cipher suites are interop-tested against at least
    two independent implementations (GmSSL ✅, Tongsuo blocked on
