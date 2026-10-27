@@ -11,9 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
-- The `0.3.12` release notes are filed under their own version heading
-  instead of `[Unreleased]`, so the changelog that ships inside the
-  crate matches what was actually released.
+- Documentation-only release. No API or behaviour changes.
 
 ### Tested against
 
