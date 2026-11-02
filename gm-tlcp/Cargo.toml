@@ -62,7 +62,7 @@ time = { version = "0.3", features = ["std", "parsing", "formatting", "macros"] 
 # Underlying EC primitive for the TLCP PMS KDF (x_hat transform,
 # ProjectivePoint arithmetic). We re-export gm-crypto's transitive
 # dep here to keep the pms module self-contained.
-elliptic-curve = "0.13"
+elliptic-curve = "0.14"
 sm2 = { version = "0.13", features = ["arithmetic"] }
 
 # RSA primitive for the static-key RSA suites (E019/E01C/E059/E05A,
