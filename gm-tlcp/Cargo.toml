@@ -63,7 +63,7 @@ time = { version = "0.3", features = ["std", "parsing", "formatting", "macros"] 
 # ProjectivePoint arithmetic). We re-export gm-crypto's transitive
 # dep here to keep the pms module self-contained.
 elliptic-curve = "0.13"
-sm2 = { version = "0.13", features = ["arithmetic"] }
+sm2 = { version = "0.14", features = ["arithmetic"] }
 
 # RSA primitive for the static-key RSA suites (E019/E01C/E059/E05A,
 # R-5). RSA is NOT a 国密 algorithm so we pull RustCrypto's `rsa`
